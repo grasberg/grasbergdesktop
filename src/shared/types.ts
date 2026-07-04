@@ -799,6 +799,19 @@ export interface MemoryPatch {
 }
 
 // ---------------------------------------------------------------------------
+// Backup (export/import of settings, memories and skills)
+// ---------------------------------------------------------------------------
+
+export interface BackupSummary {
+  /** Number of settings keys applied from the backup. */
+  settingsApplied: number
+  memoriesImported: number
+  skillsImported: number
+  /** Malformed memory/skill entries that were skipped. */
+  skippedItems: number
+}
+
+// ---------------------------------------------------------------------------
 // App info
 // ---------------------------------------------------------------------------
 

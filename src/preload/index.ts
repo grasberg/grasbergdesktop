@@ -128,6 +128,10 @@ const api: UldApi = {
     delete: (id) => ipcRenderer.invoke(CHANNELS.skillsDelete, id),
     importFolder: (path) => ipcRenderer.invoke(CHANNELS.skillsImportFolder, path),
   },
+  backup: {
+    export: () => ipcRenderer.invoke(CHANNELS.backupExport),
+    import: () => ipcRenderer.invoke(CHANNELS.backupImport),
+  },
   mcp: {
     list: () => ipcRenderer.invoke(CHANNELS.mcpList),
     create: (input) => ipcRenderer.invoke(CHANNELS.mcpCreate, input),

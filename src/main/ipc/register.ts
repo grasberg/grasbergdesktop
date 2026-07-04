@@ -49,8 +49,9 @@ import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/export'
 import { readSkillsFromFolder } from '../services/skills'
+import { applyBackup, buildBackup } from '../services/backup'
 import { readAttachment, readStoredImage } from './attachments'
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 
 export interface RegisterIpcDeps {
   db: AppDatabase
@@ -782,6 +783,46 @@ export function registerIpc(deps: RegisterIpcDeps): void {
         sourcePath: folder,
       })
     )
+  })
+
+  // -- backup (settings + memories + skills) ------------------------------------
+
+  register(CHANNELS.backupExport, async () => {
+    const date = new Date().toISOString().slice(0, 10)
+    const options = {
+      defaultPath: `grasberg-backup-${date}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    }
+    const parent = dialogParent()
+    const result = parent
+      ? await dialog.showSaveDialog(parent, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await writeFile(result.filePath, JSON.stringify(buildBackup(db), null, 2), 'utf8')
+    return { canceled: false, path: result.filePath }
+  })
+
+  register(CHANNELS.backupImport, async () => {
+    const options = {
+      properties: ['openFile'] as Array<'openFile'>,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    }
+    const parent = dialogParent()
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+    let raw: unknown
+    try {
+      raw = JSON.parse(await readFile(result.filePaths[0], 'utf8'))
+    } catch {
+      throw invalid('The selected file is not valid JSON.')
+    }
+    try {
+      return { canceled: false, ...applyBackup(db, raw) }
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Could not import the backup.')
+    }
   })
 
   // -- MCP servers ------------------------------------------------------------

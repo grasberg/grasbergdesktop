@@ -35,6 +35,7 @@ import type {
   Memory,
   MemoryInput,
   MemoryPatch,
+  BackupSummary,
   SetTelegramBridgeInput,
   Skill,
   SkillInput,
@@ -169,6 +170,10 @@ export const CHANNELS = {
   skillsUpdate: 'skills:update',
   skillsDelete: 'skills:delete',
   skillsImportFolder: 'skills:importFolder',
+
+  // backup (settings + memories + skills)
+  backupExport: 'backup:export',
+  backupImport: 'backup:import',
 
   // MCP servers
   mcpList: 'mcp:list',
@@ -421,6 +426,12 @@ export interface UldApi {
     delete(id: string): Promise<IpcResult<void>>
     /** Imports every skill in a folder (skill / collection / plugin). */
     importFolder(path: string): Promise<IpcResult<Skill[]>>
+  }
+  backup: {
+    /** Save-dialog export of settings + memories + skills (never secrets). */
+    export(): Promise<IpcResult<{ canceled: true } | { canceled: false; path: string }>>
+    /** Open-dialog import of a backup file; upserts, never duplicates. */
+    import(): Promise<IpcResult<{ canceled: true } | ({ canceled: false } & BackupSummary)>>
   }
   mcp: {
     list(): Promise<IpcResult<McpServerConfig[]>>

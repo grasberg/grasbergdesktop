@@ -1,7 +1,76 @@
+import { useState } from 'react'
 import type { AppSettings } from '@shared/types'
 import { useSettingsStore } from '@/stores/settings'
+import { useMemoriesStore } from '@/stores/memories'
+import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
+import { toNormalized, unwrap } from '@/api/uld'
 import { errorMessage, Switch } from './ProvidersTab'
+
+function BackupSection() {
+  const toast = useUiStore((s) => s.toast)
+  const [busy, setBusy] = useState(false)
+
+  const runExport = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const result = await unwrap(window.uld.backup.export())
+      if (!result.canceled) toast(`Backup saved to ${result.path}`, 'success')
+    } catch (e) {
+      toast(toNormalized(e).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runImport = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const result = await unwrap(window.uld.backup.import())
+      if (result.canceled) return
+      const parts = [
+        `${result.memoriesImported} memories`,
+        `${result.skillsImported} skills`,
+        `${result.settingsApplied} settings`,
+      ]
+      const skipped = result.skippedItems > 0 ? ` (${result.skippedItems} entries skipped)` : ''
+      toast(`Imported ${parts.join(', ')}${skipped}.`, 'success')
+      // Refresh every store the import may have touched.
+      await Promise.all([
+        useSettingsStore.getState().load(),
+        useMemoriesStore.getState().load(),
+        useSkillsStore.getState().load(),
+      ])
+    } catch (e) {
+      toast(toNormalized(e).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="toggle-row">
+        <div className="toggle-row-text">
+          <span className="toggle-row-title">Backup</span>
+          <span className="field-hint">
+            Export or import your settings, memories and skills as a JSON file. API keys and other
+            secrets are never included. Importing merges: existing entries with the same name are
+            updated, nothing is duplicated.
+          </span>
+        </div>
+        <div className="prompt-form-actions">
+          <button type="button" className="btn" disabled={busy} onClick={() => void runExport()}>
+            Export…
+          </button>
+          <button type="button" className="btn" disabled={busy} onClick={() => void runImport()}>
+            Import…
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
 
 export default function PrivacyTab() {
   const settings = useSettingsStore((s) => s.settings)
@@ -58,6 +127,8 @@ export default function PrivacyTab() {
           label="Warn before sending files"
         />
       </div>
+
+      <BackupSection />
     </section>
   )
 }
