@@ -1,0 +1,80 @@
+/**
+ * Approximate model pricing, used only to show a rough per-message cost
+ * estimate next to token usage. Prices change often and vary by region and
+ * plan — treat every number here as a dated approximation, not a bill.
+ *
+ * Values are USD per 1,000,000 tokens. Edit this table to match your provider's
+ * current pricing. A model with no entry simply shows no cost (graceful
+ * unknown), and custom / OpenAI-compatible providers are intentionally absent.
+ *
+ * Last reviewed: 2026-07 (approximate list prices; verify with each provider).
+ */
+
+import type { ProviderType, TokenUsage } from './types'
+
+export const PRICING_CURRENCY = 'USD'
+export const PRICING_DISCLAIMER =
+  'Approximate estimate — provider prices change by region and plan; verify before relying on it.'
+
+export interface ModelPricing {
+  /** USD per 1M input (prompt) tokens. */
+  inputPerMTok: number
+  /** USD per 1M output (completion) tokens. */
+  outputPerMTok: number
+  /**
+   * USD per 1M input tokens that hit the provider's prompt cache. Present for
+   * reference; not applied in the estimate because TokenUsage does not yet
+   * report a cache-hit token split.
+   */
+  cachedInputPerMTok?: number
+}
+
+/** Keyed by provider type, then by model id. */
+export const MODEL_PRICING: Record<ProviderType, Record<string, ModelPricing>> = {
+  deepseek: {
+    // DeepSeek publishes these directly; cache-hit input is much cheaper.
+    'deepseek-chat': { inputPerMTok: 0.27, outputPerMTok: 1.1, cachedInputPerMTok: 0.07 },
+    'deepseek-reasoner': { inputPerMTok: 0.55, outputPerMTok: 2.19, cachedInputPerMTok: 0.14 },
+  },
+  zhipu: {
+    // GLM / Zhipu list prices vary (and are often quoted in RMB); approximate.
+    'glm-4.6': { inputPerMTok: 0.6, outputPerMTok: 2.0 },
+    'glm-4.5': { inputPerMTok: 0.6, outputPerMTok: 2.2 },
+    'glm-4.5-air': { inputPerMTok: 0.2, outputPerMTok: 1.1 },
+    'glm-4.5-flash': { inputPerMTok: 0, outputPerMTok: 0 }, // free tier
+    'glm-4.5v': { inputPerMTok: 0.6, outputPerMTok: 1.8 },
+    'glm-4-plus': { inputPerMTok: 0.7, outputPerMTok: 0.7 },
+  },
+  minimax: {
+    'MiniMax-M2': { inputPerMTok: 0.3, outputPerMTok: 1.2 },
+    'MiniMax-M1': { inputPerMTok: 0.4, outputPerMTok: 2.2 },
+    'MiniMax-Text-01': { inputPerMTok: 0.2, outputPerMTok: 1.1 },
+  },
+  // Custom endpoints have no knowable price — always "unknown".
+  'openai-compatible': {},
+}
+
+export function findPricing(type: ProviderType, modelId: string): ModelPricing | undefined {
+  return MODEL_PRICING[type]?.[modelId]
+}
+
+/**
+ * Estimated USD cost of one message from its usage and a pricing entry.
+ * Returns undefined when there is not enough information to estimate.
+ */
+export function estimateCost(usage: TokenUsage, pricing: ModelPricing): number | undefined {
+  const prompt = usage.promptTokens
+  const completion = usage.completionTokens
+  if (prompt == null && completion == null) return undefined
+  const input = ((prompt ?? 0) / 1_000_000) * pricing.inputPerMTok
+  const output = ((completion ?? 0) / 1_000_000) * pricing.outputPerMTok
+  return input + output
+}
+
+/** Compact human-readable cost, e.g. "$0.0012" or "<$0.0001" or "free". */
+export function formatCost(cost: number): string {
+  if (cost <= 0) return 'free'
+  if (cost < 0.0001) return '<$0.0001'
+  if (cost < 1) return `$${cost.toFixed(4)}`
+  return `$${cost.toFixed(2)}`
+}

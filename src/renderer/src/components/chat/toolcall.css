@@ -1,0 +1,114 @@
+/* ==========================================================================
+   Tool-call cards inside assistant messages (ToolCallCard.tsx).
+   Owned by the tool-system integration; chat.css is untouched.
+   ========================================================================== */
+
+.msg-toolcalls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tool-call-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 7px 10px;
+  font-size: 0.8rem;
+}
+
+.tool-call-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-call-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tool-call-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+
+/* Status chips */
+
+.tool-call-chip {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tool-call-chip-proposed {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.tool-call-chip-approved {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.tool-call-chip-done {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.tool-call-chip-denied,
+.tool-call-chip-error {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Collapsible arguments / result */
+
+.tool-call-details {
+  margin-top: 5px;
+}
+
+.tool-call-summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  user-select: none;
+}
+
+.tool-call-summary:hover {
+  color: var(--text);
+}
+
+.tool-call-pre {
+  margin: 5px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-call-args {
+  font-family: var(--font-mono);
+}

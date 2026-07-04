@@ -1,0 +1,628 @@
+/*
+ * Code mode styles: three-pane layout (tree | chat | changes), file tree,
+ * file preview modal, proposed-changes panel and diff rendering.
+ * All colors derive from theme.css tokens, so both themes work automatically;
+ * diff tints get explicit per-theme strengths at the bottom.
+ */
+
+/* ------------------------------------------------------------ layout */
+
+.code-view {
+  position: relative;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 320px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.code-view.code-view-collapsed {
+  grid-template-columns: 240px minmax(0, 1fr) 36px;
+}
+
+.code-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.code-pane-left {
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.code-pane-right {
+  position: relative;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+/* Two panes under 1100px: the open changes panel floats over the chat. */
+@media (max-width: 1100px) {
+  .code-view,
+  .code-view.code-view-collapsed {
+    grid-template-columns: 200px minmax(0, 1fr) 36px;
+  }
+
+  .code-view:not(.code-view-collapsed) {
+    grid-template-columns: 200px minmax(0, 1fr) 0;
+  }
+
+  .code-view:not(.code-view-collapsed) .code-pane-right {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 320px;
+    z-index: 40;
+    box-shadow: var(--shadow);
+  }
+}
+
+/* ------------------------------------------------------- grant panel */
+
+.code-grant {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.code-grant-icon {
+  color: var(--accent);
+}
+
+.code-grant-copy {
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.code-grant-hint {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+/* ---------------------------------------------------- project header */
+
+.code-project-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.code-project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.code-project-change {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 0.74rem;
+}
+
+/* ------------------------------------------------------------- tree */
+
+.code-tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 4px;
+}
+
+.code-tree-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.code-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.code-tree-row:hover {
+  background: var(--bg-hover);
+}
+
+.code-tree-file.selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.code-tree-chevron {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 12px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  transition: transform 120ms ease;
+}
+
+.code-tree-chevron.open {
+  transform: rotate(90deg);
+}
+
+.code-tree-dir .code-tree-name {
+  font-weight: 550;
+}
+
+.code-tree-check {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.code-tree-open {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.code-tree-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-tree-size {
+  flex-shrink: 0;
+  padding: 0 6px;
+  font-size: 0.66rem;
+}
+
+.code-tree-empty,
+.code-tree-note {
+  padding: 12px 10px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.code-tree-note {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+}
+
+/* --------------------------------------------- context footer (left) */
+
+.code-context {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.code-context-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.code-context-openform {
+  width: 100%;
+}
+
+.code-context-form,
+.code-context-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.code-context-textarea {
+  min-height: 60px;
+  font-size: 0.8rem;
+}
+
+.code-context-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.code-context-confirm {
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.code-context-confirm-text {
+  font-size: 0.76rem;
+}
+
+.code-context-confirm-list {
+  margin: 0;
+  padding: 0 0 0 16px;
+  max-height: 110px;
+  overflow: auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.code-context-confirm-list li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------- changes panel */
+
+.code-changes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.code-changes-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 12px 8px;
+}
+
+.code-changes-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.code-changes-loading {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.code-changes-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 10px 12px;
+}
+
+.code-changes-empty {
+  padding: 14px 4px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.code-changes-collapse {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  z-index: 2;
+}
+
+.code-changes-rail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.code-changes-rail:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.code-changes-rail-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.code-changes-rail-label {
+  writing-mode: vertical-rl;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+}
+
+.code-changes-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.code-changes-history-toggle:hover {
+  color: var(--text);
+}
+
+.code-changes-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ------------------------------------------------------ change item */
+
+.code-change {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.code-change-past {
+  opacity: 0.75;
+}
+
+.code-change-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.code-change-chevron {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 12px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  transition: transform 120ms ease;
+}
+
+.code-change-chevron.open {
+  transform: rotate(90deg);
+}
+
+.code-change-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+}
+
+.code-change-type-create {
+  border-color: color-mix(in srgb, var(--success) 60%, var(--border));
+  color: var(--success);
+}
+
+.code-change-type-edit {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  color: var(--accent);
+}
+
+.code-change-type-delete {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+  color: var(--danger);
+}
+
+.code-change-nodiff {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.code-change-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.code-change-btn {
+  padding: 4px 10px;
+  font-size: 0.76rem;
+}
+
+.code-change-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.code-change-confirm-text {
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------- diff view */
+
+.diff-view {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.diff-pre {
+  margin: 0;
+  padding: 8px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.diff-line-add {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-text);
+}
+
+.diff-line-del {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-text);
+}
+
+.diff-line-hunk {
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.diff-line-meta {
+  color: var(--text-muted);
+}
+
+/* Per-theme diff tints (dark fallback mirrors [data-theme='dark']). */
+:root {
+  --diff-add-bg: color-mix(in srgb, var(--success) 14%, transparent);
+  --diff-add-text: color-mix(in srgb, var(--success) 65%, var(--text));
+  --diff-del-bg: color-mix(in srgb, var(--danger) 14%, transparent);
+  --diff-del-text: color-mix(in srgb, var(--danger) 65%, var(--text));
+}
+
+[data-theme='dark'] {
+  --diff-add-bg: color-mix(in srgb, var(--success) 14%, transparent);
+  --diff-add-text: color-mix(in srgb, var(--success) 65%, var(--text));
+  --diff-del-bg: color-mix(in srgb, var(--danger) 14%, transparent);
+  --diff-del-text: color-mix(in srgb, var(--danger) 65%, var(--text));
+}
+
+[data-theme='light'] {
+  --diff-add-bg: color-mix(in srgb, var(--success) 10%, transparent);
+  --diff-add-text: color-mix(in srgb, var(--success) 80%, var(--text));
+  --diff-del-bg: color-mix(in srgb, var(--danger) 10%, transparent);
+  --diff-del-text: color-mix(in srgb, var(--danger) 80%, var(--text));
+}
+
+/* ------------------------------------------------------ file preview */
+
+.code-preview-modal {
+  max-width: 860px;
+  max-height: min(88vh, 820px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.code-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.code-preview-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.code-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.code-preview-truncated {
+  padding: 6px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: 0.76rem;
+}
+
+.code-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+.code-preview-pre {
+  margin: 0;
+  counter-reset: code-preview-line;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.code-preview-line {
+  display: block;
+  white-space: pre;
+}
+
+.code-preview-line::before {
+  counter-increment: code-preview-line;
+  content: counter(code-preview-line);
+  display: inline-block;
+  width: 3.2em;
+  margin-right: 12px;
+  color: var(--text-muted);
+  text-align: right;
+  user-select: none;
+}

@@ -1,0 +1,693 @@
+/**
+ * Registers every request/response IPC channel. Each handler validates its
+ * input, calls through to the service/repository layer, and always resolves
+ * to an IpcResult — errors are normalized, never thrown across the boundary.
+ */
+
+import { randomUUID } from 'node:crypto'
+import { BrowserWindow, app, dialog, ipcMain } from 'electron'
+import { z } from 'zod'
+import { CHANNELS, err, ok, type ChannelName, type PickFilesResult } from '@shared/ipc'
+import type { AppInfo, Attachment } from '@shared/types'
+import { PROVIDER_TYPES, PROVIDER_TYPE_LIST } from '@shared/catalog'
+import {
+  apiKeySchema,
+  chatParamsSchema,
+  customToolInputSchema,
+  customToolPatchSchema,
+  isAllowedHttpUrl,
+  mcpServerInputSchema,
+  mcpServerPatchSchema,
+  promptTemplateInputSchema,
+  promptTemplatePatchSchema,
+  providerConfigInputSchema,
+  providerConfigPatchSchema,
+  settingsPatchSchema,
+} from '@shared/schemas'
+import type { AppDatabase } from '../db/database'
+import type { ChatService } from '../services/chat-service'
+import type { CodeService } from '../code/code-service'
+import type { Keystore } from '../keys/keystore'
+import { customToolDbId, type ToolSystem } from '../tools'
+import type { McpManager } from '../tools/mcp/manager'
+import type { ApprovalBroker } from '../services/approval-broker'
+import { getAdapter } from '../providers/registry'
+import { ProviderError, toNormalizedError } from '../providers/errors'
+import { toJson, toMarkdown, exportFileBase } from '../services/export'
+import { readAttachment, readStoredImage } from './attachments'
+import { writeFile } from 'node:fs/promises'
+
+export interface RegisterIpcDeps {
+  db: AppDatabase
+  chatService: ChatService
+  codeService: CodeService
+  keystore: Keystore
+  toolSystem: ToolSystem
+  approvalBroker: ApprovalBroker
+  mcpManager: McpManager
+  /** Directory where image attachments are stored on disk. */
+  attachmentsDir: string
+  getWindows: () => BrowserWindow[]
+}
+
+const TEST_CONNECTION_TIMEOUT_MS = 15_000
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+function invalid(message: string): ProviderError {
+  return new ProviderError('invalid_request', message)
+}
+
+/** Zod issue messages never echo raw values for the schemas used here. */
+function parseInput<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
+  const result = schema.safeParse(value)
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((i) => (i.path.length > 0 ? `${i.path.join('.')}: ${i.message}` : i.message))
+      .join('; ')
+    throw invalid(detail || 'Invalid input.')
+  }
+  return result.data
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw invalid(`${label} is required.`)
+  }
+  return value
+}
+
+function requireBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw invalid(`${label} must be a boolean.`)
+  return value
+}
+
+// ---------------------------------------------------------------------------
+// Schemas without a shared counterpart (hand-rolled, minimal)
+// ---------------------------------------------------------------------------
+
+const conversationModeSchema = z.enum(['chat', 'cowork', 'code'])
+
+const convListSchema = z
+  .object({
+    mode: conversationModeSchema.optional(),
+    search: z.string().max(500).optional(),
+    limit: z.number().int().positive().max(1000).optional(),
+  })
+  .optional()
+
+const convCreateSchema = z.object({
+  mode: conversationModeSchema,
+  title: z.string().trim().min(1).max(200).optional(),
+  providerId: z.string().nullable().optional(),
+  modelId: z.string().nullable().optional(),
+  systemPrompt: z.string().max(100_000).nullable().optional(),
+  workspaceId: z.string().nullable().optional(),
+  projectId: z.string().nullable().optional(),
+})
+
+const convUpdateSchema = z.object({
+  id: z.string().min(1),
+  patch: z.object({
+    title: z.string().trim().min(1).max(200).optional(),
+    providerId: z.string().nullable().optional(),
+    modelId: z.string().nullable().optional(),
+    systemPrompt: z.string().max(100_000).nullable().optional(),
+    params: chatParamsSchema.optional(),
+    workspaceId: z.string().min(1).nullable().optional(),
+    projectId: z.string().min(1).nullable().optional(),
+  }),
+})
+
+// A non-strict object: unknown keys (e.g. the transient `dataUrl`) are dropped,
+// so image previews never get persisted into messages.attachments_json.
+const attachmentSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1).max(500),
+  mimeType: z.string().max(200),
+  sizeBytes: z.number().int().nonnegative(),
+  kind: z.enum(['text', 'image']).optional(),
+  textContent: z.string().max(2_000_000).optional(),
+  storageKey: z.string().max(300).optional(),
+})
+
+const chatSendSchema = z.object({
+  conversationId: z.string().min(1),
+  content: z.string().max(1_000_000),
+  attachments: z.array(attachmentSchema).max(20).optional(),
+  overrides: z
+    .object({
+      providerId: z.string().optional(),
+      modelId: z.string().optional(),
+      params: chatParamsSchema.optional(),
+    })
+    .optional(),
+})
+
+const chatRegenerateSchema = z.object({
+  conversationId: z.string().min(1),
+  messageId: z.string().min(1),
+})
+
+const chatEditAndRerunSchema = z.object({
+  conversationId: z.string().min(1),
+  messageId: z.string().min(1),
+  newContent: z.string().max(1_000_000),
+})
+
+const workspaceCreateSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  goal: z.string().max(10_000).optional(),
+})
+
+const workspacePatchSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  goal: z.string().max(10_000).nullable().optional(),
+  status: z.enum(['active', 'done', 'archived']).optional(),
+})
+
+const workspaceItemKindSchema = z.enum(['note', 'plan', 'checklist', 'doc', 'task'])
+
+const workspaceItemCreateSchema = z.object({
+  workspaceId: z.string().min(1),
+  kind: workspaceItemKindSchema,
+  title: z.string().trim().min(1).max(300),
+  content: z.string().max(200_000).optional(),
+  origin: z.enum(['user', 'assistant']),
+})
+
+const workspaceItemPatchSchema = z.object({
+  title: z.string().trim().min(1).max(300).optional(),
+  content: z.string().max(200_000).optional(),
+  status: z.enum(['todo', 'doing', 'done']).nullable().optional(),
+  sort: z.number().int().optional(),
+  kind: workspaceItemKindSchema.optional(),
+})
+
+const toolPermissionDecisionSchema = z.enum(['always_allow', 'ask', 'deny'])
+
+const codeReadFileSchema = z.object({
+  projectId: z.string().min(1),
+  relPath: z.string().min(1).max(2000),
+})
+
+const convExportSchema = z.object({
+  conversationId: z.string().min(1),
+  format: z.enum(['markdown', 'json']),
+})
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+export function registerIpc(deps: RegisterIpcDeps): void {
+  const { db, chatService, codeService, keystore, toolSystem, approvalBroker } = deps
+
+  const register = (channel: ChannelName, fn: (...args: unknown[]) => unknown): void => {
+    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
+      try {
+        return ok(await fn(...args))
+      } catch (e) {
+        return err(toNormalizedError(e))
+      }
+    })
+  }
+
+  const dialogParent = (): BrowserWindow | undefined =>
+    BrowserWindow.getFocusedWindow() ?? deps.getWindows()[0]
+
+  const requireProvider = (id: unknown) => {
+    const provider = db.providers.getById(requireString(id, 'Provider id'))
+    if (!provider) throw invalid('Provider not found.')
+    return provider
+  }
+
+  // -- app --------------------------------------------------------------------
+
+  register(CHANNELS.appGetInfo, (): AppInfo => {
+    const platform: AppInfo['platform'] =
+      process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+    return {
+      appVersion: app.getVersion(),
+      electronVersion: process.versions.electron ?? '',
+      platform,
+      encryptionAvailable: keystore.encryptionAvailable(),
+      userDataPath: app.getPath('userData'),
+    }
+  })
+
+  register(CHANNELS.appPickFolder, async (): Promise<string | null> => {
+    const parent = dialogParent()
+    const options = { properties: ['openDirectory'] as Array<'openDirectory'> }
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  register(CHANNELS.appPickFiles, async (): Promise<PickFilesResult> => {
+    const parent = dialogParent()
+    const options = {
+      properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+    }
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled) return { attachments: [] }
+    const attachments: Attachment[] = []
+    for (const filePath of result.filePaths) {
+      const attachment = await readAttachment(filePath, deps.attachmentsDir)
+      if (attachment) attachments.push(attachment)
+    }
+    return { attachments }
+  })
+
+  register(CHANNELS.appReadAttachment, (storageKey) =>
+    readStoredImage(deps.attachmentsDir, requireString(storageKey, 'Attachment key'))
+  )
+
+  // -- settings -----------------------------------------------------------------
+
+  register(CHANNELS.settingsGet, () => db.settings.get())
+
+  register(CHANNELS.settingsUpdate, (patch) =>
+    db.settings.update(parseInput(settingsPatchSchema, patch))
+  )
+
+  // -- providers ----------------------------------------------------------------
+
+  register(CHANNELS.providersListTypes, () => PROVIDER_TYPE_LIST)
+
+  register(CHANNELS.providersList, () => db.providers.list())
+
+  register(CHANNELS.providersCreate, (input) => {
+    const parsed = parseInput(providerConfigInputSchema, input)
+    const meta = PROVIDER_TYPES[parsed.type]
+    const baseUrl = (parsed.baseUrl ?? '').trim() || meta.defaultBaseUrl
+    if (parsed.type === 'openai-compatible' && baseUrl.length === 0) {
+      throw invalid('A base URL is required for custom OpenAI-compatible providers.')
+    }
+    const defaultModelId = (parsed.defaultModelId ?? '').trim() || meta.defaultModelId
+    return db.providers.create({ ...parsed, id: randomUUID(), baseUrl, defaultModelId })
+  })
+
+  register(CHANNELS.providersUpdate, (id, patch) => {
+    const providerId = requireString(id, 'Provider id')
+    const parsed = parseInput(providerConfigPatchSchema, patch)
+    const updated = db.providers.update(providerId, parsed)
+    if (!updated) throw invalid('Provider not found.')
+    return updated
+  })
+
+  register(CHANNELS.providersDelete, (id) => {
+    const providerId = requireString(id, 'Provider id')
+    // Delete the provider and clear every reference to it in one transaction so
+    // no dangling defaultProviderId or conversation.provider_id survives.
+    db.driver.transaction(() => {
+      if (db.settings.get().defaultProviderId === providerId) {
+        db.settings.update({ defaultProviderId: null, defaultModelId: null })
+      }
+      db.conversations.clearProvider(providerId)
+      db.providers.remove(providerId)
+    })
+    return undefined
+  })
+
+  register(CHANNELS.providersSetKey, (id, apiKey) => {
+    const provider = requireProvider(id)
+    const key = parseInput(apiKeySchema, apiKey)
+    const { encryptedBase64, preview } = keystore.encryptKey(key)
+    db.providers.setKeyRow(provider.id, encryptedBase64, preview)
+    const updated = db.providers.getById(provider.id)
+    if (!updated) throw invalid('Provider not found.')
+    return updated
+  })
+
+  register(CHANNELS.providersDeleteKey, (id) => {
+    const provider = requireProvider(id)
+    db.providers.deleteKeyRow(provider.id)
+    const updated = db.providers.getById(provider.id)
+    if (!updated) throw invalid('Provider not found.')
+    return updated
+  })
+
+  register(CHANNELS.providersTest, async (id) => {
+    const provider = requireProvider(id)
+    const encrypted = db.providers.getEncryptedKey(provider.id)
+    if (!encrypted) {
+      throw new ProviderError('auth', 'Add an API key first.', { retryable: false })
+    }
+    const apiKey = keystore.decryptKey(encrypted)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), TEST_CONNECTION_TIMEOUT_MS)
+    try {
+      return await getAdapter(provider.type).testConnection({
+        apiKey,
+        baseUrl: provider.baseUrl,
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
+  register(CHANNELS.providersListModels, async (id) => {
+    const provider = requireProvider(id)
+    const encrypted = db.providers.getEncryptedKey(provider.id)
+    // No key yet: fall back to the static catalog instead of failing.
+    if (!encrypted) return PROVIDER_TYPES[provider.type].knownModels
+    const apiKey = keystore.decryptKey(encrypted)
+    return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl })
+  })
+
+  // -- conversations --------------------------------------------------------------
+
+  register(CHANNELS.convList, (req) => db.conversations.list(parseInput(convListSchema, req)))
+
+  register(CHANNELS.convCreate, (req) =>
+    db.conversations.create(parseInput(convCreateSchema, req))
+  )
+
+  register(CHANNELS.convGet, (id) => {
+    const conversation = db.conversations.getById(requireString(id, 'Conversation id'))
+    if (!conversation) throw invalid('Conversation not found.')
+    return conversation
+  })
+
+  register(CHANNELS.convUpdate, (req) => {
+    const parsed = parseInput(convUpdateSchema, req)
+    const updated = db.conversations.update(parsed.id, parsed.patch)
+    if (!updated) throw invalid('Conversation not found.')
+    return updated
+  })
+
+  register(CHANNELS.convDelete, (id) => {
+    const conversationId = requireString(id, 'Conversation id')
+    // Stop any generation running in this conversation before deleting its rows
+    // so the detached loop doesn't write to messages that no longer exist.
+    chatService.stopConversation(conversationId)
+    db.conversations.remove(conversationId)
+    return undefined
+  })
+
+  register(CHANNELS.convMessages, (conversationId) =>
+    db.messages.listByConversation(requireString(conversationId, 'Conversation id'))
+  )
+
+  register(CHANNELS.convExport, async (req) => {
+    const parsed = parseInput(convExportSchema, req)
+    const conversation = db.conversations.getById(parsed.conversationId)
+    if (!conversation) throw invalid('Conversation not found.')
+    const messages = db.messages.listByConversation(parsed.conversationId)
+    const isMarkdown = parsed.format === 'markdown'
+    const content = isMarkdown ? toMarkdown(conversation, messages) : toJson(conversation, messages)
+    const ext = isMarkdown ? 'md' : 'json'
+    const dialogOptions = {
+      defaultPath: `${exportFileBase(conversation)}.${ext}`,
+      filters: [
+        isMarkdown
+          ? { name: 'Markdown', extensions: ['md'] }
+          : { name: 'JSON', extensions: ['json'] },
+      ],
+    }
+    const parent = dialogParent()
+    const result = parent
+      ? await dialog.showSaveDialog(parent, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await writeFile(result.filePath, content, 'utf8')
+    return { canceled: false, path: result.filePath }
+  })
+
+  // -- chat ------------------------------------------------------------------------
+
+  register(CHANNELS.chatSend, (req) => {
+    const parsed = parseInput(chatSendSchema, req)
+    const content = parsed.content.trim()
+    const hasAttachments = (parsed.attachments?.length ?? 0) > 0
+    if (content.length === 0 && !hasAttachments) {
+      throw invalid('Type a message or attach a file first.')
+    }
+    return chatService.send({ ...parsed, content })
+  })
+
+  register(CHANNELS.chatStop, (streamId) => {
+    chatService.stop(requireString(streamId, 'Stream id'))
+    return undefined
+  })
+
+  register(CHANNELS.chatRegenerate, (req) =>
+    chatService.regenerate(parseInput(chatRegenerateSchema, req))
+  )
+
+  register(CHANNELS.chatEditAndRerun, (req) => {
+    const parsed = parseInput(chatEditAndRerunSchema, req)
+    const newContent = parsed.newContent.trim()
+    if (newContent.length === 0) throw invalid('The edited message cannot be empty.')
+    return chatService.editAndRerun({ ...parsed, newContent })
+  })
+
+  // -- cowork workspaces --------------------------------------------------------------
+
+  register(CHANNELS.workspaceList, () => db.workspaces.list())
+
+  register(CHANNELS.workspaceCreate, (input) =>
+    db.workspaces.create(parseInput(workspaceCreateSchema, input))
+  )
+
+  register(CHANNELS.workspaceGet, (id) => {
+    const workspace = db.workspaces.getById(requireString(id, 'Workspace id'))
+    if (!workspace) throw invalid('Workspace not found.')
+    return workspace
+  })
+
+  register(CHANNELS.workspaceUpdate, (id, patch) => {
+    const workspaceId = requireString(id, 'Workspace id')
+    const updated = db.workspaces.update(workspaceId, parseInput(workspacePatchSchema, patch))
+    if (!updated) throw invalid('Workspace not found.')
+    return updated
+  })
+
+  register(CHANNELS.workspaceDelete, (id) => {
+    db.workspaces.remove(requireString(id, 'Workspace id'))
+    return undefined
+  })
+
+  register(CHANNELS.workspaceItemsList, (workspaceId) =>
+    db.workspaces.itemsList(requireString(workspaceId, 'Workspace id'))
+  )
+
+  register(CHANNELS.workspaceItemCreate, (input) =>
+    db.workspaces.itemCreate(parseInput(workspaceItemCreateSchema, input))
+  )
+
+  register(CHANNELS.workspaceItemUpdate, (id, patch) => {
+    const itemId = requireString(id, 'Item id')
+    const updated = db.workspaces.itemUpdate(itemId, parseInput(workspaceItemPatchSchema, patch))
+    if (!updated) throw invalid('Workspace item not found.')
+    return updated
+  })
+
+  register(CHANNELS.workspaceItemDelete, (id) => {
+    db.workspaces.itemDelete(requireString(id, 'Item id'))
+    return undefined
+  })
+
+  // -- code mode --------------------------------------------------------------------
+
+  register(CHANNELS.codeProjectsList, () => db.code.projectsList())
+
+  // The path always comes from the OS folder picker — the explicit user grant.
+  register(CHANNELS.codeProjectOpen, (path) =>
+    codeService.openProject(requireString(path, 'Project path'))
+  )
+
+  register(CHANNELS.codeProjectForget, (id) => {
+    db.code.projectForget(requireString(id, 'Project id'))
+    return undefined
+  })
+
+  register(CHANNELS.codeFileTree, (projectId) =>
+    codeService.fileTree(requireString(projectId, 'Project id'))
+  )
+
+  register(CHANNELS.codeReadFile, (req) => {
+    const parsed = parseInput(codeReadFileSchema, req)
+    return codeService.readFile(parsed.projectId, parsed.relPath)
+  })
+
+  register(CHANNELS.codeChangesList, (projectId) =>
+    db.code.changesList(requireString(projectId, 'Project id'))
+  )
+
+  // Only ever invoked from an explicit user approval click in the renderer —
+  // this is the sole write path into a user project.
+  register(CHANNELS.codeChangeApply, (changeId) =>
+    codeService.applyChange(requireString(changeId, 'Change id'))
+  )
+
+  register(CHANNELS.codeChangeReject, (changeId) =>
+    codeService.rejectChange(requireString(changeId, 'Change id'))
+  )
+
+  // -- tools --------------------------------------------------------------------
+
+  register(CHANNELS.toolsList, () => toolSystem.registry.listDefinitions())
+
+  register(CHANNELS.toolsSetEnabled, (toolId, enabled) => {
+    const id = requireString(toolId, 'Tool id')
+    const flag = requireBoolean(enabled, 'enabled')
+    // The registry rejects ids it does not know (throws a plain Error).
+    try {
+      toolSystem.registry.setEnabled(id, flag)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
+    }
+    return undefined
+  })
+
+  register(CHANNELS.toolsPermissionsList, () => toolSystem.registry.listPermissions())
+
+  register(CHANNELS.toolsPermissionSet, (toolId, decision) => {
+    const id = requireString(toolId, 'Tool id')
+    const parsed = parseInput(toolPermissionDecisionSchema, decision)
+    try {
+      toolSystem.registry.setPermission(id, parsed)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
+    }
+    return undefined
+  })
+
+  // The renderer's approve/decline click for a pending tool call. Unknown or
+  // expired requestIds are ignored by the broker (still resolves ok).
+  register(CHANNELS.toolsApprovalRespond, (requestId, approved) => {
+    approvalBroker.respond(
+      requireString(requestId, 'Request id'),
+      requireBoolean(approved, 'approved')
+    )
+    return undefined
+  })
+
+  // -- custom HTTP tools ------------------------------------------------------
+
+  /**
+   * Encrypts and stores secret headers for a custom tool. An empty value means
+   * "leave the existing secret unchanged" (the edit form never re-displays a
+   * stored value), so it is skipped rather than overwritten.
+   */
+  const storeSecretHeaders = (dbId: string, secrets: Record<string, string> | undefined): void => {
+    if (!secrets) return
+    for (const [name, value] of Object.entries(secrets)) {
+      if (value.length === 0) continue
+      const { encryptedBase64, preview } = keystore.encryptKey(value)
+      db.secrets.set('custom_tool', dbId, name, encryptedBase64, preview)
+    }
+  }
+
+  register(CHANNELS.toolsCustomList, () => toolSystem.registry.listCustomToolInfos())
+
+  register(CHANNELS.toolsCustomCreate, (input) => {
+    const parsed = parseInput(customToolInputSchema, input)
+    let definition
+    try {
+      definition = toolSystem.registry.addCustomTool(parsed)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Invalid custom tool.')
+    }
+    storeSecretHeaders(customToolDbId(definition.id), parsed.setSecretHeaders)
+    return toolSystem.registry.listCustomToolInfos()
+  })
+
+  register(CHANNELS.toolsCustomUpdate, (toolId, patch) => {
+    const id = requireString(toolId, 'Tool id')
+    const parsed = parseInput(customToolPatchSchema, patch)
+    let definition
+    try {
+      definition = toolSystem.registry.updateCustomTool(id, parsed)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Invalid custom tool.')
+    }
+    const dbId = customToolDbId(definition.id)
+    for (const name of parsed.deleteSecretHeaders ?? []) {
+      db.secrets.remove('custom_tool', dbId, name)
+    }
+    storeSecretHeaders(dbId, parsed.setSecretHeaders)
+    return toolSystem.registry.listCustomToolInfos()
+  })
+
+  register(CHANNELS.toolsCustomDelete, (toolId) => {
+    const id = requireString(toolId, 'Tool id')
+    const dbId = customToolDbId(id)
+    try {
+      toolSystem.registry.removeCustomTool(id)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
+    }
+    db.secrets.deleteAllFor('custom_tool', dbId)
+    return toolSystem.registry.listCustomToolInfos()
+  })
+
+  // -- prompt library ---------------------------------------------------------
+
+  register(CHANNELS.promptsList, () => db.prompts.list())
+
+  register(CHANNELS.promptsCreate, (input) =>
+    db.prompts.create(parseInput(promptTemplateInputSchema, input))
+  )
+
+  register(CHANNELS.promptsUpdate, (id, patch) => {
+    const templateId = requireString(id, 'Prompt id')
+    const updated = db.prompts.update(templateId, parseInput(promptTemplatePatchSchema, patch))
+    if (!updated) throw invalid('Prompt not found.')
+    return updated
+  })
+
+  register(CHANNELS.promptsDelete, (id) => {
+    db.prompts.remove(requireString(id, 'Prompt id'))
+    return undefined
+  })
+
+  // -- MCP servers ------------------------------------------------------------
+
+  const { mcpManager } = deps
+
+  register(CHANNELS.mcpList, () => mcpManager.list())
+
+  register(CHANNELS.mcpCreate, (input) => {
+    const parsed = parseInput(mcpServerInputSchema, input)
+    if (parsed.transport === 'stdio' && !(parsed.command ?? '').trim()) {
+      throw invalid('A stdio MCP server needs a command.')
+    }
+    if (parsed.transport === 'http') {
+      const url = (parsed.url ?? '').trim()
+      if (!url) throw invalid('An HTTP MCP server needs a URL.')
+      if (!isAllowedHttpUrl(url)) {
+        throw invalid('MCP server URL must use https:// (http is only allowed for localhost).')
+      }
+    }
+    return mcpManager.create(parsed)
+  })
+
+  register(CHANNELS.mcpUpdate, (id, patch) => {
+    const serverId = requireString(id, 'Server id')
+    const parsed = parseInput(mcpServerPatchSchema, patch)
+    if (parsed.url !== undefined && parsed.url.trim() && !isAllowedHttpUrl(parsed.url.trim())) {
+      throw invalid('MCP server URL must use https:// (http is only allowed for localhost).')
+    }
+    return mcpManager.update(serverId, parsed)
+  })
+
+  register(CHANNELS.mcpDelete, (id) => mcpManager.remove(requireString(id, 'Server id')))
+
+  register(CHANNELS.mcpSetEnabled, (id, enabled) =>
+    mcpManager.setEnabled(requireString(id, 'Server id'), requireBoolean(enabled, 'enabled'))
+  )
+
+  register(CHANNELS.mcpReconnect, (id) => mcpManager.reconnect(requireString(id, 'Server id')))
+
+  register(CHANNELS.mcpStatus, () => mcpManager.getRuntime())
+}

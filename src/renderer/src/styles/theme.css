@@ -1,0 +1,95 @@
+/*
+ * Design tokens for Grasberg Desktop.
+ * The resolved theme is applied by App.tsx as <html data-theme="light|dark">.
+ * :root carries the dark values as a fallback so first paint (before settings
+ * load) matches the near-black background set inline in index.html.
+ */
+
+:root {
+  /* Shared, theme-independent tokens */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'Noto Sans', sans-serif;
+  --font-mono:
+    ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Dark fallback (mirrors [data-theme='dark'] below) */
+  --bg: #0b0d12;
+  --bg-panel: #12151d;
+  --bg-hover: #1a1f2a;
+  --bg-active: #232a3a;
+  --text: #e7eaf2;
+  --text-muted: #99a3b8;
+  --border: #262c3a;
+  --accent: #7c8cff;
+  --accent-hover: #96a3ff;
+  --accent-text: #0b0d12;
+  --danger: #ff7369;
+  --success: #4cd6a2;
+  --warning: #f0b64a;
+  --code-bg: #161a24;
+  --shadow: 0 10px 32px rgba(0, 0, 0, 0.5);
+
+  color-scheme: dark;
+}
+
+[data-theme='dark'] {
+  --bg: #0b0d12;
+  --bg-panel: #12151d;
+  --bg-hover: #1a1f2a;
+  --bg-active: #232a3a;
+  --text: #e7eaf2;
+  --text-muted: #99a3b8;
+  --border: #262c3a;
+  --accent: #7c8cff;
+  --accent-hover: #96a3ff;
+  --accent-text: #0b0d12;
+  --danger: #ff7369;
+  --success: #4cd6a2;
+  --warning: #f0b64a;
+  --code-bg: #161a24;
+  --shadow: 0 10px 32px rgba(0, 0, 0, 0.5);
+
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --bg: #faf8f4;
+  --bg-panel: #f2efe8;
+  --bg-hover: #eae6dc;
+  --bg-active: #e1dccf;
+  --text: #23272f;
+  --text-muted: #5b6272;
+  --border: #ddd7c9;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-text: #ffffff;
+  --danger: #c0261c;
+  --success: #0f7a56;
+  --warning: #8f5f00;
+  --code-bg: #efece3;
+  --shadow: 0 10px 32px rgba(38, 35, 27, 0.14);
+
+  color-scheme: light;
+}
+
+/* Font-size scaling — set by App.tsx as <html data-font-size="…">. */
+html {
+  --font-scale: 1;
+  font-size: calc(16px * var(--font-scale));
+}
+
+html[data-font-size='small'] {
+  --font-scale: 0.875;
+}
+
+html[data-font-size='medium'] {
+  --font-scale: 1;
+}
+
+html[data-font-size='large'] {
+  --font-scale: 1.125;
+}

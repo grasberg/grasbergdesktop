@@ -1,0 +1,405 @@
+/*
+ * Cowork mode: chat center + right workspace panel.
+ * Uses only shared theme tokens (theme.css) and primitives (app.css), so both
+ * light and dark themes are covered automatically.
+ */
+
+/* ---------------------------------------------------------------- layout */
+
+.cowork-view {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.cowork-center {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cowork-panel {
+  flex: 0 0 360px;
+  width: 360px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.cowork-panel-collapsed {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  padding: 10px 4px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+/* Narrow windows: the panel floats over the chat instead of squeezing it. */
+@media (max-width: 1000px) {
+  .cowork-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    box-shadow: var(--shadow);
+  }
+
+  .cowork-panel-collapsed {
+    position: absolute;
+    top: 8px;
+    right: 0;
+    bottom: auto;
+    z-index: 20;
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+}
+
+/* ----------------------------------------------------------- panel header */
+
+.cowork-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cowork-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cowork-name:hover {
+  background: var(--bg-hover);
+}
+
+.cowork-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.cowork-summarize {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
+
+.cowork-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+/* ------------------------------------------------------------------ goal */
+
+.cowork-goal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.cowork-goal-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.cowork-goal-textarea {
+  min-height: 56px;
+}
+
+/* ------------------------------------------------------------ items list */
+
+.cowork-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cowork-items-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cowork-items-heading {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.cowork-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cowork-section-heading {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* ------------------------------------------------------------ item cards */
+
+.cowork-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+/* User-authored items carry the accent edge; assistant proposals stay muted. */
+.cowork-item-user {
+  border-left: 3px solid var(--accent);
+}
+
+.cowork-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cowork-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.cowork-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.cowork-item-body {
+  font-size: 0.82rem;
+}
+
+.cowork-item-md {
+  cursor: text;
+  border-radius: var(--radius-sm);
+}
+
+.cowork-item-md:hover {
+  background: var(--bg-hover);
+}
+
+.cowork-checked {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.cowork-item-empty {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.cowork-item-empty-btn {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.cowork-item-empty-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------- origin badges */
+
+.cowork-origin {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.cowork-origin-user {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+[data-theme='light'] .cowork-origin-user {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.cowork-origin-assistant {
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+/* ----------------------------------------------------------------- tasks */
+
+.cowork-task-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cowork-task-status {
+  width: auto;
+  align-self: flex-start;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+}
+
+/* ------------------------------------------------------------- checklists */
+
+.cowork-checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cowork-checklist-text {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.cowork-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.cowork-checkbox input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------- inline editing */
+
+.cowork-item-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cowork-item-textarea {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.cowork-item-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* --------------------------------------------------------- delete confirm */
+
+.cowork-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cowork-confirm-label {
+  color: var(--danger);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.cowork-confirm-btn {
+  padding: 3px 10px;
+  font-size: 0.75rem;
+}
+
+/* ---------------------------------------------------------------- add menu */
+
+.cowork-add {
+  position: relative;
+}
+
+.cowork-add-btn {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
+
+.cowork-add-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+.cowork-add-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.cowork-add-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}

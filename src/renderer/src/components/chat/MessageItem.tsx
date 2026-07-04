@@ -1,0 +1,285 @@
+import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
+import type { Attachment, Message } from '@shared/types'
+import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
+import { useChatStore } from '@/stores/chat'
+import { useProvidersStore } from '@/stores/providers'
+import Markdown from './Markdown'
+import ToolCallCard from './ToolCallCard'
+import './chat.css'
+
+interface MessageItemProps {
+  message: Message
+  isLast: boolean
+}
+
+function useCopied(): [boolean, (text: string) => void] {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const copy = (text: string): void => {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return [copied, copy]
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Attachment chip with a lazily-loaded thumbnail for stored images. */
+function AttachmentChip({ attachment }: { attachment: Attachment }): ReactElement {
+  const [src, setSrc] = useState<string | null>(attachment.dataUrl ?? null)
+  useEffect(() => {
+    if (attachment.kind !== 'image' || src || !attachment.storageKey) return
+    let cancelled = false
+    void window.uld.app.readAttachment(attachment.storageKey).then((res) => {
+      if (!cancelled && res.ok && res.data) setSrc(res.data.dataUrl)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [attachment.kind, attachment.storageKey, src])
+
+  return (
+    <span className="msg-attachment-chip" title={attachment.name}>
+      {attachment.kind === 'image' && src ? (
+        <img className="msg-attachment-thumb" src={src} alt="" />
+      ) : null}
+      <span className="msg-attachment-name">{attachment.name}</span>
+      <span className="msg-attachment-size">{formatBytes(attachment.sizeBytes)}</span>
+    </span>
+  )
+}
+
+function UserMessage({ message }: { message: Message }): ReactElement {
+  const editAndRerun = useChatStore((s) => s.editAndRerun)
+  const streaming = useChatStore((s) => s.streaming)
+  const [copied, copy] = useCopied()
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(message.content)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (editing) textareaRef.current?.focus()
+  }, [editing])
+
+  const startEdit = (): void => {
+    setDraft(message.content)
+    setEditing(true)
+  }
+
+  const saveAndRerun = (): void => {
+    const content = draft.trim()
+    if (!content) return
+    setEditing(false)
+    void editAndRerun(message.id, content)
+  }
+
+  return (
+    <div className="msg-row msg-row-user">
+      <div className="msg-card msg-card-user">
+        {editing ? (
+          <div className="msg-edit">
+            <textarea
+              ref={textareaRef}
+              className="textarea msg-edit-textarea"
+              value={draft}
+              rows={Math.min(10, Math.max(2, draft.split('\n').length))}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setEditing(false)
+              }}
+              aria-label="Edit message"
+            />
+            <div className="msg-edit-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={saveAndRerun}
+                disabled={!draft.trim()}
+              >
+                Save &amp; rerun
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="msg-attachments">
+                {message.attachments.map((a) => (
+                  <AttachmentChip key={a.id} attachment={a} />
+                ))}
+              </div>
+            )}
+            <div className="msg-user-text">{message.content}</div>
+          </>
+        )}
+      </div>
+      {!editing && (
+        <div className="msg-actions" role="toolbar" aria-label="Message actions">
+          <button
+            type="button"
+            className="btn-icon msg-action"
+            aria-label={copied ? 'Copied' : 'Copy message'}
+            title="Copy"
+            onClick={() => copy(message.content)}
+          >
+            {copied ? '✓' : '⧉'}
+          </button>
+          <button
+            type="button"
+            className="btn-icon msg-action"
+            aria-label="Edit message"
+            title="Edit"
+            onClick={startEdit}
+            disabled={streaming !== null}
+          >
+            ✎
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
+  const regenerate = useChatStore((s) => s.regenerate)
+  const streaming = useChatStore((s) => s.streaming)
+  const [copied, copy] = useCopied()
+  const [reasoningOpen, setReasoningOpen] = useState(false)
+
+  const isStreaming = message.status === 'streaming'
+  // While the model is still thinking (reasoning arriving, no answer yet),
+  // show the reasoning live regardless of the collapsed state.
+  const reasoningLive = isStreaming && !!message.reasoning && !message.content
+  const showReasoning = reasoningOpen || reasoningLive
+  const isError = message.status === 'error'
+  const usage = message.usage
+
+  // Rough cost estimate from the model's list price (approximate; see tooltip).
+  const providers = useProvidersStore((s) => s.providers)
+  const providerType = message.providerId
+    ? providers.find((p) => p.id === message.providerId)?.type
+    : undefined
+  const pricing =
+    providerType && message.modelId ? findPricing(providerType, message.modelId) : undefined
+  const cost = usage && pricing ? estimateCost(usage, pricing) : undefined
+
+  return (
+    <div className="msg-row msg-row-assistant">
+      <div className={`msg-card msg-card-assistant${isError ? ' msg-card-error' : ''}`}>
+        {message.reasoning && (
+          <div className="msg-reasoning">
+            <button
+              type="button"
+              className="msg-reasoning-toggle"
+              aria-expanded={showReasoning}
+              onClick={() => setReasoningOpen(!showReasoning)}
+            >
+              <span className={`msg-reasoning-chevron${showReasoning ? ' open' : ''}`} aria-hidden>
+                ▸
+              </span>
+              Reasoning
+              {reasoningLive && <span className="msg-reasoning-live">thinking…</span>}
+            </button>
+            {showReasoning && (
+              <div className="msg-reasoning-body">
+                {message.reasoning}
+                {reasoningLive && <span className="chat-cursor" aria-hidden />}
+              </div>
+            )}
+          </div>
+        )}
+
+        {message.toolCalls && message.toolCalls.length > 0 && (
+          <div className="msg-toolcalls">
+            {message.toolCalls.map((tc) => (
+              <ToolCallCard key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        )}
+
+        {message.content && <Markdown content={message.content} />}
+
+        {isStreaming && message.content && <span className="chat-cursor" aria-hidden />}
+        {isStreaming && !message.content && !message.reasoning && !message.toolCalls?.length && (
+          <span className="chat-cursor" aria-hidden />
+        )}
+
+        {isError && (
+          <div className="msg-error-detail">
+            <span className="badge msg-error-code">{message.error?.code ?? 'error'}</span>
+            <span>{message.error?.message ?? 'Something went wrong.'}</span>
+          </div>
+        )}
+
+        {message.status === 'stopped' && <span className="badge msg-stopped-badge">stopped</span>}
+
+        {usage &&
+          (usage.promptTokens != null ||
+            usage.completionTokens != null ||
+            usage.totalTokens != null) && (
+            <div className="msg-usage">
+              {usage.promptTokens != null && <span>↑ {usage.promptTokens}</span>}
+              {usage.completionTokens != null && <span>↓ {usage.completionTokens}</span>}
+              {usage.totalTokens != null && <span>{usage.totalTokens} total</span>}
+              {cost != null && (
+                <span className="msg-cost" title={PRICING_DISCLAIMER}>
+                  ≈ {formatCost(cost)}
+                </span>
+              )}
+            </div>
+          )}
+      </div>
+      {!isStreaming && (
+        <div className="msg-actions" role="toolbar" aria-label="Message actions">
+          <button
+            type="button"
+            className="btn-icon msg-action"
+            aria-label={copied ? 'Copied' : 'Copy message'}
+            title="Copy"
+            onClick={() => copy(message.content)}
+          >
+            {copied ? '✓' : '⧉'}
+          </button>
+          {isLast && (
+            <button
+              type="button"
+              className="btn-icon msg-action"
+              aria-label="Regenerate response"
+              title="Regenerate"
+              onClick={() => void regenerate(message.id)}
+              disabled={streaming !== null}
+            >
+              ↺
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MessageItem({ message, isLast }: MessageItemProps): ReactElement {
+  if (message.role === 'user') return <UserMessage message={message} />
+  if (message.role === 'assistant') return <AssistantMessage message={message} isLast={isLast} />
+  return (
+    <div className="msg-row msg-row-meta">
+      <div className="msg-meta">
+        <span className="msg-meta-role">{message.role}</span>
+        <span className="msg-meta-content">{message.content}</span>
+      </div>
+    </div>
+  )
+}
+
+export default memo(MessageItem)

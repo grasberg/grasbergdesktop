@@ -1,0 +1,118 @@
+/* ==========================================================================
+   Settings → Tools tab (ToolsTab.tsx).
+   Owned by the tool-system integration; settings.css is untouched.
+   ========================================================================== */
+
+.tools-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.tools-table th {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.tools-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.tools-row:last-child td {
+  border-bottom: none;
+}
+
+.tools-cell-name {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tools-cell-desc {
+  max-width: 0;
+  width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.tools-cell-risk,
+.tools-cell-enabled {
+  white-space: nowrap;
+}
+
+.tools-permission-select {
+  width: auto;
+  min-width: 140px;
+}
+
+/* Custom HTTP tool add/edit form */
+.custom-tools-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.custom-tool-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.custom-tool-form h5 {
+  margin: 0;
+}
+
+.custom-tool-url-row {
+  display: flex;
+  gap: 12px;
+}
+
+.custom-tool-url-row .custom-tool-url {
+  flex: 1;
+}
+
+.custom-tool-header-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.custom-tool-header-row .input {
+  flex: 1;
+}
+
+.custom-tool-secret-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.custom-tool-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.tools-cell-actions {
+  white-space: nowrap;
+  display: flex;
+  gap: 6px;
+}
