@@ -6,6 +6,7 @@ import { useProvidersStore } from '@/stores/providers'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
 import { errorMessage, ProviderAddForm } from '../settings/ProvidersTab'
+import appIcon from '@/assets/icon.png'
 import '../settings/settings.css'
 
 const STEP_COUNT = 4
@@ -24,7 +25,7 @@ function WelcomeStep() {
   return (
     <div className="wizard-step">
       <div className="wizard-logo" aria-hidden="true">
-        ◆
+        <img src={appIcon} width={56} height={56} alt="" draggable={false} />
       </div>
       <h1>Grasberg Desktop</h1>
       <p className="wizard-pitch">

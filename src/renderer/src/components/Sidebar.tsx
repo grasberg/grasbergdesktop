@@ -3,6 +3,7 @@ import type { ConversationMode, ConversationSummary } from '@shared/types'
 import { toNormalized } from '@/api/uld'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
+import appIcon from '@/assets/icon.png'
 
 const MODE_TABS: ReadonlyArray<{ key: ConversationMode | 'all'; label: string }> = [
   { key: 'all', label: 'All' },
@@ -13,21 +14,18 @@ const MODE_TABS: ReadonlyArray<{ key: ConversationMode | 'all'; label: string }>
   { key: 'design', label: 'Design' },
 ]
 
+/** The real app icon (same asset as the packaged exe/dock icon). */
 function Logo({ size = 22 }: { size?: number }): React.JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="1" y="1" width="22" height="22" rx="6" fill="var(--accent)" />
-      <path
-        d="M8 8 L16 8 M8 8 L8 16 M16 8 L8 16 M8 16 L16 16 M16 8 L16 16"
-        stroke="var(--accent-text)"
-        strokeWidth="1.1"
-        opacity="0.5"
-      />
-      <circle cx="8" cy="8" r="2.1" fill="var(--accent-text)" />
-      <circle cx="16" cy="8" r="2.1" fill="var(--accent-text)" opacity="0.8" />
-      <circle cx="8" cy="16" r="2.1" fill="var(--accent-text)" opacity="0.8" />
-      <circle cx="16" cy="16" r="2.1" fill="var(--accent-text)" opacity="0.6" />
-    </svg>
+    <img
+      src={appIcon}
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      style={{ display: 'block' }}
+    />
   )
 }
 
