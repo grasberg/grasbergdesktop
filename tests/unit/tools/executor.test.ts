@@ -562,3 +562,43 @@ describe('repo_map tool', () => {
     expect(result).toMatch(/no project folder/i)
   })
 })
+
+describe('use_skill tool', () => {
+  it('returns the enabled skill content by name (case-insensitive)', async () => {
+    db.skills.create({ name: 'Triage', description: 'Triage issues.', content: 'FULL STEPS' })
+    const { executor } = createToolSystem(db)
+    const result = await executor.execute(call('use_skill', { name: 'triage' }), {
+      conversation: conv(false),
+      approval: approveAll,
+    })
+    expect(result).toContain("Skill 'Triage' instructions")
+    expect(result).toContain('FULL STEPS')
+  })
+
+  it('errors with the available skill names for an unknown skill', async () => {
+    db.skills.create({ name: 'triage', content: 'x' })
+    db.skills.create({ name: 'research', content: 'y' })
+    const { executor } = createToolSystem(db)
+    const result = await executor.execute(call('use_skill', { name: 'nope' }), {
+      conversation: conv(false),
+      approval: approveAll,
+    })
+    expect(result).toMatch(/no enabled skill named 'nope'/i)
+    expect(result).toContain('triage')
+    expect(result).toContain('research')
+  })
+
+  it('does not serve disabled skills and is hidden when no skills are enabled', async () => {
+    const skill = db.skills.create({ name: 'triage', content: 'x' })
+    db.skills.update(skill.id, { enabled: false })
+    const { registry, executor } = createToolSystem(db)
+    // Hidden from the model entirely (like other opt-in tools)...
+    expect(registry.listDefinitions().some((t) => t.id === 'use_skill')).toBe(false)
+    // ...and unknown if called anyway.
+    const result = await executor.execute(call('use_skill', { name: 'triage' }), {
+      conversation: conv(false),
+      approval: approveAll,
+    })
+    expect(result).toMatch(/unknown tool/i)
+  })
+})

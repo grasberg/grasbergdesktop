@@ -259,6 +259,28 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'use_skill',
+    name: 'use_skill',
+    description:
+      'Load the full instructions of an installed skill by name. The available skills ' +
+      '(name + description) are listed in the system prompt. Call this BEFORE performing ' +
+      'a task that a skill covers, then follow the returned instructions — do not guess ' +
+      'at what a skill contains. Read-only: it only returns stored instruction text.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'The name of the skill to load, exactly as listed.',
+        },
+      },
+      required: ['name'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
     id: 'delegate',
     name: 'delegate',
     description:

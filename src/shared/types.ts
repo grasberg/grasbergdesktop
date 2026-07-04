@@ -735,6 +735,43 @@ export interface PromptTemplatePatch {
 }
 
 // ---------------------------------------------------------------------------
+// Skills (Agent Skills standard: SKILL.md with YAML frontmatter, optionally
+// packaged in plugins with a .claude-plugin/plugin.json manifest)
+// ---------------------------------------------------------------------------
+
+export interface Skill {
+  id: string
+  /** Skill identifier the model passes to use_skill (frontmatter `name`). */
+  name: string
+  /** One-line summary listed in the system prompt (frontmatter `description`). */
+  description: string
+  /** Full Markdown instructions (the SKILL.md body). */
+  content: string
+  /** Plugin manifest name when imported from a plugin; null otherwise. */
+  pluginName: string | null
+  /** Folder the skill was imported from; null when created manually. */
+  sourcePath: string | null
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface SkillInput {
+  name: string
+  description?: string
+  content: string
+  pluginName?: string | null
+  sourcePath?: string | null
+}
+
+export interface SkillPatch {
+  name?: string
+  description?: string
+  content?: string
+  enabled?: boolean
+}
+
+// ---------------------------------------------------------------------------
 // Memory (assistant memories persisted across conversations)
 // ---------------------------------------------------------------------------
 

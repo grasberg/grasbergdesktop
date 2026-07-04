@@ -105,6 +105,13 @@ export function createToolSystem(
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
     delegate: options.delegate,
+    skills: {
+      getEnabledByName: (name) => {
+        const skill = db.skills.getByName(name)
+        return skill && skill.enabled ? { name: skill.name, content: skill.content } : null
+      },
+      listEnabledNames: () => db.skills.listEnabled().map((skill) => skill.name),
+    },
     getProjectRoot,
     resolveSecretHeaders: options.resolveSecretHeaders,
     fetchImpl: options.fetchImpl,

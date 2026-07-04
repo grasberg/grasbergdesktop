@@ -36,6 +36,9 @@ import type {
   MemoryInput,
   MemoryPatch,
   SetTelegramBridgeInput,
+  Skill,
+  SkillInput,
+  SkillPatch,
   Workflow,
   WorkflowGraph,
   WorkflowInput,
@@ -159,6 +162,13 @@ export const CHANNELS = {
   memoriesCreate: 'memories:create',
   memoriesUpdate: 'memories:update',
   memoriesDelete: 'memories:delete',
+
+  // skills
+  skillsList: 'skills:list',
+  skillsCreate: 'skills:create',
+  skillsUpdate: 'skills:update',
+  skillsDelete: 'skills:delete',
+  skillsImportFolder: 'skills:importFolder',
 
   // MCP servers
   mcpList: 'mcp:list',
@@ -403,6 +413,14 @@ export interface UldApi {
     create(input: MemoryInput): Promise<IpcResult<Memory>>
     update(id: string, patch: MemoryPatch): Promise<IpcResult<Memory>>
     delete(id: string): Promise<IpcResult<void>>
+  }
+  skills: {
+    list(): Promise<IpcResult<Skill[]>>
+    create(input: SkillInput): Promise<IpcResult<Skill>>
+    update(id: string, patch: SkillPatch): Promise<IpcResult<Skill>>
+    delete(id: string): Promise<IpcResult<void>>
+    /** Imports every skill in a folder (skill / collection / plugin). */
+    importFolder(path: string): Promise<IpcResult<Skill[]>>
   }
   mcp: {
     list(): Promise<IpcResult<McpServerConfig[]>>

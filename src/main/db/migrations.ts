@@ -420,4 +420,25 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at)`,
     ],
   },
+  {
+    version: 15,
+    name: 'skills',
+    // Agent Skills (SKILL.md) imported from folders/plugins or authored in the
+    // app. No UNIQUE index on name (import upserts by name in code; a unique
+    // index would make manual edits throw on collision).
+    statements: [
+      `CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL,
+        plugin_name TEXT,
+        source_path TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name)`,
+    ],
+  },
 ]

@@ -30,6 +30,8 @@ import {
   memoryPatchSchema,
   promptTemplateInputSchema,
   promptTemplatePatchSchema,
+  skillInputSchema,
+  skillPatchSchema,
   providerConfigInputSchema,
   providerConfigPatchSchema,
   settingsPatchSchema,
@@ -46,6 +48,7 @@ import { getAdapter, resolveAdapter } from '../providers/registry'
 import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/export'
+import { readSkillsFromFolder } from '../services/skills'
 import { readAttachment, readStoredImage } from './attachments'
 import { writeFile } from 'node:fs/promises'
 
@@ -742,6 +745,43 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.memoriesDelete, (id) => {
     db.memories.remove(requireString(id, 'Memory id'))
     return undefined
+  })
+
+  // -- skills -------------------------------------------------------------------
+
+  register(CHANNELS.skillsList, () => db.skills.list())
+
+  register(CHANNELS.skillsCreate, (input) => db.skills.create(parseInput(skillInputSchema, input)))
+
+  register(CHANNELS.skillsUpdate, (id, patch) => {
+    const skillId = requireString(id, 'Skill id')
+    const updated = db.skills.update(skillId, parseInput(skillPatchSchema, patch))
+    if (!updated) throw invalid('Skill not found.')
+    return updated
+  })
+
+  register(CHANNELS.skillsDelete, (id) => {
+    db.skills.remove(requireString(id, 'Skill id'))
+    return undefined
+  })
+
+  register(CHANNELS.skillsImportFolder, async (path) => {
+    const folder = requireString(path, 'Folder path')
+    let result
+    try {
+      result = await readSkillsFromFolder(folder)
+    } catch (e) {
+      throw invalid(e instanceof Error ? e.message : 'Could not read the folder.')
+    }
+    return result.skills.map((skill) =>
+      db.skills.upsertByName({
+        name: skill.name,
+        description: skill.description,
+        content: skill.content,
+        pluginName: result.pluginName,
+        sourcePath: folder,
+      })
+    )
   })
 
   // -- MCP servers ------------------------------------------------------------

@@ -85,6 +85,11 @@ export interface ToolExecutorDeps {
   browser?: ToolBrowser | null
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: (task: string, ctx: ToolExecuteContext) => Promise<string>
+  /** Skill lookup for the 'use_skill' tool (wired to db.skills). */
+  skills?: {
+    getEnabledByName(name: string): { name: string; content: string } | null
+    listEnabledNames(): string[]
+  } | null
   /** Absolute path of the project folder granted to this conversation, or null. */
   getProjectRoot: (conversation: Conversation) => string | null
   /**
@@ -382,6 +387,8 @@ export class ToolExecutor {
         return this.runProposeShellCommand(args)
       case 'run_shell_command':
         return this.runShellCommand(args, ctx)
+      case 'use_skill':
+        return this.runUseSkill(args)
       case 'delegate':
         return this.runDelegate(args, ctx)
       case 'browser':
@@ -671,6 +678,22 @@ export class ToolExecutor {
     }
     const text = getString(args, 'text') ?? undefined
     return browser.computer(action, coordinate, text)
+  }
+
+  // -- skills --------------------------------------------------------------------
+
+  private runUseSkill(args: Record<string, unknown>): string {
+    if (!this.deps.skills) return 'Error: skills are unavailable in this build.'
+    const name = (getString(args, 'name') ?? '').trim()
+    if (name.length === 0) return "Error: 'name' must be a non-empty string."
+    const skill = this.deps.skills.getEnabledByName(name)
+    if (!skill) {
+      const available = this.deps.skills.listEnabledNames()
+      return available.length > 0
+        ? `Error: no enabled skill named '${name}'. Available skills: ${available.join(', ')}.`
+        : `Error: no skills are installed and enabled.`
+    }
+    return `Skill '${skill.name}' instructions:\n\n${skill.content}`
   }
 
   // -- sub-agent delegation ----------------------------------------------------

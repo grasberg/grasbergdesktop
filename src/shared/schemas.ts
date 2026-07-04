@@ -141,6 +141,28 @@ export const promptTemplatePatchSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Skills. pluginName/sourcePath are deliberately absent: IPC create/update is
+// manual authoring; only the main-side folder import sets provenance.
+// ---------------------------------------------------------------------------
+
+export const skillInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    description: z.string().max(1024).optional(),
+    content: z.string().max(200_000),
+  })
+  .strict()
+
+export const skillPatchSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    description: z.string().max(1024).optional(),
+    content: z.string().max(200_000).optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict()
+
+// ---------------------------------------------------------------------------
 // Memory. sourceConversationId is deliberately absent: IPC create/update is
 // always user-initiated; only the main-side completion hook sets provenance.
 // ---------------------------------------------------------------------------

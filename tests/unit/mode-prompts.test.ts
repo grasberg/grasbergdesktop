@@ -116,4 +116,39 @@ describe('buildModeSystemPrompt', () => {
       expect(buildModeSystemPrompt(mode, { memoryEnabled: false })).not.toContain('uld-memory')
     }
   })
+
+  it('lists skills with descriptions and points at use_skill when tools are callable', () => {
+    const prompt = buildModeSystemPrompt('chat', {
+      toolsAvailable: true,
+      toolNames: ['use_skill'],
+      skills: [
+        { name: 'triage', description: 'Triage incoming issues.', content: 'FULL TRIAGE STEPS' },
+      ],
+    })
+    expect(prompt).toContain('Installed skills')
+    expect(prompt).toContain('- triage: Triage incoming issues.')
+    expect(prompt).toContain('call the use_skill tool')
+    // Progressive disclosure: full content is NOT inlined when tools work.
+    expect(prompt).not.toContain('FULL TRIAGE STEPS')
+  })
+
+  it('inlines skill content (capped) when the model cannot call tools', () => {
+    const prompt = buildModeSystemPrompt('chat', {
+      toolsAvailable: false,
+      toolNames: ['use_skill'],
+      skills: [
+        { name: 'triage', description: 'Triage incoming issues.', content: 'FULL TRIAGE STEPS' },
+        { name: 'huge', description: 'Too big to inline.', content: 'y'.repeat(30_000) },
+      ],
+    })
+    expect(prompt).toContain('### Skill: triage')
+    expect(prompt).toContain('FULL TRIAGE STEPS')
+    expect(prompt).toContain('(further skill instructions omitted for length)')
+    expect(prompt).not.toContain('call the use_skill tool')
+  })
+
+  it('adds no skills section when none are installed', () => {
+    expect(buildModeSystemPrompt('chat')).not.toContain('Installed skills')
+    expect(buildModeSystemPrompt('chat', { skills: [] })).not.toContain('Installed skills')
+  })
 })

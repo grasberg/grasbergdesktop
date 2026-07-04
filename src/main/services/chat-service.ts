@@ -616,18 +616,31 @@ export class ChatService {
     // is always non-empty (base persona + a per-mode section), so a system
     // message is always sent now.
     // When memory is enabled, saved memories (and the uld-memory block
-    // instructions) ride along in the mode prompt — this single spot covers
-    // streaming, headless and delegate generations alike.
-    const effectiveOpts: ModePromptOptions = settings.memoryEnabled
-      ? {
-          ...promptOpts,
-          memoryEnabled: true,
-          memories: this.db.memories
-            .list()
-            .slice(0, MEMORY_MAX_INJECTED)
-            .map((m) => ({ title: m.title, content: m.content })),
-        }
-      : promptOpts
+    // instructions) ride along in the mode prompt; enabled skills are always
+    // listed. This single spot covers streaming, headless and delegate
+    // generations alike.
+    const enabledSkills = this.db.skills.listEnabled()
+    const effectiveOpts: ModePromptOptions = {
+      ...promptOpts,
+      ...(enabledSkills.length > 0
+        ? {
+            skills: enabledSkills.map((s) => ({
+              name: s.name,
+              description: s.description,
+              content: s.content,
+            })),
+          }
+        : {}),
+      ...(settings.memoryEnabled
+        ? {
+            memoryEnabled: true,
+            memories: this.db.memories
+              .list()
+              .slice(0, MEMORY_MAX_INJECTED)
+              .map((m) => ({ title: m.title, content: m.content })),
+          }
+        : {}),
+    }
     const extras =
       (conversation.systemPrompt ?? '').trim() || settings.defaultSystemPrompt.trim()
     const systemPrompt = [buildModeSystemPrompt(conversation.mode, effectiveOpts), extras]

@@ -61,6 +61,8 @@ export class ToolRegistry {
       hidden.add('browser')
       hidden.add('computer')
     }
+    // use_skill is pointless (and prompt noise) without any enabled skills.
+    if (this.db.skills.listEnabled().length === 0) hidden.add('use_skill')
     const builtins = BUILTIN_TOOL_DEFINITIONS.filter((tool) => !hidden.has(tool.id)).map((tool) => ({
       ...tool,
       enabled: isEnabled(tool.id),

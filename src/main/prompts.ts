@@ -19,6 +19,12 @@ export interface ModePromptOptions {
   memoryEnabled?: boolean
   /** Saved memories to list in the prompt (most recent first, pre-capped). */
   memories?: { title: string; content: string }[]
+  /**
+   * Enabled skills. With callable tools only name+description are listed
+   * (the model loads content via use_skill); without tools the content is
+   * inlined, capped at SKILLS_INLINE_CHAR_BUDGET.
+   */
+  skills?: { name: string; description: string; content: string }[]
 }
 
 const BASE_PERSONA =
@@ -139,6 +145,39 @@ function toolsUsageSection(toolNames: string[]): string {
 - If a tool call fails or is declined, say so plainly and continue as best you can — never pretend a tool ran or invent its output.`
 }
 
+/** Cap on inlined skill content when the model cannot call use_skill. */
+const SKILLS_INLINE_CHAR_BUDGET = 24_000
+
+function skillsSection(
+  skills: { name: string; description: string; content: string }[],
+  toolsCallable: boolean
+): string {
+  const listing = skills
+    .map((skill) => `- ${skill.name}: ${skill.description || '(no description)'}`)
+    .join('\n')
+  const header = `Installed skills — reusable instruction sets for specific tasks:\n${listing}`
+
+  if (toolsCallable) {
+    return `${header}\n\nWhen a task matches one of these skills, call the use_skill tool with the skill's name FIRST and follow the returned instructions before doing the work. Do not guess at a skill's contents; if no skill matches, proceed normally.`
+  }
+
+  // No tool access: inline the instructions themselves (capped).
+  const sections: string[] = [
+    `${header}\n\nWhen a task matches one of these skills, follow that skill's instructions below.`,
+  ]
+  let used = 0
+  for (const skill of skills) {
+    const block = `### Skill: ${skill.name}\n\n${skill.content}`
+    if (used + block.length > SKILLS_INLINE_CHAR_BUDGET) {
+      sections.push('(further skill instructions omitted for length)')
+      break
+    }
+    sections.push(block)
+    used += block.length
+  }
+  return sections.join('\n\n')
+}
+
 /** Cap on the total characters of memory entries listed in the prompt. */
 const MEMORY_PROMPT_CHAR_BUDGET = 6000
 
@@ -199,6 +238,9 @@ export function buildModeSystemPrompt(
     } else if (opts.toolsAvailable === true) {
       sections.push(toolsUsageSection(opts.toolNames))
     }
+  }
+  if (opts.skills && opts.skills.length > 0) {
+    sections.push(skillsSection(opts.skills, opts.toolsAvailable === true))
   }
   if (opts.memoryEnabled) {
     sections.push(memorySection(opts.memories ?? []))
