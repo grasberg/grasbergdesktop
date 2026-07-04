@@ -180,6 +180,11 @@ export const settingsPatchSchema = z
     fontSize: z.enum(['small', 'medium', 'large']),
     compactionEnabled: z.boolean(),
     compactionThresholdRatio: z.number().min(0.1).max(0.95),
+    shellExecutionEnabled: z.boolean(),
+    browserToolsEnabled: z.boolean(),
+    telegramBridgeEnabled: z.boolean(),
+    telegramBridgeConversationId: z.string().nullable(),
+    outboundWebhookUrl: z.string().max(2000).nullable(),
   })
   .partial()
   .strict()

@@ -9,6 +9,8 @@ const MODE_TABS: ReadonlyArray<{ key: ConversationMode | 'all'; label: string }>
   { key: 'chat', label: 'Chat' },
   { key: 'cowork', label: 'Cowork' },
   { key: 'code', label: 'Code' },
+  { key: 'write', label: 'Write' },
+  { key: 'design', label: 'Design' },
 ]
 
 function Logo({ size = 22 }: { size?: number }): React.JSX.Element {
@@ -305,6 +307,22 @@ export default function Sidebar(): React.JSX.Element {
               >
                 New code session
               </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="sidebar-new-item"
+                onClick={() => newConversation('write')}
+              >
+                New document (Write)
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="sidebar-new-item"
+                onClick={() => newConversation('design')}
+              >
+                New design
+              </button>
             </div>
           ) : null}
         </div>
@@ -348,6 +366,20 @@ export default function Sidebar(): React.JSX.Element {
       </ul>
 
       <div className="sidebar-footer">
+        <button
+          type="button"
+          className="btn-icon"
+          aria-label="Open workflows"
+          title="Workflows"
+          onClick={() => useUiStore.getState().openWorkflows(true)}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <rect x="10" y="2.5" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <rect x="5.75" y="10.3" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M3.75 5.7v2.1h8.5V5.7M8 7.8v2.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          </svg>
+        </button>
         <button
           type="button"
           className="btn-icon"

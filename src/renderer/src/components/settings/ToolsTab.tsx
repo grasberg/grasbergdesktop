@@ -18,6 +18,7 @@ import type {
 } from '@shared/types'
 import { RiskBadge } from '@/components/ToolApprovalDialog'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
+import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { ConfirmButton, Switch, errorMessage } from './ProvidersTab'
 import './tools.css'
@@ -378,6 +379,9 @@ export default function ToolsTab(): ReactElement {
   const customInfos = useToolsStore((s) => s.customInfos)
   const loaded = useToolsStore((s) => s.loaded)
   const load = useToolsStore((s) => s.load)
+  const settings = useSettingsStore((s) => s.settings)
+  const updateSettings = useSettingsStore((s) => s.update)
+  const toast = useUiStore((s) => s.toast)
 
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<CustomToolInfo | null>(null)
@@ -386,6 +390,25 @@ export default function ToolsTab(): ReactElement {
     // Refresh on every visit so changes from other surfaces show up.
     void load()
   }, [load])
+
+  const toggleShell = async (enabled: boolean): Promise<void> => {
+    try {
+      await updateSettings({ shellExecutionEnabled: enabled })
+      // The run_shell_command tool appears/disappears with this setting.
+      await load()
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    }
+  }
+
+  const toggleBrowser = async (enabled: boolean): Promise<void> => {
+    try {
+      await updateSettings({ browserToolsEnabled: enabled })
+      await load() // the browser/computer tools appear/disappear
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    }
+  }
 
   const builtins = tools.filter((t) => t.builtin)
   const mcpTools = tools.filter((t) => t.source === 'mcp')
@@ -439,6 +462,41 @@ export default function ToolsTab(): ReactElement {
           </tbody>
         </table>
       )}
+
+      <h4 className="section-subhead">Shell execution</h4>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings?.shellExecutionEnabled ?? false}
+          onChange={(e) => void toggleShell(e.target.checked)}
+        />
+        <span>
+          Let the assistant run shell commands (with approval)
+          <span className="field-hint">
+            Off by default. When on, the <code>run_shell_command</code> tool can execute commands in
+            a granted project folder — you still approve every call, and there is a timeout. Leave
+            off to keep commands as copyable suggestions only.
+          </span>
+        </span>
+      </label>
+
+      <h4 className="section-subhead">Browser &amp; computer use</h4>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings?.browserToolsEnabled ?? false}
+          onChange={(e) => void toggleBrowser(e.target.checked)}
+        />
+        <span>
+          Let the assistant use an embedded browser
+          <span className="field-hint">
+            Off by default. When on, the <code>browser</code> and <code>computer</code> tools drive
+            a sandboxed, isolated browser (http/https only, no access to your machine) — for looking
+            things up and interacting with web pages. Each call asks for approval; vision models
+            also receive screenshots.
+          </span>
+        </span>
+      </label>
 
       <div className="custom-tools-head">
         <h4 className="section-subhead">Custom HTTP tools</h4>

@@ -13,19 +13,29 @@ import { keystore } from './keys/keystore'
 import { ChatService } from './services/chat-service'
 import { ApprovalBroker } from './services/approval-broker'
 import { registerCompletionHook } from './services/completion-hooks'
-import { extractWorkspaceItems } from './services/mode-artifacts'
+import {
+  extractDocument,
+  extractHtmlArtifacts,
+  extractWorkspaceItems,
+} from './services/mode-artifacts'
 import { CodeService } from './code/code-service'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
+import { ImBridgeManager } from './im/manager'
+import { BrowserSession } from './browser/session'
 import { registerIpc } from './ipc/register'
 
 const PRODUCTION_CSP =
-  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'"
+  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
+  // Design-mode prototypes render in a sandboxed srcdoc iframe (opaque origin).
+  "frame-src 'self'"
 
 let db: AppDatabase | null = null
 let chatService: ChatService | null = null
 let approvalBroker: ApprovalBroker | null = null
 let mcpManager: McpManager | null = null
+let imBridgeManager: ImBridgeManager | null = null
+let browserSession: BrowserSession | null = null
 let cleanedUp = false
 let quitting = false
 
@@ -53,6 +63,8 @@ async function cleanup(): Promise<void> {
   // Resolve any pending tool approvals as declined so no executor promise
   // (and thus no tool) can outlive the user's session.
   approvalBroker?.stopAll()
+  imBridgeManager?.stopAll()
+  browserSession?.close()
   // Close MCP connections (kills any stdio child processes) before the db.
   try {
     await mcpManager?.stopAll()
@@ -167,8 +179,18 @@ function bootstrap(): void {
   // suggestions-only shell) plus the broker that routes per-call approvals
   // through the renderer. The chat service drives the tool loop with it.
   // Secret custom-tool headers are decrypted here (main only) at call time.
+  const browser = new BrowserSession()
+  browserSession = browser
   const toolSystem = createToolSystem(database, codeService, {
     mcp,
+    shellEnabled: () => database.settings.get().shellExecutionEnabled,
+    browserEnabled: () => database.settings.get().browserToolsEnabled,
+    browser,
+    // Resolved at call time; chatService (below) is set before any generation.
+    delegate: (task, ctx) =>
+      chatService
+        ? chatService.runDelegate(task, ctx)
+        : Promise.resolve('Error: delegation unavailable.'),
     resolveSecretHeaders: (toolId) => {
       const out: Record<string, string> = {}
       for (const cipher of database.secrets.listCiphers('custom_tool', customToolDbId(toolId))) {
@@ -186,6 +208,7 @@ function bootstrap(): void {
   chatService = new ChatService(database, broadcast, {
     tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker },
     imageDir: attachmentsDir,
+    browser,
   })
 
   // Mode side effects after each completed assistant message. Code mode
@@ -193,10 +216,30 @@ function bootstrap(): void {
   // renderer refreshes its change list when the stream 'done' event arrives,
   // so no extra push channel is needed. Cowork mode saves proposed workspace
   // items with origin 'assistant'.
+  const imBridge = new ImBridgeManager({
+    db: database,
+    keystore,
+    generateReply: (conversationId, text) => chatService!.generateHeadless(conversationId, text),
+  })
+  imBridgeManager = imBridge
+
   registerCompletionHook((conversation, message) => {
     if (message.role !== 'assistant' || message.content.trim().length === 0) return
+    // Generic outbound webhook (best-effort) fires on every assistant message.
+    void imBridge.onCompletion(conversation, message)
     if (conversation.mode === 'code' && conversation.projectId) {
       codeService.registerProposedChanges(conversation.id, message.content)
+      return
+    }
+    if (conversation.mode === 'write') {
+      const doc = extractDocument(message.content)
+      if (doc) database.documents.upsertDoc(conversation.id, doc.title, doc.content)
+      return
+    }
+    if (conversation.mode === 'design') {
+      for (const html of extractHtmlArtifacts(message.content)) {
+        database.documents.addHtml(conversation.id, html.title, html.content)
+      }
       return
     }
     if (conversation.mode === 'cowork' && conversation.workspaceId) {
@@ -220,12 +263,14 @@ function bootstrap(): void {
     toolSystem,
     approvalBroker: broker,
     mcpManager: mcp,
+    imBridgeManager: imBridge,
     attachmentsDir,
     getWindows: () => BrowserWindow.getAllWindows(),
   })
 
-  // Connect enabled MCP servers in the background (no-op under SMOKE_TEST).
+  // Connect enabled MCP servers + IM bridge in the background (no-op under SMOKE_TEST).
   void mcp.start()
+  imBridge.start()
 
   createWindow()
 

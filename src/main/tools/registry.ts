@@ -52,7 +52,16 @@ export class ToolRegistry {
     const enabledMap = this.db.tools.enabledMap()
     const isEnabled = (toolId: string): boolean => enabledMap[toolId] ?? true
 
-    const builtins = BUILTIN_TOOL_DEFINITIONS.map((tool) => ({
+    // Opt-in tools are hidden entirely unless the user enabled them — the model
+    // is never even offered them otherwise.
+    const settings = this.db.settings.get()
+    const hidden = new Set<string>()
+    if (!settings.shellExecutionEnabled) hidden.add('run_shell_command')
+    if (!settings.browserToolsEnabled) {
+      hidden.add('browser')
+      hidden.add('computer')
+    }
+    const builtins = BUILTIN_TOOL_DEFINITIONS.filter((tool) => !hidden.has(tool.id)).map((tool) => ({
       ...tool,
       enabled: isEnabled(tool.id),
       source: 'builtin' as const,

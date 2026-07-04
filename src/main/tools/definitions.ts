@@ -187,6 +187,133 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     builtin: true,
     enabled: true,
   },
+  {
+    id: 'browser',
+    name: 'browser',
+    description:
+      'Drive an embedded, sandboxed web browser (isolated from your machine; http/https only, ' +
+      'downloads blocked). Use it to look things up and interact with web pages. Actions: ' +
+      '"navigate" (url), "read" (return the current page text + interactive elements with their ' +
+      '[x,y] centers), "click" (a CSS "selector" or visible "text"), "type" (into a "selector" ' +
+      'with "text"), "back". Requires the user to have enabled browser tools.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['navigate', 'read', 'click', 'type', 'back'] },
+        url: { type: 'string', description: 'For "navigate": an absolute http(s) URL.' },
+        selector: { type: 'string', description: 'For "click"/"type": a CSS selector.' },
+        text: {
+          type: 'string',
+          description: 'For "type": the text to enter. For "click": visible text to match (instead of a selector).',
+        },
+      },
+      required: ['action'],
+    },
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'computer',
+    name: 'computer',
+    description:
+      'Control the embedded browser viewport (1280x800) by coordinate, like a computer-use agent. ' +
+      'Each action returns the page state and, for vision-capable models, a screenshot of the ' +
+      'result. Actions: "screenshot", "left_click", "right_click", "middle_click", "double_click", ' +
+      '"mouse_move", "left_click_drag", "scroll", "type", "key", "wait". Provide "coordinate" as ' +
+      '[x, y] for pointer actions, "text" for type/key (e.g. "Return", "ctrl+a") and scroll ' +
+      'direction ("up"/"down"). Navigate first with the browser tool. Requires browser tools enabled.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'screenshot',
+            'cursor_position',
+            'mouse_move',
+            'left_click',
+            'right_click',
+            'middle_click',
+            'double_click',
+            'left_click_drag',
+            'scroll',
+            'type',
+            'key',
+            'wait',
+          ],
+        },
+        coordinate: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Pixel [x, y] in the 1280x800 viewport, for pointer actions.',
+        },
+        text: { type: 'string', description: 'Text for type/key, or scroll direction.' },
+      },
+      required: ['action'],
+    },
+    // Acts on live web pages; always asks for approval and is hidden unless the
+    // user opted into browser tools.
+    risk: 'dangerous',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'delegate',
+    name: 'delegate',
+    description:
+      'Delegate a focused sub-task to a fresh sub-agent and get back its result. The sub-agent ' +
+      'runs its own short reasoning loop with read-only project tools (file search, repo map, ' +
+      'read file, list directory, fetch URL) and returns a concise answer. Use it to decompose ' +
+      'work, investigate a specific question, or draft a section independently. Give it a ' +
+      'self-contained task and any context it needs — it does not see this conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description: 'A self-contained task or question for the sub-agent to work on.',
+        },
+        context: {
+          type: 'string',
+          description: 'Optional background the sub-agent needs (it has no other context).',
+        },
+      },
+      required: ['task'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'run_shell_command',
+    name: 'run_shell_command',
+    description:
+      'Execute a shell command in the project folder the user granted for this conversation and ' +
+      'return its exit code, stdout and stderr. This ACTUALLY RUNS the command, so it requires the ' +
+      'user to have enabled shell execution AND to approve each call. Commands run with a timeout ' +
+      'and capped output. Prefer propose_shell_command when you only need to suggest a command for ' +
+      'the user to run themselves. Only works when a project folder is granted.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'The exact command to run, e.g. "npm test".',
+        },
+        explanation: {
+          type: 'string',
+          description: 'One or two sentences explaining what the command does and why.',
+        },
+      },
+      required: ['command'],
+    },
+    // Highest-risk builtin: it can mutate the project and the system. Always
+    // asks for approval, and is filtered out entirely unless the user opted in.
+    risk: 'dangerous',
+    builtin: true,
+    enabled: true,
+  },
 ]
 
 /** Convenience id set for "is this one of ours?" checks. */

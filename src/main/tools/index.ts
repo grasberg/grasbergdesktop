@@ -26,7 +26,7 @@
 import type { Conversation } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import { ToolRegistry, type DynamicToolSource } from './registry'
-import { ToolExecutor, type ToolCodeService } from './executor'
+import { ToolExecutor, type ToolBrowser, type ToolCodeService } from './executor'
 import { RepoMapService } from '../code/repo-map'
 
 /** MCP surface the tool system consumes (satisfied by McpManager). */
@@ -67,6 +67,14 @@ export interface CreateToolSystemOptions {
   resolveSecretHeaders?: (toolId: string) => Record<string, string>
   /** Connected MCP servers: their tools join the registry and execution loop. */
   mcp?: ToolMcpSource
+  /** Whether run_shell_command may execute (user opt-in). */
+  shellEnabled?: () => boolean
+  /** Whether the browser/computer tools may run (user opt-in). */
+  browserEnabled?: () => boolean
+  /** Embedded browser backing the browser/computer tools. */
+  browser?: ToolBrowser
+  /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
+  delegate?: (task: string, ctx: import('./executor').ToolExecuteContext) => Promise<string>
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }
@@ -93,6 +101,10 @@ export function createToolSystem(
     codeService: codeService ?? null,
     repoMap: new RepoMapService(),
     mcpClient: options.mcp ?? null,
+    shellEnabled: options.shellEnabled,
+    browserEnabled: options.browserEnabled,
+    browser: options.browser ?? null,
+    delegate: options.delegate,
     getProjectRoot,
     resolveSecretHeaders: options.resolveSecretHeaders,
     fetchImpl: options.fetchImpl,

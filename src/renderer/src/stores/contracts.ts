@@ -97,11 +97,14 @@ export interface UiStoreState {
   settingsOpen: boolean
   paletteOpen: boolean
   shortcutsOpen: boolean
+  /** The Workflows builder surface replaces the main area when true. */
+  workflowsOpen: boolean
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
+  openWorkflows(open: boolean): void
   toast(message: string, kind?: ToastKind): void
   dismissToast(id: string): void
 }

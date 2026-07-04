@@ -26,6 +26,8 @@ import {
   type PromptTemplatesRepository,
 } from './repositories/prompt-templates'
 import { createMcpServersRepository, type McpServersRepository } from './repositories/mcp-servers'
+import { createDocumentsRepository, type DocumentsRepository } from './repositories/documents'
+import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -40,6 +42,8 @@ export interface AppDatabase {
   secrets: SecretsRepository
   prompts: PromptTemplatesRepository
   mcpServers: McpServersRepository
+  documents: DocumentsRepository
+  workflows: WorkflowsRepository
   close(): void
 }
 
@@ -61,18 +65,26 @@ function applyMigrations(driver: SqliteDriver): void {
 
   let current = readSchemaVersion(driver)
   const pending = [...MIGRATIONS].sort((a, b) => a.version - b.version)
+  const recordVersion = (version: number): void => {
+    driver.run(
+      `INSERT INTO meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [SCHEMA_VERSION_KEY, String(version)]
+    )
+  }
   for (const migration of pending) {
     if (migration.version <= current) continue
-    driver.transaction(() => {
-      for (const statement of migration.statements) {
-        driver.exec(statement)
-      }
-      driver.run(
-        `INSERT INTO meta (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-        [SCHEMA_VERSION_KEY, String(migration.version)]
-      )
-    })
+    if (migration.noTransaction) {
+      // The statements manage foreign_keys / atomicity themselves (used for
+      // FK-safe table rebuilds). Not wrapped in a transaction.
+      for (const statement of migration.statements) driver.exec(statement)
+      recordVersion(migration.version)
+    } else {
+      driver.transaction(() => {
+        for (const statement of migration.statements) driver.exec(statement)
+        recordVersion(migration.version)
+      })
+    }
     current = migration.version
   }
 }
@@ -99,6 +111,8 @@ export function openDatabase(filePath: string): AppDatabase {
     secrets: createSecretsRepository(driver),
     prompts: createPromptTemplatesRepository(driver),
     mcpServers: createMcpServersRepository(driver),
+    documents: createDocumentsRepository(driver),
+    workflows: createWorkflowsRepository(driver),
     close() {
       driver.close()
     },

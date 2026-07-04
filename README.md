@@ -13,8 +13,11 @@
 - **Model catalog + live listing** — known models with capability badges (tools, vision, reasoning, context length); live `/models` listing where the provider supports it, with catalog fallback.
 - **Markdown rendering** — GitHub-flavored Markdown with syntax-highlighted code blocks.
 - **Per-conversation overrides** — provider, model, system prompt and sampling parameters per conversation, with sensible global defaults.
-- **Three modes** — **Chat** (streaming conversations), **Cowork** (goal-oriented workspaces with notes, plans, checklists and progress summaries; clear separation of your instructions from assistant suggestions and saved notes), and **Code** (open a local folder only with explicit permission, browse the file tree, ask questions about the project, and review proposed changes as diffs that are written to disk only when you click Apply — with a staleness guard that refuses to overwrite a file that changed since the change was proposed).
-- **Tool system with real MCP** — built-in tools (file search, a BM25 `repo_map` code locator, read file, list directory, fetch URL, shell-command *suggestions* that are never executed), user-defined **custom HTTP tools**, and connections to external **MCP (Model Context Protocol) servers** over stdio or HTTP. Every tool goes through the same per-tool permission model; sensitive tools require explicit approval, and models without tool calling fall back to manual instructions.
+- **Five modes** — **Chat** (streaming conversations), **Cowork** (goal-oriented workspaces with notes, plans, checklists and progress summaries), **Code** (open a local folder only with explicit permission, browse the file tree, review proposed changes as diffs applied only on click), **Write** (a Markdown document alongside the chat, editable and exportable to Markdown/HTML), and **Design** (interactive HTML prototypes rendered in a sandboxed preview).
+- **Tool system with real MCP, sub-agents and (opt-in) shell** — built-in tools (file search, a BM25 `repo_map` code locator, read file, list directory, fetch URL, a `delegate` sub-agent, shell-command *suggestions*), an **opt-in `run_shell_command`** that actually executes (approval-gated, project-scoped, with a timeout), user-defined **custom HTTP tools**, and connections to external **MCP (Model Context Protocol) servers** over stdio or HTTP. Every tool goes through the same per-tool permission model; sensitive tools require explicit approval.
+- **Browser & computer use** — an opt-in, embedded, **sandboxed browser** the assistant can drive: a `browser` tool (navigate, read, click, type) and an Anthropic-style `computer` tool (coordinate clicks, type, key, scroll, screenshot). It is isolated from your machine (http/https only, no OS access); vision models also receive screenshots after each action.
+- **Visual workflow builder** — a React Flow canvas to wire nodes (input, template, AI agent, HTTP request, output) into a graph that runs in the main process, passing each node's output to the next.
+- **IM bridge** — run the assistant from a Telegram bot bound to a conversation, plus a generic outbound webhook on each reply (opt-in, your own credentials).
 - **Vision / image input** — attach images to vision-capable models (sent as OpenAI content parts; images are stored on disk, not inline in the database).
 - **Prompt library** — save reusable prompts and insert them into the composer or set one as a conversation's system prompt.
 - **Context compaction** — optionally auto-summarize long conversations so they stay within the model's context window.
@@ -126,12 +129,14 @@ All three modes and the tool system are implemented and covered by the test suit
 1. **Chat mode** — multi-provider streaming chat, secure keys, SQLite history, settings, onboarding, themes, command palette.
 2. **Code mode** — explicit folder grant, file tree, project Q&A, diff proposals with apply/reject gates, staleness guard, and change history. The app never writes to a project file or executes a command without an explicit click; terminal commands are only ever presented as copyable suggestions.
 3. **Cowork mode + tool system** — workspaces with notes/plans/checklists/tasks/docs and progress summaries, plus a tool registry (built-ins, custom HTTP tools and real MCP servers) with per-tool permissions and graceful fallback for non-tool-calling models.
-4. **Beyond the MVP** — vision/image input, a `repo_map` code locator, custom-HTTP-tool and MCP-server management UIs, a prompt library, context compaction, cost estimates, and conversation export are all implemented.
+4. **Beyond the MVP** — vision/image input, a `repo_map` code locator, custom-HTTP-tool and MCP-server management UIs, a prompt library, context compaction, cost estimates, and conversation export.
+5. **Agentic & integration features** — Write and Design modes, opt-in shell execution, browser & computer use (embedded sandboxed browser), a `delegate` sub-agent, a Telegram bridge + outbound webhook, and a visual workflow builder are all implemented.
 
 ### Possible next steps
 
 - Richer diff viewer and multi-file change sets.
 - MCP OAuth transports and a "search mode" for servers exposing very many tools.
+- More workflow node types (branch/loop/schedule) and additional IM platforms.
 - Image generation and speech (input/output).
 
 ## Contributing

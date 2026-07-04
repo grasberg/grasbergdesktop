@@ -8,10 +8,15 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   settingsOpen: false,
   paletteOpen: false,
   shortcutsOpen: false,
+  workflowsOpen: false,
   toasts: [],
 
   setResolvedTheme(t) {
     set({ resolvedTheme: t })
+  },
+
+  openWorkflows(open) {
+    set({ workflowsOpen: open })
   },
 
   openSettings(open) {

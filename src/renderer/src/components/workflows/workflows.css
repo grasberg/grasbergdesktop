@@ -1,0 +1,19 @@
+.workflows { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.workflows-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+}
+.workflows-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.workflows-name { max-width: 260px; }
+.workflows-header-actions { display: flex; gap: 6px; }
+.workflows-body { display: grid; grid-template-columns: 180px 1fr 300px; flex: 1; min-height: 0; }
+.workflows-palette { border-right: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.workflows-palette-btn { justify-content: flex-start; }
+.workflows-canvas { min-width: 0; min-height: 0; background: var(--bg); }
+.workflows-canvas .react-flow__attribution { display: none; }
+.workflows-inspector { border-left: 1px solid var(--border); padding: 12px; overflow-y: auto; background: var(--bg-panel); }
+.workflows-output {
+  background: var(--code-bg); padding: 8px; border-radius: var(--radius-sm);
+  max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 0.8em;
+}
+@media (max-width: 1100px) { .workflows-body { grid-template-columns: 150px 1fr 240px; } }

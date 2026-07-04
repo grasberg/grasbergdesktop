@@ -117,7 +117,7 @@ export interface NormalizedError {
 // Chat
 // ---------------------------------------------------------------------------
 
-export type ConversationMode = 'chat' | 'cowork' | 'code'
+export type ConversationMode = 'chat' | 'cowork' | 'code' | 'write' | 'design'
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
 
@@ -276,6 +276,24 @@ export interface AppSettings {
   compactionEnabled: boolean
   /** Fraction of the model context length at which compaction triggers. */
   compactionThresholdRatio: number
+  /**
+   * Opt-in: allow the run_shell_command tool to actually execute commands
+   * (still gated by per-call approval). Off by default — the app otherwise
+   * only ever *suggests* shell commands.
+   */
+  shellExecutionEnabled: boolean
+  /**
+   * Opt-in: enable the `browser` and `computer` tools (an embedded, sandboxed
+   * browser the assistant can drive). Off by default — they reach the internet
+   * and act on pages, still gated by per-call approval.
+   */
+  browserToolsEnabled: boolean
+  /** IM bridge: run a Telegram bot bound to a conversation (off by default). */
+  telegramBridgeEnabled: boolean
+  /** Conversation the Telegram bridge routes messages to. */
+  telegramBridgeConversationId: string | null
+  /** Generic outbound webhook posted on each assistant completion (opt-in). */
+  outboundWebhookUrl: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -291,6 +309,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 'medium',
   compactionEnabled: false,
   compactionThresholdRatio: 0.75,
+  shellExecutionEnabled: false,
+  browserToolsEnabled: false,
+  telegramBridgeEnabled: false,
+  telegramBridgeConversationId: null,
+  outboundWebhookUrl: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +561,97 @@ export interface McpServerRuntime {
   error: string | null
   toolCount: number
   tools: McpDiscoveredTool[]
+}
+
+// ---------------------------------------------------------------------------
+// Write / Design documents
+// ---------------------------------------------------------------------------
+
+export type DocumentKind = 'doc' | 'html'
+
+export interface Document {
+  id: string
+  conversationId: string
+  /** 'doc' = Write-mode Markdown document; 'html' = Design-mode prototype. */
+  kind: DocumentKind
+  title: string
+  content: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type DocumentExportFormat = 'markdown' | 'html'
+
+// ---------------------------------------------------------------------------
+// Workflows (visual node graph)
+// ---------------------------------------------------------------------------
+
+export type WorkflowNodeKind = 'manual' | 'ai_agent' | 'http_request' | 'template' | 'output'
+
+export interface WorkflowNode {
+  id: string
+  kind: WorkflowNodeKind
+  label: string
+  position: { x: number; y: number }
+  /** Kind-specific configuration (prompt, url, template, …). */
+  config: Record<string, unknown>
+}
+
+export interface WorkflowEdge {
+  id: string
+  source: string
+  target: string
+}
+
+export interface WorkflowGraph {
+  nodes: WorkflowNode[]
+  edges: WorkflowEdge[]
+}
+
+export interface Workflow {
+  id: string
+  name: string
+  graph: WorkflowGraph
+  createdAt: number
+  updatedAt: number
+}
+
+export interface WorkflowInput {
+  name: string
+  graph: WorkflowGraph
+}
+
+export interface WorkflowRunResult {
+  ok: boolean
+  /** nodeId -> its string output (only for nodes that ran). */
+  nodeOutputs: Record<string, string>
+  /** Execution order (node ids). */
+  order: string[]
+  /** Present when the run failed. */
+  error?: string
+  /** nodeId where it failed, when applicable. */
+  failedNodeId?: string
+}
+
+// ---------------------------------------------------------------------------
+// IM bridges
+// ---------------------------------------------------------------------------
+
+export interface ImBridgeStatus {
+  telegramEnabled: boolean
+  telegramConversationId: string | null
+  /** Whether the poll loop is currently running. */
+  telegramConnected: boolean
+  /** Whether a bot token is stored (value never returned). */
+  hasToken: boolean
+  webhookUrl: string | null
+}
+
+export interface SetTelegramBridgeInput {
+  /** New bot token to store (omit/empty to keep the existing one). */
+  token?: string
+  conversationId: string | null
+  enabled: boolean
 }
 
 // ---------------------------------------------------------------------------

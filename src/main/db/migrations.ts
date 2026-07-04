@@ -12,6 +12,11 @@ export interface Migration {
   version: number
   name: string
   statements: string[]
+  /**
+   * Run the statements OUTSIDE a transaction. Needed for table rebuilds that
+   * toggle `PRAGMA foreign_keys` (which is a no-op inside a transaction).
+   */
+  noTransaction?: boolean
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -240,6 +245,73 @@ export const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )`,
+    ],
+  },
+  {
+    version: 8,
+    name: 'conversation-modes-write-design',
+    // FK-safe rebuild of `conversations` to widen the mode CHECK. Runs outside
+    // a transaction so PRAGMA foreign_keys can be toggled; the messages FK
+    // (ON DELETE CASCADE) would otherwise wipe messages when the old table is
+    // dropped. Column list mirrors the current schema (v1 + v6 additions).
+    noTransaction: true,
+    statements: [
+      `PRAGMA foreign_keys = OFF`,
+      `CREATE TABLE conversations_new (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL DEFAULT 'chat' CHECK (mode IN ('chat','cowork','code','write','design')),
+        title TEXT NOT NULL DEFAULT 'New chat',
+        provider_id TEXT,
+        model_id TEXT,
+        system_prompt TEXT,
+        params_json TEXT NOT NULL DEFAULT '{}',
+        workspace_id TEXT,
+        project_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        summary_text TEXT,
+        summary_through_seq INTEGER
+      )`,
+      `INSERT INTO conversations_new SELECT * FROM conversations`,
+      `DROP TABLE conversations`,
+      `ALTER TABLE conversations_new RENAME TO conversations`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_mode ON conversations(mode, updated_at DESC)`,
+      `PRAGMA foreign_keys = ON`,
+    ],
+  },
+  {
+    version: 9,
+    name: 'documents',
+    statements: [
+      // Write-mode documents and Design-mode HTML prototypes, keyed to a
+      // conversation. kind 'doc' = Markdown document, 'html' = prototype.
+      `CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'doc' CHECK (kind IN ('doc','html')),
+        title TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_documents_conv ON documents(conversation_id, updated_at DESC)`,
+    ],
+  },
+  {
+    version: 10,
+    name: 'workflows',
+    statements: [
+      // Visual node-graph workflows. The graph (nodes + edges) is stored as
+      // JSON; the execution engine interprets it in the main process.
+      `CREATE TABLE IF NOT EXISTS workflows (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        graph_json TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[]}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_workflows_updated ON workflows(updated_at DESC)`,
     ],
   },
 ]

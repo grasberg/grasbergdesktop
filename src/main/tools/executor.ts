@@ -5,9 +5,12 @@
  * as readable strings, redacted of anything secret-looking.
  *
  * SAFETY INVARIANTS (non-negotiable, mirrored in tests):
- * - This module never imports child_process and has NO code path that
- *   executes a shell command. 'propose_shell_command' only returns a note.
- * - This module never writes to any user file (read-only fs access).
+ * - 'propose_shell_command' NEVER executes anything (suggestion only).
+ * - 'run_shell_command' DOES execute, but only when the user opted into shell
+ *   execution (shellEnabled) AND approved the specific call; it runs in the
+ *   granted project folder with a timeout and output caps. It is the sole
+ *   execution path and is filtered out of the tool list when disabled.
+ * - This module never writes to any user file directly (read-only fs access).
  * - File access is confined to the conversation's granted project root;
  *   path traversal and symlinked escapes are rejected.
  * - Sensitive tools require the user's explicit approval per call unless the
@@ -29,6 +32,7 @@ import { redactKnownSecrets, redactSecrets } from '../providers/redact'
 import { TOOL_RESULT_MAX_CHARS } from './definitions'
 import { customToolHeaders } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
+import { runShell } from './shell'
 import type { ToolRegistry } from './registry'
 
 // ---------------------------------------------------------------------------
@@ -55,6 +59,16 @@ export interface ToolRepoMap {
   ): Promise<Array<{ relPath: string; score: number; symbols: string[] }>>
 }
 
+/** Structural subset of the embedded browser used by the browser/computer tools. */
+export interface ToolBrowser {
+  navigate(url: string): Promise<string>
+  readPage(): Promise<string>
+  back(): Promise<string>
+  clickSelector(selector: string, byText: boolean): Promise<string>
+  typeText(selector: string, text: string): Promise<string>
+  computer(action: string, coordinate?: [number, number], text?: string): Promise<string>
+}
+
 export interface ToolExecutorDeps {
   registry: ToolRegistry
   /** Optional: when present, read_file goes through it (shared size limits). */
@@ -63,6 +77,14 @@ export interface ToolExecutorDeps {
   repoMap?: ToolRepoMap | null
   /** Optional: routes 'mcp__…' tool calls to the connected MCP server. */
   mcpClient?: { callTool(toolId: string, args: Record<string, unknown>): Promise<string> } | null
+  /** Whether run_shell_command may actually execute (user opt-in). */
+  shellEnabled?: () => boolean
+  /** Whether the browser/computer tools may run (user opt-in). */
+  browserEnabled?: () => boolean
+  /** Embedded browser for the browser/computer tools. */
+  browser?: ToolBrowser | null
+  /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
+  delegate?: (task: string, ctx: ToolExecuteContext) => Promise<string>
   /** Absolute path of the project folder granted to this conversation, or null. */
   getProjectRoot: (conversation: Conversation) => string | null
   /**
@@ -102,6 +124,7 @@ const SEARCH_MAX_RESULTS = 50
 const SEARCH_LINE_MAX_CHARS = 240
 const WALK_MAX_ENTRIES = 20_000
 const WALK_MAX_DEPTH = 24
+const SHELL_TIMEOUT_MS = 60_000
 
 /** Directory names skipped while walking (dependency/build/VCS noise). */
 const IGNORED_DIR_NAMES = new Set([
@@ -357,6 +380,14 @@ export class ToolExecutor {
         return this.runFetchUrl(args)
       case 'propose_shell_command':
         return this.runProposeShellCommand(args)
+      case 'run_shell_command':
+        return this.runShellCommand(args, ctx)
+      case 'delegate':
+        return this.runDelegate(args, ctx)
+      case 'browser':
+        return this.runBrowser(args)
+      case 'computer':
+        return this.runComputer(args)
       default:
         if (isMcpToolId(definition.id) && this.deps.mcpClient) {
           return this.deps.mcpClient.callTool(definition.id, args)
@@ -587,6 +618,101 @@ export class ToolExecutor {
     // There is intentionally NO execution path here: no child_process, no
     // shell, nothing. The renderer shows the suggestion; the user decides.
     return `Command suggested to the user (not executed): ${command}`
+  }
+
+  // -- browser + computer use --------------------------------------------------
+
+  private requireBrowser(): ToolBrowser | string {
+    if (!this.deps.browserEnabled?.()) {
+      return 'Error: browser tools are disabled. The user can enable them in Settings → Tools.'
+    }
+    if (!this.deps.browser) return 'Error: the browser is unavailable in this build.'
+    return this.deps.browser
+  }
+
+  private async runBrowser(args: Record<string, unknown>): Promise<string> {
+    const browser = this.requireBrowser()
+    if (typeof browser === 'string') return browser
+    const action = (getString(args, 'action') ?? '').trim()
+    switch (action) {
+      case 'navigate':
+        return browser.navigate((getString(args, 'url') ?? '').trim())
+      case 'read':
+        return browser.readPage()
+      case 'back':
+        return browser.back()
+      case 'click': {
+        const text = getString(args, 'text')
+        if (text && text.trim()) return browser.clickSelector(text.trim(), true)
+        const selector = (getString(args, 'selector') ?? '').trim()
+        if (!selector) return "Error: 'click' needs a 'selector' or 'text'."
+        return browser.clickSelector(selector, false)
+      }
+      case 'type': {
+        const selector = (getString(args, 'selector') ?? '').trim()
+        const text = getString(args, 'text') ?? ''
+        if (!selector) return "Error: 'type' needs a 'selector'."
+        return browser.typeText(selector, text)
+      }
+      default:
+        return `Error: unknown browser action '${action}'.`
+    }
+  }
+
+  private async runComputer(args: Record<string, unknown>): Promise<string> {
+    const browser = this.requireBrowser()
+    if (typeof browser === 'string') return browser
+    const action = (getString(args, 'action') ?? '').trim()
+    if (action.length === 0) return "Error: 'action' is required."
+    let coordinate: [number, number] | undefined
+    const raw = args.coordinate
+    if (Array.isArray(raw) && raw.length === 2 && raw.every((n) => typeof n === 'number')) {
+      coordinate = [raw[0] as number, raw[1] as number]
+    }
+    const text = getString(args, 'text') ?? undefined
+    return browser.computer(action, coordinate, text)
+  }
+
+  // -- sub-agent delegation ----------------------------------------------------
+
+  private async runDelegate(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!this.deps.delegate) return 'Error: sub-agent delegation is unavailable in this build.'
+    const task = (getString(args, 'task') ?? '').trim()
+    if (task.length === 0) return "Error: 'task' must be a non-empty string."
+    const context = (getString(args, 'context') ?? '').trim()
+    const prompt = context ? `${task}\n\nContext:\n${context}` : task
+    return this.deps.delegate(prompt, ctx)
+  }
+
+  // -- shell execution (opt-in, approval-gated) --------------------------------
+
+  private async runShellCommand(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!this.deps.shellEnabled?.()) {
+      return 'Error: shell command execution is disabled. The user can enable it in Settings → Tools.'
+    }
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+    const command = (getString(args, 'command') ?? '').trim()
+    if (command.length === 0) return "Error: 'command' must be a non-empty string."
+
+    const result = await runShell(command, root, SHELL_TIMEOUT_MS)
+    const parts: string[] = []
+    if (result.timedOut) {
+      parts.push(`Command timed out after ${SHELL_TIMEOUT_MS / 1000}s and was killed.`)
+    } else if (result.aborted) {
+      parts.push('Command was aborted.')
+    } else {
+      parts.push(`Exit code: ${result.code ?? 'unknown'}`)
+    }
+    if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout.trimEnd()}`)
+    if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr.trimEnd()}`)
+    return redactSecrets(parts.join('\n\n')) || '(no output)'
   }
 
   // -- custom HTTP tools --------------------------------------------------------------

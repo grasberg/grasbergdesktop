@@ -454,6 +454,93 @@ describe('MCP tools', () => {
   })
 })
 
+describe('browser + computer tools (opt-in)', () => {
+  function fakeBrowser() {
+    return {
+      navigate: vi.fn(async (url: string) => `navigated to ${url}`),
+      readPage: vi.fn(async () => 'page text'),
+      back: vi.fn(async () => 'went back'),
+      clickSelector: vi.fn(async (sel: string, byText: boolean) => `clicked ${byText ? 'text' : 'sel'} ${sel}`),
+      typeText: vi.fn(async (sel: string, text: string) => `typed "${text}" into ${sel}`),
+      computer: vi.fn(async (action: string, coord?: [number, number]) => `computer ${action} ${JSON.stringify(coord)}`),
+    }
+  }
+
+  it('routes the browser tool to the embedded browser (with approval)', async () => {
+    db.settings.update({ browserToolsEnabled: true })
+    const browser = fakeBrowser()
+    const { executor } = createToolSystem(db, null, { browserEnabled: () => true, browser })
+    const approval = vi.fn(async () => true)
+    const result = await executor.execute(
+      call('browser', { action: 'navigate', url: 'https://example.com' }),
+      { conversation: conv(false), approval }
+    )
+    expect(approval).toHaveBeenCalledTimes(1) // sensitive -> ask
+    expect(browser.navigate).toHaveBeenCalledWith('https://example.com')
+    expect(result).toContain('navigated to https://example.com')
+  })
+
+  it('routes the computer tool with coordinates', async () => {
+    db.settings.update({ browserToolsEnabled: true })
+    const browser = fakeBrowser()
+    const { executor } = createToolSystem(db, null, { browserEnabled: () => true, browser })
+    const result = await executor.execute(
+      call('computer', { action: 'left_click', coordinate: [12, 34] }),
+      { conversation: conv(false), approval: approveAll }
+    )
+    expect(browser.computer).toHaveBeenCalledWith('left_click', [12, 34], undefined)
+    expect(result).toContain('computer left_click')
+  })
+
+  it('refuses when browser tools are disabled', async () => {
+    db.settings.update({ browserToolsEnabled: true })
+    const { executor } = createToolSystem(db, null, { browserEnabled: () => false, browser: fakeBrowser() })
+    const result = await executor.execute(call('browser', { action: 'read' }), {
+      conversation: conv(false),
+      approval: approveAll,
+    })
+    expect(result).toMatch(/disabled/i)
+  })
+
+  it('are not offered to the model when the setting is off', () => {
+    const { registry } = createToolSystem(db) // default: browser tools off
+    const ids = registry.listDefinitions().map((t) => t.id)
+    expect(ids).not.toContain('browser')
+    expect(ids).not.toContain('computer')
+  })
+})
+
+describe('run_shell_command tool (opt-in)', () => {
+  it('executes a command in the project root when enabled and approved', async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const approval = vi.fn(async () => true)
+    const result = await executor.execute(
+      call('run_shell_command', { command: 'echo shellok123' }),
+      { conversation: conv(true), approval }
+    )
+    expect(approval).toHaveBeenCalledTimes(1) // dangerous -> ask
+    expect(result).toContain('shellok123')
+    expect(result.toLowerCase()).toContain('exit code')
+  })
+
+  it('refuses to execute when shell execution is disabled', async () => {
+    // Registry lists the tool (db setting on) but the executor guard is off.
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => false })
+    const result = await executor.execute(call('run_shell_command', { command: 'echo nope' }), {
+      conversation: conv(true),
+      approval: approveAll,
+    })
+    expect(result).toMatch(/disabled/i)
+  })
+
+  it('is not offered to the model when the setting is off', () => {
+    const { registry } = createToolSystem(db) // default settings: shell off
+    expect(registry.listDefinitions().some((t) => t.id === 'run_shell_command')).toBe(false)
+  })
+})
+
 describe('repo_map tool', () => {
   it('ranks project files for a query and lists their symbols', async () => {
     const { executor } = createToolSystem(db)

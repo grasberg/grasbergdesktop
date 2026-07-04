@@ -29,17 +29,20 @@ version is stored in the `meta` table under key `schema_version`. Adding a
 schema change means appending a new migration object — never editing an
 existing one.
 
-The schema is currently at **version 7**:
+The schema is currently at **version 10**:
 
 | Version | Name | Adds |
 |---|---|---|
 | 1 | `initial-schema` | all core tables |
 | 2 | `custom-tools` | `custom_tools` table (user-defined HTTP tools) |
 | 3 | `code-change-old-content` | `code_changes.old_content` (staleness guard) |
-| 4 | `tool-secrets` | `tool_secrets` table (encrypted custom-tool / MCP secrets) |
+| 4 | `tool-secrets` | `tool_secrets` table (encrypted custom-tool / MCP / IM secrets) |
 | 5 | `prompt-templates` | `prompt_templates` table (prompt library) |
 | 6 | `conversation-summary` | `conversations.summary_text` + `summary_through_seq` (context compaction) |
 | 7 | `mcp-servers` | `mcp_servers` table (MCP server configs) |
+| 8 | `conversation-modes-write-design` | widens `conversations.mode` to include `write`/`design` (FK-safe rebuild, runs outside a transaction with `foreign_keys` off) |
+| 9 | `documents` | `documents` table (Write docs + Design HTML prototypes) |
+| 10 | `workflows` | `workflows` table (visual node-graph workflows) |
 
 ## Tables
 
@@ -61,8 +64,8 @@ outward. `scope` distinguishes the owner kind so one table backs both.
 
 | Column | Type | Notes |
 |---|---|---|
-| `scope` | TEXT | `custom_tool` \| `mcp_server` (PK part) |
-| `owner_id` | TEXT | custom-tool / mcp-server id (PK part) |
+| `scope` | TEXT | `custom_tool` \| `mcp_server` \| `im_bridge` (PK part) |
+| `owner_id` | TEXT | owner id (custom-tool / mcp-server id, or `telegram`) (PK part) |
 | `name` | TEXT | header / env var name (PK part) |
 | `encrypted_value` | TEXT | safeStorage ciphertext, base64 |
 | `preview` | TEXT | masked preview, safe to display |
@@ -99,6 +102,34 @@ non-secret env/headers are stored here.
 | `url` | TEXT nullable | http endpoint |
 | `headers_json` | TEXT | non-secret headers JSON, default `'{}'` |
 | `enabled` | INTEGER | 0/1, default 1 |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+### `documents` (v9, Write / Design modes)
+
+Write-mode Markdown documents and Design-mode HTML prototypes, keyed to a
+conversation. A conversation has at most one `doc` and any number of `html`
+prototypes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `conversation_id` | TEXT FK → `conversations(id)` ON DELETE CASCADE | |
+| `kind` | TEXT | `doc` \| `html` (CHECK) |
+| `title` | TEXT | |
+| `content` | TEXT | Markdown (doc) or full HTML (prototype) |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+### `workflows` (v10)
+
+Visual node-graph workflows. The graph is stored as JSON; the engine
+(`src/main/workflows/engine.ts`) interprets it (nodes: manual, template,
+ai_agent, http_request, output).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `name` | TEXT | |
+| `graph_json` | TEXT | `{nodes,edges}` JSON, default empty graph |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
 ### `providers`

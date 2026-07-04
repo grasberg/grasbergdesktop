@@ -24,11 +24,19 @@ import type {
   CustomToolInfo,
   CustomToolInput,
   CustomToolPatch,
+  Document,
+  DocumentExportFormat,
   FileTreeNode,
+  ImBridgeStatus,
   McpServerConfig,
   McpServerInput,
   McpServerPatch,
   McpServerRuntime,
+  SetTelegramBridgeInput,
+  Workflow,
+  WorkflowGraph,
+  WorkflowInput,
+  WorkflowRunResult,
   Message,
   ModelInfo,
   NormalizedError,
@@ -147,6 +155,25 @@ export const CHANNELS = {
   mcpSetEnabled: 'mcp:setEnabled',
   mcpReconnect: 'mcp:reconnect',
   mcpStatus: 'mcp:status',
+
+  // IM bridges
+  imStatus: 'im:status',
+  imSetTelegram: 'im:setTelegram',
+  imSetWebhook: 'im:setWebhook',
+
+  // Write / Design documents
+  documentsGet: 'documents:get',
+  documentsSave: 'documents:save',
+  documentsListHtml: 'documents:listHtml',
+  documentsExport: 'documents:export',
+
+  // Workflows
+  workflowsList: 'workflows:list',
+  workflowsGet: 'workflows:get',
+  workflowsCreate: 'workflows:create',
+  workflowsUpdate: 'workflows:update',
+  workflowsDelete: 'workflows:delete',
+  workflowsRun: 'workflows:run',
 
   // push channels (main -> renderer, via webContents.send)
   streamEvent: 'push:streamEvent',
@@ -362,6 +389,33 @@ export interface UldApi {
     reconnect(id: string): Promise<IpcResult<McpServerRuntime[]>>
     status(): Promise<IpcResult<McpServerRuntime[]>>
     onServersChanged(cb: (runtime: McpServerRuntime[]) => void): () => void
+  }
+  im: {
+    status(): Promise<IpcResult<ImBridgeStatus>>
+    /** Token travels to main once, is encrypted immediately, never returned. */
+    setTelegram(input: SetTelegramBridgeInput): Promise<IpcResult<ImBridgeStatus>>
+    setWebhook(url: string | null): Promise<IpcResult<ImBridgeStatus>>
+  }
+  documents: {
+    /** The Write-mode document for a conversation (null if none yet). */
+    get(conversationId: string): Promise<IpcResult<Document | null>>
+    /** Create/replace the Write document's content. */
+    save(conversationId: string, content: string): Promise<IpcResult<Document>>
+    /** Design-mode HTML prototypes for a conversation, newest first. */
+    listHtml(conversationId: string): Promise<IpcResult<Document[]>>
+    export(
+      id: string,
+      format: DocumentExportFormat
+    ): Promise<IpcResult<{ canceled: boolean; path?: string }>>
+  }
+  workflows: {
+    list(): Promise<IpcResult<Workflow[]>>
+    get(id: string): Promise<IpcResult<Workflow | null>>
+    create(input: WorkflowInput): Promise<IpcResult<Workflow>>
+    update(id: string, input: WorkflowInput): Promise<IpcResult<Workflow>>
+    delete(id: string): Promise<IpcResult<void>>
+    /** Runs the given graph (the live editor state) and returns per-node output. */
+    run(graph: WorkflowGraph): Promise<IpcResult<WorkflowRunResult>>
   }
 }
 

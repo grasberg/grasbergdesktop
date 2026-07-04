@@ -3,6 +3,9 @@ import type { ConversationMode } from '@shared/types'
 import ChatView from '@/components/chat/ChatView'
 import CodeView from '@/components/code/CodeView'
 import CoworkView from '@/components/cowork/CoworkView'
+import WriteView from '@/components/write/WriteView'
+import DesignView from '@/components/design/DesignView'
+import WorkflowsView from '@/components/workflows/WorkflowsView'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 import Onboarding from '@/components/onboarding/Onboarding'
 import CommandPalette from '@/components/CommandPalette'
@@ -24,6 +27,8 @@ import { useUiStore } from '@/stores/ui'
 function ModeView({ mode }: { mode: ConversationMode }): React.JSX.Element {
   if (mode === 'code') return <CodeView />
   if (mode === 'cowork') return <CoworkView />
+  if (mode === 'write') return <WriteView />
+  if (mode === 'design') return <DesignView />
   return <ChatView />
 }
 
@@ -40,6 +45,7 @@ export default function App(): React.JSX.Element {
     s.conversation && s.conversation.id === activeId ? s.conversation.mode : undefined
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
+  const workflowsOpen = useUiStore((s) => s.workflowsOpen)
 
   useKeyboardShortcuts()
 
@@ -131,8 +137,14 @@ export default function App(): React.JSX.Element {
     <>
       <div className="app-layout">
         <Sidebar />
-        <main className="app-main" aria-label="Conversation">
-          {activeId ? <ModeView mode={mode} /> : <EmptyState />}
+        <main className="app-main" aria-label={workflowsOpen ? 'Workflows' : 'Conversation'}>
+          {workflowsOpen ? (
+            <WorkflowsView />
+          ) : activeId ? (
+            <ModeView mode={mode} />
+          ) : (
+            <EmptyState />
+          )}
         </main>
       </div>
       <SettingsPanel />

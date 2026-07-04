@@ -101,6 +101,8 @@ export interface ChatServiceOptions {
   resolveAdapter?: (type: ProviderType) => ProviderAdapter
   /** Directory holding stored image attachments (for the vision wire payload). */
   imageDir?: string
+  /** Embedded browser — a computer-use screenshot is injected after each round. */
+  browser?: { consumePendingScreenshot(): string | null }
 }
 
 interface ResolvedTarget {
@@ -239,6 +241,23 @@ interface HistoryBuildOptions {
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
 }
+
+// -- sub-agent delegation -----------------------------------------------------
+
+const DELEGATE_MAX_ROUNDS = 4
+/** Read-only builtin tools a delegated sub-agent may use. */
+const DELEGATE_TOOL_IDS = new Set([
+  'file_search',
+  'repo_map',
+  'read_file',
+  'list_directory',
+  'fetch_url',
+])
+const DELEGATE_PERSONA =
+  'You are a focused sub-agent working on a single delegated task. You do not see the parent ' +
+  'conversation — work only from the task and context you are given. Use the available read-only ' +
+  'tools when they help, then return a concise, self-contained result. Do not ask questions; make ' +
+  'reasonable assumptions and state them.'
 
 /** Text of a message for estimation/summarization (inlines attachment text). */
 function messageEstimateText(message: Message): string {
@@ -634,6 +653,156 @@ export class ChatService {
   }
 
   /**
+   * Non-streaming generation used by headless callers (e.g. the Telegram
+   * bridge). Persists the incoming user message and the assistant reply, and
+   * returns the reply text. Throws on config errors (no provider/key/model).
+   */
+  async generateHeadless(conversationId: string, userText: string): Promise<string> {
+    const conversation = this.requireConversation(conversationId)
+    const settings = this.db.settings.get()
+    const resolved = this.resolveTarget(conversation, settings, undefined)
+
+    const userMessage: Message = {
+      id: randomUUID(),
+      conversationId,
+      role: 'user',
+      content: userText,
+      status: 'complete',
+      seq: this.db.messages.nextSeq(conversationId),
+      createdAt: Date.now(),
+    }
+    this.db.messages.insert(userMessage)
+
+    const toolPlan = this.planTools(resolved)
+    const visionEnabled =
+      findCatalogModel(resolved.provider.type, resolved.modelId)?.capabilities.vision ??
+      UNKNOWN_MODEL_CAPS.vision
+    const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
+    const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+    const result = await adapter.chat(
+      {
+        modelId: resolved.modelId,
+        messages: history,
+        params: resolved.params,
+        stream: false,
+      },
+      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+    )
+
+    const assistant: Message = {
+      id: randomUUID(),
+      conversationId,
+      role: 'assistant',
+      content: result.text,
+      reasoning: result.reasoning,
+      status: 'complete',
+      providerId: resolved.provider.id,
+      modelId: resolved.modelId,
+      usage: result.usage,
+      seq: this.db.messages.nextSeq(conversationId),
+      createdAt: Date.now(),
+    }
+    this.db.messages.insert(assistant)
+    this.db.conversations.touch(conversationId, Date.now())
+    this.broadcast(CHANNELS.conversationsChanged, {})
+    await runCompletionHooks(conversation, assistant)
+    return result.text
+  }
+
+  /**
+   * One-shot, conversation-less generation for workflow ai_agent nodes.
+   * Resolves the provider/model from the given ids or the global defaults.
+   * Throws on config errors (no provider/key/model).
+   */
+  async generateForWorkflow(prompt: string, providerId?: string, modelId?: string): Promise<string> {
+    const settings = this.db.settings.get()
+    const stub: Conversation = {
+      id: 'workflow',
+      mode: 'chat',
+      title: '',
+      providerId: null,
+      modelId: null,
+      systemPrompt: null,
+      params: {},
+      workspaceId: null,
+      projectId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    }
+    const resolved = this.resolveTarget(stub, settings, { providerId, modelId })
+    const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+    const result = await adapter.chat(
+      {
+        modelId: resolved.modelId,
+        messages: [{ role: 'user', content: prompt }],
+        params: resolved.params,
+        stream: false,
+      },
+      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+    )
+    return result.text
+  }
+
+  /**
+   * Runs a sub-agent for the 'delegate' tool: a bounded, non-streaming
+   * reasoning loop over the same provider/model with read-only project tools.
+   * Nested tool calls reuse the parent's approval callback (so the user still
+   * approves anything sensitive). Never throws — returns a string result.
+   */
+  async runDelegate(task: string, ctx: ToolExecuteContext): Promise<string> {
+    try {
+      const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
+      const settings = this.db.settings.get()
+      const resolved = this.resolveTarget(parent, settings, undefined)
+      const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+      const tools = this.options.tools
+
+      const toolDefs: AdapterToolDef[] = tools
+        ? tools.registry
+            .listEnabledDefinitions()
+            .filter((d) => DELEGATE_TOOL_IDS.has(d.id))
+            .map((d) => ({ name: d.id, description: d.description, parameters: d.parameters }))
+        : []
+
+      const messages: AdapterMessage[] = [
+        { role: 'system', content: DELEGATE_PERSONA },
+        { role: 'user', content: task },
+      ]
+      let final = ''
+      for (let round = 0; round < DELEGATE_MAX_ROUNDS; round++) {
+        const result = await adapter.chat(
+          {
+            modelId: resolved.modelId,
+            messages,
+            params: resolved.params,
+            tools: toolDefs.length > 0 ? toolDefs : undefined,
+            stream: false,
+          },
+          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+        )
+        if (result.text.trim()) final = result.text
+        if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
+        messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
+        for (const call of result.toolCalls) {
+          const out = DELEGATE_TOOL_IDS.has(call.name)
+            ? await tools.executor.execute(call, {
+                conversation: parent,
+                streamId: ctx.streamId,
+                approval: ctx.approval,
+              })
+            : `Tool '${call.name}' is not available to the sub-agent.`
+          messages.push({ role: 'tool', content: out, toolCallId: call.id })
+        }
+      }
+      return final.trim().length > 0
+        ? `Sub-agent result:\n${final.trim()}`
+        : 'The sub-agent produced no result.'
+    } catch (e) {
+      return `Delegation failed: ${toNormalizedError(e).message}`
+    }
+  }
+
+  /**
    * Drives the generation, including the tool loop:
    * - Rounds where the adapter finishes with 'tool_calls' execute each call
    *   through the ToolExecutor (permission short-circuits and per-call user
@@ -831,6 +1000,21 @@ export class ChatService {
         messages.push({ role: 'assistant', content: roundText, toolCalls: roundCalls })
         for (const call of roundCalls) {
           messages.push({ role: 'tool', content: call.result ?? '', toolCallId: call.id })
+        }
+
+        // A computer-use action leaves a screenshot; give it to a vision model
+        // as a synthetic user image (OpenAI rejects images in tool messages).
+        if (buildOpts.visionEnabled && this.options.browser) {
+          const shot = this.options.browser.consumePendingScreenshot()
+          if (shot) {
+            messages.push({
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Screenshot after the computer action:' },
+                { type: 'image_url', image_url: { url: shot } },
+              ],
+            })
+          }
         }
 
         if (controller.signal.aborted) {

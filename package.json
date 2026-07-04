@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xyflow/react": "^12.11.1",
     "highlight.js": "^11.9.0",
     "node-sqlite3-wasm": "^0.8.0",
     "react": "^19.0.0",

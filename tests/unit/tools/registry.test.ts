@@ -33,6 +33,7 @@ describe('ToolRegistry.listDefinitions', () => {
     const registry = new ToolRegistry(db!)
     const definitions = registry.listDefinitions()
 
+    // Shell execution is off by default, so run_shell_command is not listed.
     expect(definitions.map((d) => d.id)).toEqual([
       'file_search',
       'repo_map',
@@ -40,6 +41,7 @@ describe('ToolRegistry.listDefinitions', () => {
       'list_directory',
       'fetch_url',
       'propose_shell_command',
+      'delegate',
     ])
     for (const def of definitions) {
       expect(def.builtin).toBe(true)
@@ -47,6 +49,7 @@ describe('ToolRegistry.listDefinitions', () => {
     }
     const byId = new Map(definitions.map((d) => [d.id, d]))
     expect(byId.get('repo_map')!.risk).toBe('sensitive')
+    expect(byId.get('delegate')!.risk).toBe('safe')
     expect(byId.get('file_search')!.risk).toBe('sensitive')
     expect(byId.get('read_file')!.risk).toBe('sensitive')
     expect(byId.get('list_directory')!.risk).toBe('sensitive')
@@ -76,6 +79,8 @@ describe('ToolRegistry.listDefinitions', () => {
 
 describe('ToolRegistry permissions', () => {
   it("defaults to 'ask' for sensitive tools and 'always_allow' for safe tools", () => {
+    // Enable shell so run_shell_command is included in the builtin set.
+    db!.settings.update({ shellExecutionEnabled: true, browserToolsEnabled: true })
     const registry = new ToolRegistry(db!)
     const permissions = new Map(registry.listPermissions().map((p) => [p.toolId, p]))
 
@@ -104,6 +109,7 @@ describe('ToolRegistry permissions', () => {
 
 describe('ToolRegistry custom tools', () => {
   it('add/list/resolve/remove roundtrip with the fixed mapping', () => {
+    db!.settings.update({ shellExecutionEnabled: true, browserToolsEnabled: true })
     const registry = new ToolRegistry(db!)
     const definition = registry.addCustomTool({
       name: 'weather_lookup',

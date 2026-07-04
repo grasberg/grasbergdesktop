@@ -130,6 +130,25 @@ const api: UldApi = {
       }
     },
   },
+  im: {
+    status: () => ipcRenderer.invoke(CHANNELS.imStatus),
+    setTelegram: (input) => ipcRenderer.invoke(CHANNELS.imSetTelegram, input),
+    setWebhook: (url) => ipcRenderer.invoke(CHANNELS.imSetWebhook, url),
+  },
+  documents: {
+    get: (conversationId) => ipcRenderer.invoke(CHANNELS.documentsGet, conversationId),
+    save: (conversationId, content) => ipcRenderer.invoke(CHANNELS.documentsSave, conversationId, content),
+    listHtml: (conversationId) => ipcRenderer.invoke(CHANNELS.documentsListHtml, conversationId),
+    export: (id, format) => ipcRenderer.invoke(CHANNELS.documentsExport, id, format),
+  },
+  workflows: {
+    list: () => ipcRenderer.invoke(CHANNELS.workflowsList),
+    get: (id) => ipcRenderer.invoke(CHANNELS.workflowsGet, id),
+    create: (input) => ipcRenderer.invoke(CHANNELS.workflowsCreate, input),
+    update: (id, input) => ipcRenderer.invoke(CHANNELS.workflowsUpdate, id, input),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.workflowsDelete, id),
+    run: (graph) => ipcRenderer.invoke(CHANNELS.workflowsRun, graph),
+  },
 }
 
 contextBridge.exposeInMainWorld('uld', api)

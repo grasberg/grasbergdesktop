@@ -87,6 +87,38 @@ export function extractCodeChanges(content: string): ExtractedCodeChange[] {
   return changes
 }
 
+export interface ExtractedDocument {
+  title: string
+  /** Complete document content (Markdown for docs, HTML for prototypes). */
+  content: string
+}
+
+/** Extracts the LAST ```uld-doc block: {"title"} header + full Markdown body. */
+export function extractDocument(content: string): ExtractedDocument | null {
+  const blocks = parseRawBlocks(content, 'uld-doc')
+  const last = blocks[blocks.length - 1]
+  if (!last) return null
+  const title = last.header['title']
+  return {
+    title: typeof title === 'string' ? title.trim() : 'Document',
+    content: last.body.trimEnd(),
+  }
+}
+
+/** Extracts all ```uld-html prototype blocks: {"title"} header + full HTML body. */
+export function extractHtmlArtifacts(content: string): ExtractedDocument[] {
+  const out: ExtractedDocument[] = []
+  for (const { header, body } of parseRawBlocks(content, 'uld-html')) {
+    if (body.trim().length === 0) continue
+    const title = header['title']
+    out.push({
+      title: typeof title === 'string' && title.trim() ? title.trim() : 'Prototype',
+      content: body.trimEnd(),
+    })
+  }
+  return out
+}
+
 /** Extracts ```uld-item blocks: {"kind","title"} header + markdown body. */
 export function extractWorkspaceItems(content: string): ExtractedWorkspaceItem[] {
   const items: ExtractedWorkspaceItem[] = []

@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto'
 import { BrowserWindow, app, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { CHANNELS, err, ok, type ChannelName, type PickFilesResult } from '@shared/ipc'
-import type { AppInfo, Attachment } from '@shared/types'
+import type { AppInfo, Attachment, WorkflowGraph, WorkflowInput } from '@shared/types'
+import { runWorkflow } from '../workflows/engine'
 import { PROVIDER_TYPES, PROVIDER_TYPE_LIST } from '@shared/catalog'
 import {
   apiKeySchema,
@@ -30,10 +31,11 @@ import type { CodeService } from '../code/code-service'
 import type { Keystore } from '../keys/keystore'
 import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
+import type { ImBridgeManager } from '../im/manager'
 import type { ApprovalBroker } from '../services/approval-broker'
 import { getAdapter } from '../providers/registry'
 import { ProviderError, toNormalizedError } from '../providers/errors'
-import { toJson, toMarkdown, exportFileBase } from '../services/export'
+import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/export'
 import { readAttachment, readStoredImage } from './attachments'
 import { writeFile } from 'node:fs/promises'
 
@@ -45,6 +47,7 @@ export interface RegisterIpcDeps {
   toolSystem: ToolSystem
   approvalBroker: ApprovalBroker
   mcpManager: McpManager
+  imBridgeManager: ImBridgeManager
   /** Directory where image attachments are stored on disk. */
   attachmentsDir: string
   getWindows: () => BrowserWindow[]
@@ -88,7 +91,7 @@ function requireBoolean(value: unknown, label: string): boolean {
 // Schemas without a shared counterpart (hand-rolled, minimal)
 // ---------------------------------------------------------------------------
 
-const conversationModeSchema = z.enum(['chat', 'cowork', 'code'])
+const conversationModeSchema = z.enum(['chat', 'cowork', 'code', 'write', 'design'])
 
 const convListSchema = z
   .object({
@@ -690,4 +693,108 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.mcpReconnect, (id) => mcpManager.reconnect(requireString(id, 'Server id')))
 
   register(CHANNELS.mcpStatus, () => mcpManager.getRuntime())
+
+  // -- IM bridges -------------------------------------------------------------
+
+  const { imBridgeManager } = deps
+
+  register(CHANNELS.imStatus, () => imBridgeManager.status())
+
+  register(CHANNELS.imSetTelegram, (input) => {
+    const parsed = parseInput(
+      z
+        .object({
+          token: z.string().max(4096).optional(),
+          conversationId: z.string().nullable(),
+          enabled: z.boolean(),
+        })
+        .strict(),
+      input
+    )
+    return imBridgeManager.setTelegram(parsed)
+  })
+
+  register(CHANNELS.imSetWebhook, (url) => {
+    if (url !== null && typeof url !== 'string') throw invalid('Webhook URL must be a string or null.')
+    return imBridgeManager.setWebhook(url as string | null)
+  })
+
+  // -- Write / Design documents ----------------------------------------------
+
+  register(CHANNELS.documentsGet, (conversationId) =>
+    db.documents.getDoc(requireString(conversationId, 'Conversation id'))
+  )
+
+  register(CHANNELS.documentsSave, (conversationId, content) => {
+    const id = requireString(conversationId, 'Conversation id')
+    if (typeof content !== 'string') throw invalid('Document content must be a string.')
+    if (content.length > 2_000_000) throw invalid('Document is too large.')
+    const existing = db.documents.getDoc(id)
+    return db.documents.upsertDoc(id, existing?.title ?? 'Document', content)
+  })
+
+  register(CHANNELS.documentsListHtml, (conversationId) =>
+    db.documents.listByConversation(requireString(conversationId, 'Conversation id'), 'html')
+  )
+
+  register(CHANNELS.documentsExport, async (id, format) => {
+    const docId = requireString(id, 'Document id')
+    const fmt = parseInput(z.enum(['markdown', 'html']), format)
+    const doc = db.documents.getById(docId)
+    if (!doc) throw invalid('Document not found.')
+    const isHtml = fmt === 'html'
+    const content = isHtml ? documentToHtml(doc.title, doc.kind, doc.content) : doc.content
+    const ext = isHtml ? 'html' : doc.kind === 'html' ? 'html' : 'md'
+    const base = (doc.title || 'document').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '-') || 'document'
+    const options = {
+      defaultPath: `${base}.${ext}`,
+      filters: [
+        isHtml
+          ? { name: 'HTML', extensions: ['html'] }
+          : { name: 'Markdown', extensions: ['md'] },
+      ],
+    }
+    const parent = dialogParent()
+    const result = parent
+      ? await dialog.showSaveDialog(parent, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await writeFile(result.filePath, content, 'utf8')
+    return { canceled: false, path: result.filePath }
+  })
+
+  // -- workflows --------------------------------------------------------------
+
+  const asGraph = (value: unknown): WorkflowGraph => {
+    const g = value as { nodes?: unknown; edges?: unknown }
+    if (!g || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) {
+      throw invalid('Invalid workflow graph.')
+    }
+    return value as WorkflowGraph
+  }
+  const asWorkflowInput = (value: unknown): WorkflowInput => {
+    const o = value as { name?: unknown; graph?: unknown }
+    const name = typeof o?.name === 'string' ? o.name.trim() : ''
+    if (name.length === 0) throw invalid('Workflow name is required.')
+    return { name, graph: asGraph(o?.graph) }
+  }
+
+  register(CHANNELS.workflowsList, () => db.workflows.list())
+  register(CHANNELS.workflowsGet, (id) => db.workflows.getById(requireString(id, 'Workflow id')))
+  register(CHANNELS.workflowsCreate, (input) => db.workflows.create(asWorkflowInput(input)))
+  register(CHANNELS.workflowsUpdate, (id, input) => {
+    const updated = db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input))
+    if (!updated) throw invalid('Workflow not found.')
+    return updated
+  })
+  register(CHANNELS.workflowsDelete, (id) => {
+    db.workflows.remove(requireString(id, 'Workflow id'))
+    return undefined
+  })
+  register(CHANNELS.workflowsRun, (graph) =>
+    runWorkflow(asGraph(graph), {
+      runAgent: (prompt, providerId, modelId) =>
+        chatService.generateForWorkflow(prompt, providerId, modelId),
+    })
+  )
 }
