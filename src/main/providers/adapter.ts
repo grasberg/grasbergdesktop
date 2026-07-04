@@ -19,6 +19,7 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
+import type { ProviderModelCatalog } from '@shared/catalog'
 
 /**
  * A part of a multimodal message. String content is used for text-only
@@ -61,9 +62,21 @@ export interface AdapterChatRequest {
 }
 
 export interface AdapterContext {
+  /** Bearer credential: a static API key, or an OAuth access token. */
   apiKey: string
   baseUrl: string
   signal?: AbortSignal
+  /**
+   * For OAuth/ChatGPT auth: the account id sent as `chatgpt-account-id`.
+   * Ignored by ordinary API-key adapters.
+   */
+  accountId?: string | null
+  /**
+   * Known-model catalog for this provider (family or preset). When present it
+   * overrides PROVIDER_TYPES[type] so one openai-compatible adapter instance can
+   * serve any preset. Absent for direct family providers.
+   */
+  modelCatalog?: ProviderModelCatalog
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }

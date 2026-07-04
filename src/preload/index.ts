@@ -29,6 +29,9 @@ const api: UldApi = {
     deleteKey: (id) => ipcRenderer.invoke(CHANNELS.providersDeleteKey, id),
     test: (id) => ipcRenderer.invoke(CHANNELS.providersTest, id),
     listModels: (id) => ipcRenderer.invoke(CHANNELS.providersListModels, id),
+    oauthStart: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStart, id),
+    oauthLogout: (id) => ipcRenderer.invoke(CHANNELS.providersOauthLogout, id),
+    oauthStatus: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStatus, id),
   },
   conversations: {
     list: (req) => ipcRenderer.invoke(CHANNELS.convList, req),
@@ -111,6 +114,12 @@ const api: UldApi = {
     create: (input) => ipcRenderer.invoke(CHANNELS.promptsCreate, input),
     update: (id, patch) => ipcRenderer.invoke(CHANNELS.promptsUpdate, id, patch),
     delete: (id) => ipcRenderer.invoke(CHANNELS.promptsDelete, id),
+  },
+  memories: {
+    list: () => ipcRenderer.invoke(CHANNELS.memoriesList),
+    create: (input) => ipcRenderer.invoke(CHANNELS.memoriesCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(CHANNELS.memoriesUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.memoriesDelete, id),
   },
   mcp: {
     list: () => ipcRenderer.invoke(CHANNELS.mcpList),

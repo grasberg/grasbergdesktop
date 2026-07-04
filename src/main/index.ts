@@ -4,7 +4,7 @@
  * navigation guards, sandboxed renderer).
  */
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, session, shell } from 'electron'
 import { CHANNELS } from '@shared/ipc'
@@ -18,11 +18,13 @@ import {
   extractHtmlArtifacts,
   extractWorkspaceItems,
 } from './services/mode-artifacts'
+import { createMemoryCompletionHook } from './services/memory-hook'
 import { CodeService } from './code/code-service'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
 import { ImBridgeManager } from './im/manager'
 import { BrowserSession } from './browser/session'
+import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
 
 const PRODUCTION_CSP =
@@ -36,6 +38,7 @@ let approvalBroker: ApprovalBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let browserSession: BrowserSession | null = null
+let oauthManager: OpenAiOAuthManager | null = null
 let cleanedUp = false
 let quitting = false
 
@@ -64,6 +67,7 @@ async function cleanup(): Promise<void> {
   // (and thus no tool) can outlive the user's session.
   approvalBroker?.stopAll()
   imBridgeManager?.stopAll()
+  oauthManager?.stopAll()
   browserSession?.close()
   // Close MCP connections (kills any stdio child processes) before the db.
   try {
@@ -91,6 +95,10 @@ function isAllowedNavigation(url: string): boolean {
 }
 
 function createWindow(): BrowserWindow {
+  // In dev, __dirname is out/main, so ../../build resolves to the repo's build
+  // dir. In a packaged app the window inherits the exe icon stamped by
+  // electron-builder, so the file is absent here and we simply skip it.
+  const iconPath = join(__dirname, '../../build/icon.png')
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -98,6 +106,7 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     backgroundColor: '#0f1115',
     show: false,
+    ...(existsSync(iconPath) ? { icon: iconPath } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -205,10 +214,20 @@ function bootstrap(): void {
   })
   const broker = new ApprovalBroker()
   approvalBroker = broker
+  // "Sign in with ChatGPT" OAuth manager (experimental). Tokens are encrypted
+  // via the keystore; the browser is opened through the OS shell.
+  const oauth = new OpenAiOAuthManager({
+    repo: database.providers,
+    encrypt: (plain) => keystore.encryptKey(plain).encryptedBase64,
+    decrypt: (stored) => keystore.decryptKey(stored),
+    openExternal: (url) => shell.openExternal(url),
+  })
+  oauthManager = oauth
   chatService = new ChatService(database, broadcast, {
     tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker },
     imageDir: attachmentsDir,
     browser,
+    getAccessToken: (providerId) => oauth.getAccessToken(providerId),
   })
 
   // Mode side effects after each completed assistant message. Code mode
@@ -222,6 +241,10 @@ function bootstrap(): void {
     generateReply: (conversationId, text) => chatService!.generateHeadless(conversationId, text),
   })
   imBridgeManager = imBridge
+
+  // Mode-independent: persists ```uld-memory directives from every completed
+  // assistant message (gated on settings.memoryEnabled inside the hook).
+  registerCompletionHook(createMemoryCompletionHook(database))
 
   registerCompletionHook((conversation, message) => {
     if (message.role !== 'assistant' || message.content.trim().length === 0) return
@@ -244,11 +267,15 @@ function bootstrap(): void {
     }
     if (conversation.mode === 'cowork' && conversation.workspaceId) {
       for (const item of extractWorkspaceItems(message.content)) {
-        database.workspaces.itemCreate({
+        // Upsert by kind+title: re-emitting a block with the same kind and
+        // title updates that item (how assistants keep plans/checklists
+        // current across turns — see COWORK_SECTION in prompts.ts).
+        database.workspaces.itemUpsertByKindTitle({
           workspaceId: conversation.workspaceId,
           kind: item.kind,
           title: item.title,
           content: item.content,
+          ...(item.status !== undefined ? { status: item.status } : {}),
           origin: 'assistant',
         })
       }
@@ -264,6 +291,7 @@ function bootstrap(): void {
     approvalBroker: broker,
     mcpManager: mcp,
     imBridgeManager: imBridge,
+    oauthManager: oauth,
     attachmentsDir,
     getWindows: () => BrowserWindow.getAllWindows(),
   })

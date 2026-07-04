@@ -40,6 +40,14 @@ export interface WorkspacesRepository {
   /** Generates the id (crypto.randomUUID) and timestamps. */
   itemCreate(input: WorkspaceItemCreateInput): WorkspaceItem
   itemUpdate(id: string, patch: WorkspaceItemPatch): WorkspaceItem | null
+  /**
+   * Creates the item, or — when the workspace already has an item with the
+   * same kind and title (title compared case-insensitively) — replaces that
+   * item's content (and status, when given) instead. This is what lets an
+   * assistant keep one plan/checklist item current across turns rather than
+   * accumulating near-duplicates. Sort and origin of an updated item are kept.
+   */
+  itemUpsertByKindTitle(input: WorkspaceItemCreateInput): WorkspaceItem
   itemDelete(id: string): void
 }
 
@@ -100,6 +108,79 @@ export function createWorkspacesRepository(driver: SqliteDriver): WorkspacesRepo
   const itemGetById = (id: string): WorkspaceItem | null => {
     const row = driver.get<WorkspaceItemRow>('SELECT * FROM workspace_items WHERE id = ?', [id])
     return row ? toWorkspaceItem(row) : null
+  }
+
+  const itemCreate = (input: WorkspaceItemCreateInput): WorkspaceItem => {
+    const now = Date.now()
+    let sort = input.sort
+    if (sort === undefined) {
+      const row = driver.get<{ next: number }>(
+        'SELECT COALESCE(MAX(sort), 0) + 1 AS next FROM workspace_items WHERE workspace_id = ?',
+        [input.workspaceId]
+      )
+      sort = row ? row.next : 1
+    }
+    const item: WorkspaceItem = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      title: input.title,
+      content: input.content ?? '',
+      status: input.status !== undefined ? input.status : input.kind === 'task' ? 'todo' : null,
+      sort,
+      origin: input.origin,
+      createdAt: now,
+      updatedAt: now,
+    }
+    driver.run(
+      `INSERT INTO workspace_items
+         (id, workspace_id, kind, title, content, status, sort, origin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        item.id,
+        item.workspaceId,
+        item.kind,
+        item.title,
+        item.content,
+        item.status,
+        item.sort,
+        item.origin,
+        now,
+        now,
+      ]
+    )
+    return item
+  }
+
+  const itemUpdate = (id: string, patch: WorkspaceItemPatch): WorkspaceItem | null => {
+    const sets: string[] = []
+    const params: SqlValue[] = []
+    if (patch.title !== undefined) {
+      sets.push('title = ?')
+      params.push(patch.title)
+    }
+    if (patch.content !== undefined) {
+      sets.push('content = ?')
+      params.push(patch.content)
+    }
+    if (patch.status !== undefined) {
+      sets.push('status = ?')
+      params.push(patch.status)
+    }
+    if (patch.sort !== undefined) {
+      sets.push('sort = ?')
+      params.push(patch.sort)
+    }
+    if (patch.kind !== undefined) {
+      sets.push('kind = ?')
+      params.push(patch.kind)
+    }
+    if (sets.length > 0) {
+      sets.push('updated_at = ?')
+      params.push(Date.now(), id)
+      driver.run(`UPDATE workspace_items SET ${sets.join(', ')} WHERE id = ?`, params)
+    }
+    return itemGetById(id)
   }
 
   return {
@@ -166,77 +247,22 @@ export function createWorkspacesRepository(driver: SqliteDriver): WorkspacesRepo
       return rows.map(toWorkspaceItem)
     },
 
-    itemCreate(input) {
-      const now = Date.now()
-      let sort = input.sort
-      if (sort === undefined) {
-        const row = driver.get<{ next: number }>(
-          'SELECT COALESCE(MAX(sort), 0) + 1 AS next FROM workspace_items WHERE workspace_id = ?',
-          [input.workspaceId]
-        )
-        sort = row ? row.next : 1
-      }
-      const item: WorkspaceItem = {
-        id: randomUUID(),
-        workspaceId: input.workspaceId,
-        kind: input.kind,
-        title: input.title,
-        content: input.content ?? '',
-        status: input.status !== undefined ? input.status : input.kind === 'task' ? 'todo' : null,
-        sort,
-        origin: input.origin,
-        createdAt: now,
-        updatedAt: now,
-      }
-      driver.run(
-        `INSERT INTO workspace_items
-           (id, workspace_id, kind, title, content, status, sort, origin, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          item.id,
-          item.workspaceId,
-          item.kind,
-          item.title,
-          item.content,
-          item.status,
-          item.sort,
-          item.origin,
-          now,
-          now,
-        ]
-      )
-      return item
-    },
+    itemCreate,
 
-    itemUpdate(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.title !== undefined) {
-        sets.push('title = ?')
-        params.push(patch.title)
-      }
-      if (patch.content !== undefined) {
-        sets.push('content = ?')
-        params.push(patch.content)
-      }
-      if (patch.status !== undefined) {
-        sets.push('status = ?')
-        params.push(patch.status)
-      }
-      if (patch.sort !== undefined) {
-        sets.push('sort = ?')
-        params.push(patch.sort)
-      }
-      if (patch.kind !== undefined) {
-        sets.push('kind = ?')
-        params.push(patch.kind)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE workspace_items SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
-      return itemGetById(id)
+    itemUpdate,
+
+    itemUpsertByKindTitle(input) {
+      const row = driver.get<WorkspaceItemRow>(
+        `SELECT * FROM workspace_items
+         WHERE workspace_id = ? AND kind = ? AND title = ? COLLATE NOCASE
+         ORDER BY created_at ASC, sort ASC LIMIT 1`,
+        [input.workspaceId, input.kind, input.title]
+      )
+      if (!row) return itemCreate(input)
+      const patch: WorkspaceItemPatch = { content: input.content ?? '' }
+      if (input.status !== undefined && input.status !== null) patch.status = input.status
+      // The row exists, so itemUpdate cannot return null here.
+      return itemUpdate(row.id, patch) as WorkspaceItem
     },
 
     itemDelete(id) {

@@ -66,4 +66,19 @@ export const useProvidersStore = create<ProvidersStoreState>()((set, get) => ({
     set((s) => ({ modelsByProvider: { ...s.modelsByProvider, [id]: models } }))
     return models
   },
+
+  async oauthStart(id) {
+    const status = await unwrap(window.uld.providers.oauthStart(id))
+    // Refresh so oauthConnected / account label reflect the new session.
+    const providers = await unwrap(window.uld.providers.list())
+    set({ providers })
+    return status
+  },
+
+  async oauthLogout(id) {
+    const status = await unwrap(window.uld.providers.oauthLogout(id))
+    const providers = await unwrap(window.uld.providers.list())
+    set({ providers })
+    return status
+  },
 }))

@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { Attachment, Message } from '@shared/types'
 import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
+import { presetPricing } from '@shared/presets'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
 import Markdown from './Markdown'
@@ -167,11 +168,15 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
 
   // Rough cost estimate from the model's list price (approximate; see tooltip).
   const providers = useProvidersStore((s) => s.providers)
-  const providerType = message.providerId
-    ? providers.find((p) => p.id === message.providerId)?.type
+  const provider = message.providerId
+    ? providers.find((p) => p.id === message.providerId)
     : undefined
   const pricing =
-    providerType && message.modelId ? findPricing(providerType, message.modelId) : undefined
+    provider && message.modelId
+      ? provider.presetId
+        ? presetPricing(provider.presetId, message.modelId)
+        : findPricing(provider.type, message.modelId)
+      : undefined
   const cost = usage && pricing ? estimateCost(usage, pricing) : undefined
 
   return (

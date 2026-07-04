@@ -314,4 +314,110 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_workflows_updated ON workflows(updated_at DESC)`,
     ],
   },
+  {
+    version: 11,
+    name: 'provider-types-and-auth-mode',
+    // FK-safe rebuild of `providers` to widen the type CHECK (add 'openai' and
+    // 'zai-coding') and add an `auth_mode` column. Runs outside a transaction so
+    // PRAGMA foreign_keys can be toggled; provider_keys has ON DELETE CASCADE and
+    // would otherwise be wiped when the old table is dropped. Column list mirrors
+    // the v1 providers schema; auth_mode gets its DEFAULT for existing rows.
+    noTransaction: true,
+    statements: [
+      `PRAGMA foreign_keys = OFF`,
+      `CREATE TABLE providers_new (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('deepseek','zhipu','minimax','openai','zai-coding','openai-compatible')),
+        label TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        default_model_id TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        extra_json TEXT NOT NULL DEFAULT '{}',
+        auth_mode TEXT NOT NULL DEFAULT 'api_key' CHECK (auth_mode IN ('api_key','chatgpt_oauth')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `INSERT INTO providers_new
+         (id, type, label, base_url, default_model_id, enabled, extra_json, created_at, updated_at)
+       SELECT id, type, label, base_url, default_model_id, enabled, extra_json, created_at, updated_at
+       FROM providers`,
+      `DROP TABLE providers`,
+      `ALTER TABLE providers_new RENAME TO providers`,
+      `PRAGMA foreign_keys = ON`,
+    ],
+  },
+  {
+    version: 12,
+    name: 'provider-oauth',
+    statements: [
+      // OAuth sessions for providers using a login flow (e.g. "Sign in with
+      // ChatGPT"). Access + refresh tokens are safeStorage ciphertext (base64),
+      // never plaintext and never returned over IPC. `account_label` is a safe,
+      // token-free display value (e.g. an email/account id).
+      `CREATE TABLE IF NOT EXISTS provider_oauth (
+        provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+        encrypted_access TEXT NOT NULL,
+        encrypted_refresh TEXT,
+        account_id TEXT,
+        account_label TEXT,
+        expires_at INTEGER,
+        updated_at INTEGER NOT NULL
+      )`,
+    ],
+  },
+  {
+    version: 13,
+    name: 'provider-presets',
+    // FK-safe rebuild of `providers` to (a) DROP the `type` CHECK — the enum is
+    // enforced by zod at the IPC boundary, and dropping it lets the ~138
+    // OpenAI-compatible presets (all type='openai-compatible') exist with no
+    // per-provider ProviderType and no future migration — and (b) add a nullable
+    // `preset_id` linking a provider to its generated preset (models/pricing).
+    // Runs outside a transaction so PRAGMA foreign_keys can be toggled; BOTH
+    // provider_keys AND provider_oauth (each ON DELETE CASCADE) must survive the
+    // drop of the old table.
+    noTransaction: true,
+    statements: [
+      `PRAGMA foreign_keys = OFF`,
+      `CREATE TABLE providers_new (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        label TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        default_model_id TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        extra_json TEXT NOT NULL DEFAULT '{}',
+        auth_mode TEXT NOT NULL DEFAULT 'api_key' CHECK (auth_mode IN ('api_key','chatgpt_oauth')),
+        preset_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `INSERT INTO providers_new
+         (id, type, label, base_url, default_model_id, enabled, extra_json, auth_mode, created_at, updated_at)
+       SELECT id, type, label, base_url, default_model_id, enabled, extra_json, auth_mode, created_at, updated_at
+       FROM providers`,
+      `DROP TABLE providers`,
+      `ALTER TABLE providers_new RENAME TO providers`,
+      `PRAGMA foreign_keys = ON`,
+    ],
+  },
+  {
+    version: 14,
+    name: 'memories',
+    // Assistant memories persisted across conversations. No UNIQUE index on
+    // title (upsert is select-then-update; a unique index would make user
+    // edits throw on collision). source_conversation_id is provenance only —
+    // no FK, conversations may be deleted out from under it.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memories (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_conversation_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at)`,
+    ],
+  },
 ]

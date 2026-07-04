@@ -122,7 +122,7 @@ describe('ChatService context compaction', () => {
       { resolveAdapter: () => adapter }
     )
 
-    service.send({ conversationId: conversation.id, content: 'next question' })
+    await service.send({ conversationId: conversation.id, content: 'next question' })
     await done
 
     // The summary was generated and persisted.
@@ -162,7 +162,7 @@ describe('ChatService context compaction', () => {
       { resolveAdapter: () => adapter }
     )
 
-    service.send({ conversationId: conversation.id, content: 'next question' })
+    await service.send({ conversationId: conversation.id, content: 'next question' })
     await done
 
     // No summary persisted; the generation still completed.

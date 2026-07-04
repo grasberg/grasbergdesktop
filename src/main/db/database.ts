@@ -28,6 +28,7 @@ import {
 import { createMcpServersRepository, type McpServersRepository } from './repositories/mcp-servers'
 import { createDocumentsRepository, type DocumentsRepository } from './repositories/documents'
 import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
+import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -44,6 +45,7 @@ export interface AppDatabase {
   mcpServers: McpServersRepository
   documents: DocumentsRepository
   workflows: WorkflowsRepository
+  memories: MemoriesRepository
   close(): void
 }
 
@@ -113,6 +115,7 @@ export function openDatabase(filePath: string): AppDatabase {
     mcpServers: createMcpServersRepository(driver),
     documents: createDocumentsRepository(driver),
     workflows: createWorkflowsRepository(driver),
+    memories: createMemoriesRepository(driver),
     close() {
       driver.close()
     },

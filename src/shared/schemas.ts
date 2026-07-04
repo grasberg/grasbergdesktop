@@ -19,7 +19,19 @@ export const chatParamsSchema = z
   })
   .strict()
 
-export const providerTypeSchema = z.enum(['deepseek', 'zhipu', 'minimax', 'openai-compatible'])
+export const providerTypeSchema = z.enum([
+  'deepseek',
+  'zhipu',
+  'minimax',
+  'openai',
+  'zai-coding',
+  'anthropic',
+  'google',
+  'bedrock',
+  'openai-compatible',
+])
+
+export const authModeSchema = z.enum(['api_key', 'chatgpt_oauth'])
 
 /** Hosts for which plain http:// is allowed (local model servers). */
 const LOCAL_HTTP_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
@@ -59,6 +71,8 @@ export const providerConfigInputSchema = z.object({
     .or(z.literal('').transform(() => undefined)),
   defaultModelId: z.string().trim().max(200).optional(),
   enabled: z.boolean().optional(),
+  authMode: authModeSchema.optional(),
+  presetId: z.string().trim().max(100).optional(),
 })
 
 export const providerConfigPatchSchema = z.object({
@@ -127,6 +141,25 @@ export const promptTemplatePatchSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Memory. sourceConversationId is deliberately absent: IPC create/update is
+// always user-initiated; only the main-side completion hook sets provenance.
+// ---------------------------------------------------------------------------
+
+export const memoryInputSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    content: z.string().max(10_000),
+  })
+  .strict()
+
+export const memoryPatchSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    content: z.string().max(10_000).optional(),
+  })
+  .strict()
+
+// ---------------------------------------------------------------------------
 // MCP servers. Shape validation here; transport-specific rules (stdio needs a
 // command, http needs an allowed https url) are enforced in the IPC handler.
 // ---------------------------------------------------------------------------
@@ -180,6 +213,7 @@ export const settingsPatchSchema = z
     fontSize: z.enum(['small', 'medium', 'large']),
     compactionEnabled: z.boolean(),
     compactionThresholdRatio: z.number().min(0.1).max(0.95),
+    memoryEnabled: z.boolean(),
     shellExecutionEnabled: z.boolean(),
     browserToolsEnabled: z.boolean(),
     telegramBridgeEnabled: z.boolean(),

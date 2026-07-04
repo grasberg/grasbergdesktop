@@ -186,7 +186,7 @@ describe('ChatService tool loop (real db, scripted adapter)', () => {
     const conversation = seedProviderAndConversation()
     const { service, adapter, envelopes, done, execute, brokerRequest } = makeHarness()
 
-    const start = service.send({ conversationId: conversation.id, content: 'find the needle' })
+    const start = await service.send({ conversationId: conversation.id, content: 'find the needle' })
     expect(start.userMessage).toMatchObject({ role: 'user', content: 'find the needle' })
     expect(start.assistantMessage.status).toBe('streaming')
 
@@ -325,7 +325,7 @@ describe('ChatService tool loop (real db, scripted adapter)', () => {
       }
     )
 
-    service.send({ conversationId: conversation.id, content: 'find the needle' })
+    await service.send({ conversationId: conversation.id, content: 'find the needle' })
     const doneEnvelope = await done
     if (doneEnvelope.event.type !== 'done') throw new Error('expected done event')
 

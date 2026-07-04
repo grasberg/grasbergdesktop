@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
-import type { ProviderConfig, ProviderType, TestConnectionResult } from '@shared/types'
+import type { AuthMode, ProviderConfig, ProviderType, TestConnectionResult } from '@shared/types'
+import { CHATGPT_OAUTH_DEFAULT_MODEL } from '@shared/catalog'
+import { presetMeta, presetMetaList } from '@shared/presets'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
 
@@ -131,25 +133,60 @@ export function ProviderAddForm(props: {
   const setKey = useProvidersStore((s) => s.setKey)
   const toast = useUiStore((s) => s.toast)
 
+  const presets = useMemo(() => presetMetaList(), [])
+
   const [type, setType] = useState<ProviderType>('deepseek')
+  const [presetId, setPresetId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [defaultModelId, setDefaultModelId] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [authMode, setAuthMode] = useState<AuthMode>('api_key')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
-  const meta = types.find((t) => t.type === type)
+  const familyMeta = types.find((t) => t.type === type)
+  const presetEntry = presetId ? presetMeta(presetId) : undefined
+  // Presets always authenticate with an API key; only families expose OAuth.
+  const authModes = presetId ? (['api_key'] as AuthMode[]) : familyMeta?.authModes ?? ['api_key']
+  const supportsOauth = authModes.includes('chatgpt_oauth')
+  const isOauth = authMode === 'chatgpt_oauth'
+  const keyLabel = presetEntry?.keyLabel ?? familyMeta?.keyLabel ?? 'API key'
+  const docsUrl = presetEntry?.docsUrl ?? familyMeta?.docsUrl
+  const hint = presetEntry
+    ? `OpenAI-compatible preset · ${presetEntry.baseUrl}`
+    : familyMeta?.hint
 
-  // Prefill editable fields from the type's metadata whenever the type changes.
-  useEffect(() => {
-    const m = types.find((t) => t.type === type)
+  // Prefill from a selected family (its catalog metadata).
+  function applyFamily(t: ProviderType): void {
+    const m = types.find((x) => x.type === t)
+    setPresetId(null)
+    setType(t)
     if (m) {
       setLabel(m.label)
       setBaseUrl(m.defaultBaseUrl)
       setDefaultModelId(m.defaultModelId)
     }
-  }, [type, types])
+    setAuthMode('api_key')
+  }
+
+  // Prefill from a selected preset (maps onto the openai-compatible adapter).
+  function applyPreset(id: string): void {
+    const p = presetMeta(id)
+    if (!p) return
+    setPresetId(id)
+    setType('openai-compatible')
+    setLabel(p.name)
+    setBaseUrl(p.baseUrl)
+    setDefaultModelId(p.defaultModelId)
+    setAuthMode('api_key')
+  }
+
+  // Prefill the initial family once the type list has loaded.
+  useEffect(() => {
+    if (types.length > 0 && label === '' && presetId === null) applyFamily(type)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [types])
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -170,7 +207,14 @@ export function ProviderAddForm(props: {
         label: label.trim(),
         baseUrl: baseUrl.trim() || undefined,
         defaultModelId: defaultModelId.trim() || undefined,
+        authMode,
+        presetId: presetId ?? undefined,
       })
+      if (isOauth) {
+        toast(`${created.label} added — click "Sign in with ChatGPT" to connect`, 'success')
+        props.onCreated?.(created)
+        return
+      }
       const key = apiKey.trim()
       setApiKey('')
       if (key) {
@@ -193,21 +237,64 @@ export function ProviderAddForm(props: {
     <form className="provider-form card" onSubmit={submit}>
       <div className="settings-field">
         <label className="field-label" htmlFor="prov-add-type">
-          Provider type
+          Provider
         </label>
         <select
           id="prov-add-type"
           className="select"
-          value={type}
-          onChange={(e) => setType(e.target.value as ProviderType)}
+          value={presetId ? `preset:${presetId}` : `family:${type}`}
+          onChange={(e) => {
+            const v = e.target.value
+            if (v.startsWith('preset:')) applyPreset(v.slice('preset:'.length))
+            else applyFamily(v.slice('family:'.length) as ProviderType)
+          }}
         >
-          {types.map((t) => (
-            <option key={t.type} value={t.type}>
-              {t.label}
-            </option>
-          ))}
+          <optgroup label="Direct integrations">
+            {types.map((t) => (
+              <option key={t.type} value={`family:${t.type}`}>
+                {t.label}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label={`OpenAI-compatible presets (${presets.length})`}>
+            {presets.map((p) => (
+              <option key={p.id} value={`preset:${p.id}`}>
+                {p.name}
+              </option>
+            ))}
+          </optgroup>
         </select>
+        {hint ? <span className="field-hint">{hint}</span> : null}
       </div>
+
+      {supportsOauth ? (
+        <div className="settings-field">
+          <label className="field-label" htmlFor="prov-add-auth">
+            Authentication
+          </label>
+          <select
+            id="prov-add-auth"
+            className="select"
+            value={authMode}
+            onChange={(e) => {
+              const mode = e.target.value as AuthMode
+              setAuthMode(mode)
+              // ChatGPT-login uses a Codex-backend model, not the API default.
+              if (mode === 'chatgpt_oauth') setDefaultModelId(CHATGPT_OAUTH_DEFAULT_MODEL)
+              else if (familyMeta) setDefaultModelId(familyMeta.defaultModelId)
+            }}
+          >
+            <option value="api_key">API key</option>
+            <option value="chatgpt_oauth">Sign in with ChatGPT (experimental)</option>
+          </select>
+          {isOauth ? (
+            <span className="field-hint">
+              Uses your ChatGPT subscription via an unofficial login. It may stop working without
+              notice. You&apos;ll sign in from the provider row after adding it.
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="settings-field">
         <label className="field-label" htmlFor="prov-add-label">
@@ -250,28 +337,36 @@ export function ProviderAddForm(props: {
         />
       </div>
 
-      <div className="settings-field">
-        <label className="field-label" htmlFor="prov-add-key">
-          API key <span className="field-hint-inline">(optional — stored encrypted, never shown again)</span>
-        </label>
-        <input
-          id="prov-add-key"
-          className="input mono"
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="sk-…"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        {meta?.docsUrl ? (
-          <span className="field-hint">
-            <a href={meta.docsUrl} target="_blank" rel="noreferrer">
-              Where do I get a key? ↗
-            </a>
-          </span>
-        ) : null}
-      </div>
+      {isOauth ? (
+        <p className="field-hint">
+          No API key needed — after adding this provider, open it and choose{' '}
+          <strong>Sign in with ChatGPT</strong> to connect your subscription.
+        </p>
+      ) : (
+        <div className="settings-field">
+          <label className="field-label" htmlFor="prov-add-key">
+            {keyLabel}{' '}
+            <span className="field-hint-inline">(optional — stored encrypted, never shown again)</span>
+          </label>
+          <input
+            id="prov-add-key"
+            className="input mono"
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="sk-…"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {docsUrl ? (
+            <span className="field-hint">
+              <a href={docsUrl} target="_blank" rel="noreferrer">
+                Where do I get a key? ↗
+              </a>
+            </span>
+          ) : null}
+        </div>
+      )}
 
       {formError ? (
         <p className="form-error" role="alert">
@@ -327,9 +422,13 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
   const setKey = useProvidersStore((s) => s.setKey)
   const deleteKey = useProvidersStore((s) => s.deleteKey)
   const test = useProvidersStore((s) => s.test)
+  const oauthStart = useProvidersStore((s) => s.oauthStart)
+  const oauthLogout = useProvidersStore((s) => s.oauthLogout)
   const toast = useUiStore((s) => s.toast)
 
   const meta = types.find((t) => t.type === provider.type)
+  const isOauth = provider.authMode === 'chatgpt_oauth'
+  const [oauthBusy, setOauthBusy] = useState(false)
 
   const [expanded, setExpanded] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -430,6 +529,32 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
     }
   }
 
+  async function signIn() {
+    setOauthBusy(true)
+    try {
+      const status = await oauthStart(provider.id)
+      toast(
+        status.connected
+          ? `Signed in to ChatGPT${status.accountLabel ? ` as ${status.accountLabel}` : ''}`
+          : 'Sign-in did not complete',
+        status.connected ? 'success' : 'error'
+      )
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    } finally {
+      setOauthBusy(false)
+    }
+  }
+
+  async function signOut() {
+    try {
+      await oauthLogout(provider.id)
+      toast('Signed out of ChatGPT', 'info')
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    }
+  }
+
   async function deleteProvider() {
     try {
       await remove(provider.id)
@@ -445,8 +570,20 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
         <div className="provider-row-main">
           <div className="provider-row-title">
             <strong>{provider.label}</strong>
-            <span className="badge">{meta?.label ?? provider.type}</span>
-            {provider.hasKey ? (
+            <span className="badge">
+              {provider.presetId
+                ? `${presetMeta(provider.presetId)?.name ?? provider.presetId} · preset`
+                : meta?.label ?? provider.type}
+            </span>
+            {isOauth ? (
+              provider.oauthConnected ? (
+                <span className="badge" title="Signed in with ChatGPT">
+                  {provider.oauthAccountLabel ? `ChatGPT · ${provider.oauthAccountLabel}` : 'ChatGPT signed in'}
+                </span>
+              ) : (
+                <span className="badge badge-warning">Not signed in</span>
+              )
+            ) : provider.hasKey ? (
               <span className="badge key-badge mono" title="API key configured (masked)">
                 {provider.keyPreview ?? 'key set'}
               </span>
@@ -527,6 +664,36 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
             </div>
           </form>
 
+          {isOauth ? (
+            <div className="provider-key-section">
+              <h4 className="section-subhead">ChatGPT sign-in (experimental)</h4>
+              <p className="field-hint">
+                {provider.oauthConnected
+                  ? `Signed in${provider.oauthAccountLabel ? ` as ${provider.oauthAccountLabel}` : ''}. Requests use your ChatGPT subscription via an unofficial login that may stop working without notice.`
+                  : 'Not signed in. This opens your browser to authorize with ChatGPT; tokens are encrypted and stored on this device only.'}
+              </p>
+              <div className="key-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void signIn()}
+                  disabled={oauthBusy}
+                >
+                  {oauthBusy ? <span className="spinner" aria-hidden="true" /> : null}
+                  {provider.oauthConnected ? 'Sign in again' : 'Sign in with ChatGPT'}
+                </button>
+                {provider.oauthConnected ? (
+                  <ConfirmButton
+                    label="Sign out"
+                    className="btn btn-ghost"
+                    prompt="Forget the stored ChatGPT session?"
+                    confirmLabel="Sign out"
+                    onConfirm={signOut}
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : (
           <div className="provider-key-section">
             <h4 className="section-subhead">API key</h4>
             {provider.hasKey ? (
@@ -577,6 +744,7 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
               </span>
             ) : null}
           </div>
+          )}
 
           <div className="provider-danger">
             <ConfirmButton

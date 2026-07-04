@@ -8,6 +8,7 @@
  */
 
 import type {
+  AuthMode,
   ProviderConfig,
   ProviderConfigInput,
   ProviderConfigPatch,
@@ -22,6 +23,19 @@ export type ProviderCreateInput = ProviderConfigInput & {
   defaultModelId: string
 }
 
+/**
+ * Encrypted OAuth token material for a provider (safeStorage ciphertext,
+ * base64). Plaintext tokens never touch this shape or the DB.
+ */
+export interface OAuthTokenRow {
+  providerId: string
+  encryptedAccess: string
+  encryptedRefresh: string | null
+  accountId: string | null
+  accountLabel: string | null
+  expiresAt: number | null
+}
+
 export interface ProvidersRepository {
   list(): ProviderConfig[]
   getById(id: string): ProviderConfig | null
@@ -33,6 +47,10 @@ export interface ProvidersRepository {
   setKeyRow(providerId: string, encryptedKeyBase64: string, keyPreview: string): void
   deleteKeyRow(providerId: string): void
   getEncryptedKey(providerId: string): string | null
+  /** OAuth session storage (encrypted tokens only). */
+  setOAuthRow(row: OAuthTokenRow): void
+  getOAuthRow(providerId: string): OAuthTokenRow | null
+  deleteOAuthRow(providerId: string): void
 }
 
 interface ProviderRow {
@@ -42,16 +60,23 @@ interface ProviderRow {
   base_url: string
   default_model_id: string
   enabled: number
+  auth_mode: string
+  preset_id: string | null
   created_at: number
   updated_at: number
   key_preview: string | null
+  oauth_account_label: string | null
+  oauth_present: number | null
 }
 
 const SELECT_PROVIDER = `
   SELECT p.id, p.type, p.label, p.base_url, p.default_model_id, p.enabled,
-         p.created_at, p.updated_at, k.key_preview
+         p.auth_mode, p.preset_id, p.created_at, p.updated_at, k.key_preview,
+         o.account_label AS oauth_account_label,
+         o.provider_id AS oauth_present
   FROM providers p
   LEFT JOIN provider_keys k ON k.provider_id = p.id
+  LEFT JOIN provider_oauth o ON o.provider_id = p.id
 `
 
 function toProviderConfig(row: ProviderRow): ProviderConfig {
@@ -64,8 +89,12 @@ function toProviderConfig(row: ProviderRow): ProviderConfig {
     enabled: row.enabled !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    authMode: (row.auth_mode as AuthMode) ?? 'api_key',
+    presetId: row.preset_id,
     hasKey: row.key_preview !== null,
     keyPreview: row.key_preview,
+    oauthConnected: row.oauth_present !== null,
+    oauthAccountLabel: row.oauth_account_label,
   }
 }
 
@@ -87,8 +116,8 @@ export function createProvidersRepository(driver: SqliteDriver): ProvidersReposi
       const now = Date.now()
       driver.run(
         `INSERT INTO providers
-           (id, type, label, base_url, default_model_id, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, type, label, base_url, default_model_id, enabled, auth_mode, preset_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.id,
           input.type,
@@ -96,6 +125,8 @@ export function createProvidersRepository(driver: SqliteDriver): ProvidersReposi
           input.baseUrl,
           input.defaultModelId,
           input.enabled === false ? 0 : 1,
+          input.authMode ?? 'api_key',
+          input.presetId ?? null,
           now,
           now,
         ]
@@ -159,6 +190,57 @@ export function createProvidersRepository(driver: SqliteDriver): ProvidersReposi
         [providerId]
       )
       return row ? row.encrypted_key : null
+    },
+
+    setOAuthRow(row) {
+      driver.run(
+        `INSERT INTO provider_oauth
+           (provider_id, encrypted_access, encrypted_refresh, account_id, account_label, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(provider_id) DO UPDATE SET
+           encrypted_access = excluded.encrypted_access,
+           encrypted_refresh = excluded.encrypted_refresh,
+           account_id = excluded.account_id,
+           account_label = excluded.account_label,
+           expires_at = excluded.expires_at,
+           updated_at = excluded.updated_at`,
+        [
+          row.providerId,
+          row.encryptedAccess,
+          row.encryptedRefresh,
+          row.accountId,
+          row.accountLabel,
+          row.expiresAt,
+          Date.now(),
+        ]
+      )
+    },
+
+    getOAuthRow(providerId) {
+      const row = driver.get<{
+        encrypted_access: string
+        encrypted_refresh: string | null
+        account_id: string | null
+        account_label: string | null
+        expires_at: number | null
+      }>(
+        `SELECT encrypted_access, encrypted_refresh, account_id, account_label, expires_at
+         FROM provider_oauth WHERE provider_id = ?`,
+        [providerId]
+      )
+      if (!row) return null
+      return {
+        providerId,
+        encryptedAccess: row.encrypted_access,
+        encryptedRefresh: row.encrypted_refresh,
+        accountId: row.account_id,
+        accountLabel: row.account_label,
+        expiresAt: row.expires_at,
+      }
+    },
+
+    deleteOAuthRow(providerId) {
+      driver.run('DELETE FROM provider_oauth WHERE provider_id = ?', [providerId])
     },
   }
 }

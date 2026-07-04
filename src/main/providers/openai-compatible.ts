@@ -12,7 +12,8 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
-import { PROVIDER_TYPES, UNKNOWN_MODEL_CAPS, findCatalogModel } from '@shared/catalog'
+import { PROVIDER_TYPES, UNKNOWN_MODEL_CAPS, findInCatalog } from '@shared/catalog'
+import type { ProviderModelCatalog } from '@shared/catalog'
 import {
   oaiChatChunkSchema,
   oaiChatCompletionSchema,
@@ -210,6 +211,15 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return headers
   }
 
+  /**
+   * The known-model catalog for this call: a preset's catalog when supplied via
+   * ctx, otherwise this family's PROVIDER_TYPES metadata. This is what lets a
+   * single memoized openai-compatible instance serve every preset.
+   */
+  protected catalog(ctx: AdapterContext): ProviderModelCatalog {
+    return ctx.modelCatalog ?? PROVIDER_TYPES[this.type]
+  }
+
   // -- HTTP plumbing ----------------------------------------------------------
 
   protected async doRequest(
@@ -380,7 +390,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
-    const meta = PROVIDER_TYPES[this.type]
+    const meta = this.catalog(ctx)
     if (!meta.supportsModelListing) return meta.knownModels
     try {
       const json = await withRetry(
@@ -392,7 +402,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       )
       const parsed = oaiModelsListSchema.parse(json)
       const mapped = parsed.data.map((entry) => {
-        const known = findCatalogModel(this.type, entry.id)
+        const known = findInCatalog(meta.knownModels, entry.id)
         const info: ModelInfo = known
           ? { ...known, fromCatalog: false } // live-listed, but enriched from catalog
           : { id: entry.id, capabilities: UNKNOWN_MODEL_CAPS, fromCatalog: false }
@@ -407,7 +417,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
-    const meta = PROVIDER_TYPES[this.type]
+    const meta = this.catalog(ctx)
     const started = Date.now()
     try {
       if (meta.supportsModelListing) {

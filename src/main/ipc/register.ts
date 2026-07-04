@@ -10,7 +10,14 @@ import { z } from 'zod'
 import { CHANNELS, err, ok, type ChannelName, type PickFilesResult } from '@shared/ipc'
 import type { AppInfo, Attachment, WorkflowGraph, WorkflowInput } from '@shared/types'
 import { runWorkflow } from '../workflows/engine'
-import { PROVIDER_TYPES, PROVIDER_TYPE_LIST } from '@shared/catalog'
+import {
+  CHATGPT_OAUTH_DEFAULT_MODEL,
+  PROVIDER_TYPES,
+  PROVIDER_TYPE_LIST,
+  providerAuthModes,
+  resolveModelCatalog,
+} from '@shared/catalog'
+import { presetMeta } from '@shared/presets'
 import {
   apiKeySchema,
   chatParamsSchema,
@@ -19,6 +26,8 @@ import {
   isAllowedHttpUrl,
   mcpServerInputSchema,
   mcpServerPatchSchema,
+  memoryInputSchema,
+  memoryPatchSchema,
   promptTemplateInputSchema,
   promptTemplatePatchSchema,
   providerConfigInputSchema,
@@ -33,7 +42,8 @@ import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
 import type { ImBridgeManager } from '../im/manager'
 import type { ApprovalBroker } from '../services/approval-broker'
-import { getAdapter } from '../providers/registry'
+import { getAdapter, resolveAdapter } from '../providers/registry'
+import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/export'
 import { readAttachment, readStoredImage } from './attachments'
@@ -48,6 +58,7 @@ export interface RegisterIpcDeps {
   approvalBroker: ApprovalBroker
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
+  oauthManager: OpenAiOAuthManager
   /** Directory where image attachments are stored on disk. */
   attachmentsDir: string
   getWindows: () => BrowserWindow[]
@@ -206,7 +217,7 @@ const convExportSchema = z.object({
 // ---------------------------------------------------------------------------
 
 export function registerIpc(deps: RegisterIpcDeps): void {
-  const { db, chatService, codeService, keystore, toolSystem, approvalBroker } = deps
+  const { db, chatService, codeService, keystore, toolSystem, approvalBroker, oauthManager } = deps
 
   const register = (channel: ChannelName, fn: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
@@ -288,13 +299,33 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.providersCreate, (input) => {
     const parsed = parseInput(providerConfigInputSchema, input)
-    const meta = PROVIDER_TYPES[parsed.type]
-    const baseUrl = (parsed.baseUrl ?? '').trim() || meta.defaultBaseUrl
-    if (parsed.type === 'openai-compatible' && baseUrl.length === 0) {
+    // A preset always maps onto the openai-compatible adapter; its base URL /
+    // default model come from the generated catalog when not overridden.
+    let preset
+    let type = parsed.type
+    if (parsed.presetId) {
+      preset = presetMeta(parsed.presetId)
+      if (!preset) throw invalid('Unknown provider preset.')
+      type = 'openai-compatible'
+    }
+    const meta = PROVIDER_TYPES[type]
+    const baseUrl = (parsed.baseUrl ?? '').trim() || preset?.baseUrl || meta.defaultBaseUrl
+    if (type === 'openai-compatible' && baseUrl.length === 0) {
       throw invalid('A base URL is required for custom OpenAI-compatible providers.')
     }
-    const defaultModelId = (parsed.defaultModelId ?? '').trim() || meta.defaultModelId
-    return db.providers.create({ ...parsed, id: randomUUID(), baseUrl, defaultModelId })
+    // Only permit an auth mode the family actually supports (the UI enforces
+    // this too; the guard keeps a malformed provider out of the DB).
+    if (parsed.authMode && !providerAuthModes(type).includes(parsed.authMode)) {
+      throw invalid(`${meta.label} does not support that authentication method.`)
+    }
+    // ChatGPT-login providers default to a Codex-backend model, not the family
+    // API default (gpt-4o), which that backend rejects.
+    const familyDefault =
+      parsed.authMode === 'chatgpt_oauth'
+        ? CHATGPT_OAUTH_DEFAULT_MODEL
+        : preset?.defaultModelId || meta.defaultModelId
+    const defaultModelId = (parsed.defaultModelId ?? '').trim() || familyDefault
+    return db.providers.create({ ...parsed, type, id: randomUUID(), baseUrl, defaultModelId })
   })
 
   register(CHANNELS.providersUpdate, (id, patch) => {
@@ -339,17 +370,28 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.providersTest, async (id) => {
     const provider = requireProvider(id)
-    const encrypted = db.providers.getEncryptedKey(provider.id)
-    if (!encrypted) {
-      throw new ProviderError('auth', 'Add an API key first.', { retryable: false })
+    // Resolve the credential per auth mode: OAuth token or decrypted key.
+    let apiKey: string
+    let accountId: string | null = null
+    if (provider.authMode === 'chatgpt_oauth') {
+      const token = await oauthManager.getAccessToken(provider.id)
+      apiKey = token.accessToken
+      accountId = token.accountId
+    } else {
+      const encrypted = db.providers.getEncryptedKey(provider.id)
+      if (!encrypted) {
+        throw new ProviderError('auth', 'Add an API key first.', { retryable: false })
+      }
+      apiKey = keystore.decryptKey(encrypted)
     }
-    const apiKey = keystore.decryptKey(encrypted)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TEST_CONNECTION_TIMEOUT_MS)
     try {
-      return await getAdapter(provider.type).testConnection({
+      return await resolveAdapter(provider.type, provider.authMode).testConnection({
         apiKey,
         baseUrl: provider.baseUrl,
+        accountId,
+        modelCatalog: resolveModelCatalog(provider),
         signal: controller.signal,
       })
     } finally {
@@ -359,11 +401,39 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.providersListModels, async (id) => {
     const provider = requireProvider(id)
+    const modelCatalog = resolveModelCatalog(provider)
+    if (provider.authMode === 'chatgpt_oauth') {
+      // Model list is static for the ChatGPT backend; no key needed.
+      return resolveAdapter(provider.type, provider.authMode).listModels({
+        apiKey: '',
+        baseUrl: provider.baseUrl,
+        modelCatalog,
+      })
+    }
     const encrypted = db.providers.getEncryptedKey(provider.id)
-    // No key yet: fall back to the static catalog instead of failing.
-    if (!encrypted) return PROVIDER_TYPES[provider.type].knownModels
+    // No key yet: fall back to the catalog (family or preset) instead of failing.
+    if (!encrypted) return modelCatalog.knownModels
     const apiKey = keystore.decryptKey(encrypted)
-    return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl })
+    return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl, modelCatalog })
+  })
+
+  register(CHANNELS.providersOauthStart, async (id) => {
+    const provider = requireProvider(id)
+    if (provider.authMode !== 'chatgpt_oauth') {
+      throw invalid('This provider does not use ChatGPT sign-in.')
+    }
+    return await oauthManager.startLogin(provider.id)
+  })
+
+  register(CHANNELS.providersOauthLogout, (id) => {
+    const provider = requireProvider(id)
+    oauthManager.logout(provider.id)
+    return oauthManager.status(provider.id)
+  })
+
+  register(CHANNELS.providersOauthStatus, (id) => {
+    const provider = requireProvider(id)
+    return oauthManager.status(provider.id)
   })
 
   // -- conversations --------------------------------------------------------------
@@ -651,6 +721,26 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.promptsDelete, (id) => {
     db.prompts.remove(requireString(id, 'Prompt id'))
+    return undefined
+  })
+
+  // -- memories -----------------------------------------------------------------
+
+  register(CHANNELS.memoriesList, () => db.memories.list())
+
+  register(CHANNELS.memoriesCreate, (input) =>
+    db.memories.create(parseInput(memoryInputSchema, input))
+  )
+
+  register(CHANNELS.memoriesUpdate, (id, patch) => {
+    const memoryId = requireString(id, 'Memory id')
+    const updated = db.memories.update(memoryId, parseInput(memoryPatchSchema, patch))
+    if (!updated) throw invalid('Memory not found.')
+    return updated
+  })
+
+  register(CHANNELS.memoriesDelete, (id) => {
+    db.memories.remove(requireString(id, 'Memory id'))
     return undefined
   })
 

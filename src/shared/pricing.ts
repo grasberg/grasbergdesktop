@@ -50,6 +50,35 @@ export const MODEL_PRICING: Record<ProviderType, Record<string, ModelPricing>> =
     'MiniMax-M1': { inputPerMTok: 0.4, outputPerMTok: 2.2 },
     'MiniMax-Text-01': { inputPerMTok: 0.2, outputPerMTok: 1.1 },
   },
+  openai: {
+    // OpenAI list prices (USD/1M); approximate and subject to change.
+    'gpt-4o': { inputPerMTok: 2.5, outputPerMTok: 10, cachedInputPerMTok: 1.25 },
+    'gpt-4o-mini': { inputPerMTok: 0.15, outputPerMTok: 0.6, cachedInputPerMTok: 0.075 },
+    'gpt-4.1': { inputPerMTok: 2.0, outputPerMTok: 8.0, cachedInputPerMTok: 0.5 },
+    'gpt-4.1-mini': { inputPerMTok: 0.4, outputPerMTok: 1.6, cachedInputPerMTok: 0.1 },
+    'o4-mini': { inputPerMTok: 1.1, outputPerMTok: 4.4, cachedInputPerMTok: 0.275 },
+    'gpt-5': { inputPerMTok: 5.0, outputPerMTok: 25.0 },
+  },
+  // Z.ai Coding Plan is a flat subscription — per-token cost isn't meaningful.
+  'zai-coding': {},
+  anthropic: {
+    'claude-sonnet-5': { inputPerMTok: 2, outputPerMTok: 10 },
+    'claude-opus-4-8': { inputPerMTok: 5, outputPerMTok: 25 },
+    'claude-fable-5': { inputPerMTok: 10, outputPerMTok: 50 },
+    'claude-sonnet-4-6': { inputPerMTok: 3, outputPerMTok: 15 },
+    'claude-haiku-4-5': { inputPerMTok: 1, outputPerMTok: 5 },
+    'claude-opus-4-5': { inputPerMTok: 5, outputPerMTok: 25 },
+  },
+  google: {
+    'gemini-3.5-flash': { inputPerMTok: 1.5, outputPerMTok: 9 },
+    'gemini-3.1-pro-preview': { inputPerMTok: 2, outputPerMTok: 12 },
+    'gemini-3.1-flash-lite': { inputPerMTok: 0.25, outputPerMTok: 1.5 },
+  },
+  bedrock: {
+    'us.anthropic.claude-sonnet-5': { inputPerMTok: 2, outputPerMTok: 10 },
+    'us.anthropic.claude-fable-5': { inputPerMTok: 10, outputPerMTok: 50 },
+    'us.anthropic.claude-opus-4-8': { inputPerMTok: 5, outputPerMTok: 25 },
+  },
   // Custom endpoints have no knowable price — always "unknown".
   'openai-compatible': {},
 }

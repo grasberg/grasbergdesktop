@@ -9,7 +9,27 @@
 // ---------------------------------------------------------------------------
 
 /** Built-in provider families. `openai-compatible` covers any custom endpoint. */
-export type ProviderType = 'deepseek' | 'zhipu' | 'minimax' | 'openai-compatible'
+export type ProviderType =
+  | 'deepseek'
+  | 'zhipu'
+  | 'minimax'
+  | 'openai'
+  | 'zai-coding'
+  | 'anthropic'
+  | 'google'
+  | 'bedrock'
+  | 'openai-compatible'
+
+/**
+ * How a provider authenticates.
+ * - `api_key`: a stored, encrypted key sent as `Authorization: Bearer <key>`
+ *   (the default; covers subscription/coding-plan keys too — those are just a
+ *   key against a specific endpoint).
+ * - `chatgpt_oauth`: "Sign in with ChatGPT" — an OAuth/PKCE flow whose access
+ *   token pays via the user's ChatGPT subscription against the ChatGPT backend.
+ *   Reverse-engineered and unofficial; clearly flagged experimental in the UI.
+ */
+export type AuthMode = 'api_key' | 'chatgpt_oauth'
 
 export interface ModelCapabilities {
   streaming: boolean
@@ -43,6 +63,12 @@ export interface ProviderTypeMeta {
   /** Catalog of known models (used as fallback and for capability display). */
   knownModels: ModelInfo[]
   defaultModelId: string
+  /** Auth methods this family supports; defaults to ['api_key'] when omitted. */
+  authModes?: AuthMode[]
+  /** Field label for the API key, e.g. "Coding Plan API key". */
+  keyLabel?: string
+  /** Short note shown under the type (e.g. subscription/coding-plan hint). */
+  hint?: string
 }
 
 /** A user-configured provider instance (stored in SQLite; key stored separately). */
@@ -56,10 +82,21 @@ export interface ProviderConfig {
   enabled: boolean
   createdAt: number
   updatedAt: number
+  /** How this provider authenticates (api_key unless it uses a login flow). */
+  authMode: AuthMode
+  /**
+   * For an OpenAI-compatible provider created from a generated preset (models.dev),
+   * the preset id — supplies its model catalog + pricing. Null for direct families.
+   */
+  presetId: string | null
   /** Derived, never the key itself. */
   hasKey: boolean
   /** Masked preview like "sk-…4f2a", computed in main. Never the full key. */
   keyPreview: string | null
+  /** For OAuth providers: whether a valid session/token is stored. */
+  oauthConnected?: boolean
+  /** For OAuth providers: safe display of the signed-in account (never a token). */
+  oauthAccountLabel?: string | null
 }
 
 export interface ProviderConfigInput {
@@ -68,6 +105,18 @@ export interface ProviderConfigInput {
   baseUrl?: string
   defaultModelId?: string
   enabled?: boolean
+  authMode?: AuthMode
+  /** Links this provider to a generated OpenAI-compatible preset (models.dev). */
+  presetId?: string | null
+}
+
+/** Safe, token-free view of an OAuth session for a provider. */
+export interface OAuthStatus {
+  connected: boolean
+  /** e.g. an email or account id — never a token. */
+  accountLabel?: string | null
+  /** Unix ms when the current access token expires, when known. */
+  expiresAt?: number | null
 }
 
 export interface ProviderConfigPatch {
@@ -277,6 +326,12 @@ export interface AppSettings {
   /** Fraction of the model context length at which compaction triggers. */
   compactionThresholdRatio: number
   /**
+   * Let the assistant remember durable facts across conversations (stored
+   * locally, injected into the system prompt). On by default; toggleable in
+   * Settings → Memory, where saved memories can be reviewed and deleted.
+   */
+  memoryEnabled: boolean
+  /**
    * Opt-in: allow the run_shell_command tool to actually execute commands
    * (still gated by per-call approval). Off by default — the app otherwise
    * only ever *suggests* shell commands.
@@ -309,6 +364,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 'medium',
   compactionEnabled: false,
   compactionThresholdRatio: 0.75,
+  memoryEnabled: true,
   shellExecutionEnabled: false,
   browserToolsEnabled: false,
   telegramBridgeEnabled: false,
@@ -676,6 +732,33 @@ export interface PromptTemplateInput {
 export interface PromptTemplatePatch {
   title?: string
   body?: string
+}
+
+// ---------------------------------------------------------------------------
+// Memory (assistant memories persisted across conversations)
+// ---------------------------------------------------------------------------
+
+export interface Memory {
+  id: string
+  /** Short identifying slug; assistant upserts by title (case-insensitive). */
+  title: string
+  /** Markdown content of the memory. */
+  content: string
+  /** Conversation the assistant saved it from; null when user-created/edited. */
+  sourceConversationId: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface MemoryInput {
+  title: string
+  content: string
+  sourceConversationId?: string | null
+}
+
+export interface MemoryPatch {
+  title?: string
+  content?: string
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
   AppSettings,
+  AuthMode,
   ChatParams,
   Conversation,
   Message,
@@ -32,7 +33,12 @@ import {
   type ChatRegenerateRequest,
   type ChatSendRequest,
 } from '@shared/ipc'
-import { PROVIDER_TYPES, UNKNOWN_MODEL_CAPS, findCatalogModel } from '@shared/catalog'
+import {
+  PROVIDER_TYPES,
+  UNKNOWN_MODEL_CAPS,
+  resolveModelCatalog,
+  resolveModelInfo,
+} from '@shared/catalog'
 import type { AppDatabase } from '../db/database'
 import type { MessagePatch } from '../db/repositories/messages'
 import type {
@@ -41,7 +47,7 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from '../providers/adapter'
-import { getAdapter } from '../providers/registry'
+import { resolveAdapter as resolveAdapterForProvider } from '../providers/registry'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { decryptKey } from '../keys/keystore'
 import { buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
@@ -63,6 +69,9 @@ const MAX_TOOL_ROUNDS = 5
 
 const TOOL_LIMIT_NOTE =
   `[Tool-call limit reached (${MAX_TOOL_ROUNDS} rounds) — the remaining tool calls were not run.]`
+
+/** Placeholder held in activeByConversation between reservation and start(). */
+const PENDING_STREAM = '__pending__'
 
 type Broadcast = (channel: string, payload: unknown) => void
 
@@ -98,7 +107,12 @@ export interface ChatServiceOptions {
   /** When absent, generations never offer tools (MVP behaviour). */
   tools?: ChatToolSystem
   /** Test seam: adapter resolution (defaults to the real provider registry). */
-  resolveAdapter?: (type: ProviderType) => ProviderAdapter
+  resolveAdapter?: (type: ProviderType, authMode: AuthMode) => ProviderAdapter
+  /**
+   * Resolves an OAuth access token (+ account id) for providers using a login
+   * flow. Injected from the OpenAI OAuth manager; absent in tests/headless.
+   */
+  getAccessToken?: (providerId: string) => Promise<{ accessToken: string; accountId: string | null }>
   /** Directory holding stored image attachments (for the vision wire payload). */
   imageDir?: string
   /** Embedded browser — a computer-use screenshot is injected after each round. */
@@ -109,7 +123,10 @@ interface ResolvedTarget {
   provider: ProviderConfig
   modelId: string
   params: ChatParams
+  /** Bearer credential: API key or OAuth access token. */
   apiKey: string
+  /** OAuth account id for the ChatGPT backend header; null for API-key auth. */
+  accountId: string | null
 }
 
 interface ActiveStream {
@@ -219,6 +236,11 @@ function contentIsEmpty(content: string | ContentPart[]): boolean {
   return typeof content === 'string' ? content.trim().length === 0 : content.length === 0
 }
 
+// -- memory ---------------------------------------------------------------------
+
+/** Most-recent memories injected into the system prompt (char-capped there). */
+const MEMORY_MAX_INJECTED = 50
+
 // -- context compaction -------------------------------------------------------
 
 /** Assumed context window when the model is not in the catalog. */
@@ -278,65 +300,80 @@ export class ChatService {
     private readonly options: ChatServiceOptions = {}
   ) {}
 
-  send(req: ChatSendRequest): StartStreamResult {
+  async send(req: ChatSendRequest): Promise<StartStreamResult> {
     const conversation = this.requireConversation(req.conversationId)
-    this.ensureIdle(conversation.id)
-    const settings = this.db.settings.get()
-    const resolved = this.resolveTarget(conversation, settings, req.overrides)
+    this.reserve(conversation.id)
+    try {
+      const settings = this.db.settings.get()
+      const resolved = await this.resolveTarget(conversation, settings, req.overrides)
 
-    // Content is stored as typed; attachment text is inlined only on the wire.
-    const userMessage: Message = {
-      id: randomUUID(),
-      conversationId: conversation.id,
-      role: 'user',
-      content: req.content,
-      attachments: req.attachments && req.attachments.length > 0 ? req.attachments : undefined,
-      status: 'complete',
-      seq: this.db.messages.nextSeq(conversation.id),
-      createdAt: Date.now(),
+      // Content is stored as typed; attachment text is inlined only on the wire.
+      const userMessage: Message = {
+        id: randomUUID(),
+        conversationId: conversation.id,
+        role: 'user',
+        content: req.content,
+        attachments: req.attachments && req.attachments.length > 0 ? req.attachments : undefined,
+        status: 'complete',
+        seq: this.db.messages.nextSeq(conversation.id),
+        createdAt: Date.now(),
+      }
+      this.db.messages.insert(userMessage)
+
+      return this.start(conversation, settings, resolved, userMessage)
+    } catch (e) {
+      this.releaseReservation(conversation.id)
+      throw e
     }
-    this.db.messages.insert(userMessage)
-
-    return this.start(conversation, settings, resolved, userMessage)
   }
 
-  regenerate(req: ChatRegenerateRequest): StartStreamResult {
+  async regenerate(req: ChatRegenerateRequest): Promise<StartStreamResult> {
     const conversation = this.requireConversation(req.conversationId)
-    this.ensureIdle(conversation.id)
-    const messages = this.db.messages.listByConversation(conversation.id)
-    const target = messages.find((m) => m.id === req.messageId)
-    if (!target || target.role !== 'assistant') {
-      throw new ProviderError('invalid_request', 'Only assistant messages can be regenerated.')
+    this.reserve(conversation.id)
+    try {
+      const messages = this.db.messages.listByConversation(conversation.id)
+      const target = messages.find((m) => m.id === req.messageId)
+      if (!target || target.role !== 'assistant') {
+        throw new ProviderError('invalid_request', 'Only assistant messages can be regenerated.')
+      }
+      const last = messages[messages.length - 1]
+      if (!last || last.id !== target.id) {
+        throw new ProviderError(
+          'invalid_request',
+          'Only the last message of a conversation can be regenerated.'
+        )
+      }
+      const settings = this.db.settings.get()
+      const resolved = await this.resolveTarget(conversation, settings, undefined)
+      this.db.messages.deleteById(target.id)
+      return this.start(conversation, settings, resolved, null)
+    } catch (e) {
+      this.releaseReservation(conversation.id)
+      throw e
     }
-    const last = messages[messages.length - 1]
-    if (!last || last.id !== target.id) {
-      throw new ProviderError(
-        'invalid_request',
-        'Only the last message of a conversation can be regenerated.'
-      )
-    }
-    const settings = this.db.settings.get()
-    const resolved = this.resolveTarget(conversation, settings, undefined)
-    this.db.messages.deleteById(target.id)
-    return this.start(conversation, settings, resolved, null)
   }
 
-  editAndRerun(req: ChatEditAndRerunRequest): StartStreamResult {
+  async editAndRerun(req: ChatEditAndRerunRequest): Promise<StartStreamResult> {
     const conversation = this.requireConversation(req.conversationId)
-    this.ensureIdle(conversation.id)
-    const messages = this.db.messages.listByConversation(conversation.id)
-    const target = messages.find((m) => m.id === req.messageId)
-    if (!target || target.role !== 'user') {
-      throw new ProviderError('invalid_request', 'Only user messages can be edited and rerun.')
+    this.reserve(conversation.id)
+    try {
+      const messages = this.db.messages.listByConversation(conversation.id)
+      const target = messages.find((m) => m.id === req.messageId)
+      if (!target || target.role !== 'user') {
+        throw new ProviderError('invalid_request', 'Only user messages can be edited and rerun.')
+      }
+      const settings = this.db.settings.get()
+      const resolved = await this.resolveTarget(conversation, settings, undefined)
+      const updated = this.db.messages.update(target.id, { content: req.newContent })
+      if (!updated) {
+        throw new ProviderError('invalid_request', 'Message not found.')
+      }
+      this.db.messages.deleteAfterSeq(conversation.id, target.seq)
+      return this.start(conversation, settings, resolved, updated)
+    } catch (e) {
+      this.releaseReservation(conversation.id)
+      throw e
     }
-    const settings = this.db.settings.get()
-    const resolved = this.resolveTarget(conversation, settings, undefined)
-    const updated = this.db.messages.update(target.id, { content: req.newContent })
-    if (!updated) {
-      throw new ProviderError('invalid_request', 'Message not found.')
-    }
-    this.db.messages.deleteAfterSeq(conversation.id, target.seq)
-    return this.start(conversation, settings, resolved, updated)
   }
 
   stop(streamId: string): void {
@@ -392,11 +429,30 @@ export class ChatService {
     }
   }
 
-  private resolveTarget(
+  /**
+   * Reserve the conversation's single-generation slot BEFORE any async work.
+   * resolveTarget is async (OAuth token refresh can hit the network), so without
+   * an eager reservation two concurrent sends could both pass ensureIdle before
+   * either registered its stream and double-start. `start()` overwrites the
+   * PENDING marker with the real stream id; releaseReservation() clears it only
+   * while it is still PENDING (i.e. the generation never actually started).
+   */
+  private reserve(conversationId: string): void {
+    this.ensureIdle(conversationId)
+    this.activeByConversation.set(conversationId, PENDING_STREAM)
+  }
+
+  private releaseReservation(conversationId: string): void {
+    if (this.activeByConversation.get(conversationId) === PENDING_STREAM) {
+      this.activeByConversation.delete(conversationId)
+    }
+  }
+
+  private async resolveTarget(
     conversation: Conversation,
     settings: AppSettings,
     overrides: ChatSendRequest['overrides']
-  ): ResolvedTarget {
+  ): Promise<ResolvedTarget> {
     const providerId =
       overrides?.providerId ?? conversation.providerId ?? settings.defaultProviderId
     if (!providerId) {
@@ -412,14 +468,31 @@ export class ChatService {
         `${provider.label} is disabled — enable it in Settings.`
       )
     }
-    const encrypted = this.db.providers.getEncryptedKey(provider.id)
-    if (!encrypted) {
-      throw new ProviderError(
-        'auth',
-        `No API key configured for ${provider.label}. Add one in Settings.`
-      )
+
+    // Auth: OAuth providers resolve an access token (refreshing if needed);
+    // everyone else decrypts the stored API key.
+    let apiKey: string
+    let accountId: string | null = null
+    if (provider.authMode === 'chatgpt_oauth') {
+      if (!this.options.getAccessToken) {
+        throw new ProviderError(
+          'auth',
+          `${provider.label} uses ChatGPT sign-in, which isn't available in this context.`
+        )
+      }
+      const token = await this.options.getAccessToken(provider.id)
+      apiKey = token.accessToken
+      accountId = token.accountId
+    } else {
+      const encrypted = this.db.providers.getEncryptedKey(provider.id)
+      if (!encrypted) {
+        throw new ProviderError(
+          'auth',
+          `No API key configured for ${provider.label}. Add one in Settings.`
+        )
+      }
+      apiKey = decryptKey(encrypted)
     }
-    const apiKey = decryptKey(encrypted)
 
     const modelId = firstNonEmpty(
       overrides?.modelId,
@@ -439,7 +512,7 @@ export class ChatService {
       ...conversation.params,
       ...overrides?.params,
     }
-    return { provider, modelId, params, apiKey }
+    return { provider, modelId, params, apiKey, accountId }
   }
 
   /** Inserts the placeholder, snapshots history, and kicks off the detached loop. */
@@ -464,7 +537,7 @@ export class ChatService {
 
     const toolPlan = this.planTools(resolved)
     const visionEnabled =
-      findCatalogModel(resolved.provider.type, resolved.modelId)?.capabilities.vision ??
+      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
       UNKNOWN_MODEL_CAPS.vision
     const streamId = randomUUID()
     const controller = new AbortController()
@@ -513,7 +586,7 @@ export class ChatService {
     if (enabled.length === 0) return { promptOpts: {} }
 
     const modelSupportsTools =
-      findCatalogModel(resolved.provider.type, resolved.modelId)?.capabilities.tools ??
+      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.tools ??
       UNKNOWN_MODEL_CAPS.tools
     const toolNames = enabled.map((def) => def.name)
     if (!modelSupportsTools) {
@@ -540,11 +613,24 @@ export class ChatService {
     const history: AdapterMessage[] = []
     // Effective system prompt = mode base prompt + the user's extras (the
     // per-conversation prompt wins over the global default). The mode prompt
-    // is always non-empty, so a system message is always sent now — in chat
-    // mode with no extras that is just the base persona.
+    // is always non-empty (base persona + a per-mode section), so a system
+    // message is always sent now.
+    // When memory is enabled, saved memories (and the uld-memory block
+    // instructions) ride along in the mode prompt — this single spot covers
+    // streaming, headless and delegate generations alike.
+    const effectiveOpts: ModePromptOptions = settings.memoryEnabled
+      ? {
+          ...promptOpts,
+          memoryEnabled: true,
+          memories: this.db.memories
+            .list()
+            .slice(0, MEMORY_MAX_INJECTED)
+            .map((m) => ({ title: m.title, content: m.content })),
+        }
+      : promptOpts
     const extras =
       (conversation.systemPrompt ?? '').trim() || settings.defaultSystemPrompt.trim()
-    const systemPrompt = [buildModeSystemPrompt(conversation.mode, promptOpts), extras]
+    const systemPrompt = [buildModeSystemPrompt(conversation.mode, effectiveOpts), extras]
       .filter((part) => part.length > 0)
       .join('\n\n')
       .trim()
@@ -591,7 +677,7 @@ export class ChatService {
     if (!settings.compactionEnabled) return
     try {
       const contextLength =
-        findCatalogModel(resolved.provider.type, resolved.modelId)?.contextLength ??
+        resolveModelInfo(resolved.provider, resolved.modelId)?.contextLength ??
         DEFAULT_CONTEXT_LENGTH
       const threshold = contextLength * settings.compactionThresholdRatio
 
@@ -627,8 +713,7 @@ export class ChatService {
         parts.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${messageEstimateText(m)}`)
       }
 
-      const resolveAdapter = this.options.resolveAdapter ?? getAdapter
-      const adapter = resolveAdapter(resolved.provider.type)
+      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
       const result = await adapter.chat(
         {
           modelId: resolved.modelId,
@@ -639,7 +724,7 @@ export class ChatService {
           params: { maxTokens: 1024 },
           stream: false,
         },
-        { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, signal }
+        { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal }
       )
       const summary = result.text.trim()
       if (summary.length === 0) return
@@ -660,7 +745,7 @@ export class ChatService {
   async generateHeadless(conversationId: string, userText: string): Promise<string> {
     const conversation = this.requireConversation(conversationId)
     const settings = this.db.settings.get()
-    const resolved = this.resolveTarget(conversation, settings, undefined)
+    const resolved = await this.resolveTarget(conversation, settings, undefined)
 
     const userMessage: Message = {
       id: randomUUID(),
@@ -675,10 +760,10 @@ export class ChatService {
 
     const toolPlan = this.planTools(resolved)
     const visionEnabled =
-      findCatalogModel(resolved.provider.type, resolved.modelId)?.capabilities.vision ??
+      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
       UNKNOWN_MODEL_CAPS.vision
     const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
-    const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+    const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
     const result = await adapter.chat(
       {
         modelId: resolved.modelId,
@@ -686,7 +771,7 @@ export class ChatService {
         params: resolved.params,
         stream: false,
       },
-      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
     )
 
     const assistant: Message = {
@@ -729,8 +814,8 @@ export class ChatService {
       createdAt: 0,
       updatedAt: 0,
     }
-    const resolved = this.resolveTarget(stub, settings, { providerId, modelId })
-    const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+    const resolved = await this.resolveTarget(stub, settings, { providerId, modelId })
+    const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
     const result = await adapter.chat(
       {
         modelId: resolved.modelId,
@@ -738,7 +823,7 @@ export class ChatService {
         params: resolved.params,
         stream: false,
       },
-      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
     )
     return result.text
   }
@@ -753,8 +838,8 @@ export class ChatService {
     try {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
-      const resolved = this.resolveTarget(parent, settings, undefined)
-      const adapter = (this.options.resolveAdapter ?? getAdapter)(resolved.provider.type)
+      const resolved = await this.resolveTarget(parent, settings, undefined)
+      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
       const tools = this.options.tools
 
       const toolDefs: AdapterToolDef[] = tools
@@ -778,7 +863,7 @@ export class ChatService {
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             stream: false,
           },
-          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl }
+          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
         )
         if (result.text.trim()) final = result.text
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
@@ -885,8 +970,7 @@ export class ChatService {
     }
 
     try {
-      const resolveAdapter = this.options.resolveAdapter ?? getAdapter
-      const adapter = resolveAdapter(resolved.provider.type)
+      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
       const tools = this.options.tools
       const messages: AdapterMessage[] = [...history]
 
@@ -915,7 +999,7 @@ export class ChatService {
           },
           {
             apiKey: resolved.apiKey,
-            baseUrl: resolved.provider.baseUrl,
+            baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider),
             signal: controller.signal,
           }
         )

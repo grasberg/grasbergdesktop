@@ -1,9 +1,10 @@
 /**
  * Parsers for the mode-specific artifact blocks assistants emit (formats are
- * instructed in prompts.ts): ```uld-change blocks in Code mode and ```uld-item
- * blocks in Cowork mode. Parsing is tolerant — malformed blocks are silently
- * skipped, never thrown on — and the message content itself is left untouched
- * (the renderer renders the blocks specially).
+ * instructed in prompts.ts): ```uld-change blocks in Code mode, ```uld-item
+ * blocks in Cowork mode, and mode-independent ```uld-memory blocks (assistant
+ * memories). Parsing is tolerant — malformed blocks are silently skipped,
+ * never thrown on — and the message content itself is left untouched (the
+ * renderer renders the blocks specially).
  */
 
 import type { CodeChangeType, WorkspaceItemKind } from '@shared/types'
@@ -21,6 +22,8 @@ export interface ExtractedWorkspaceItem {
   title: string
   /** Markdown body (trailing whitespace trimmed). */
   content: string
+  /** Optional task status from the header; set only when it is a valid value. */
+  status?: 'todo' | 'doing' | 'done'
 }
 
 const CODE_CHANGE_TYPES: ReadonlySet<string> = new Set(['create', 'edit', 'delete'])
@@ -31,6 +34,8 @@ const WORKSPACE_ITEM_KINDS: ReadonlySet<string> = new Set([
   'doc',
   'task',
 ])
+
+const WORKSPACE_ITEM_STATUSES: ReadonlySet<string> = new Set(['todo', 'doing', 'done'])
 
 /**
  * Matches a fenced block whose opening fence is ```<tag> alone on its line and
@@ -119,7 +124,44 @@ export function extractHtmlArtifacts(content: string): ExtractedDocument[] {
   return out
 }
 
-/** Extracts ```uld-item blocks: {"kind","title"} header + markdown body. */
+export interface ExtractedMemoryDirective {
+  action: 'remember' | 'forget'
+  title: string
+  /** Markdown body (trailing whitespace trimmed); '' for forget. */
+  content: string
+}
+
+/**
+ * Extracts ```uld-memory blocks: {"title","action"?} header + markdown body.
+ * "action" defaults to 'remember'; unknown actions are skipped, as are
+ * 'remember' directives with an empty body.
+ */
+export function extractMemoryDirectives(content: string): ExtractedMemoryDirective[] {
+  const directives: ExtractedMemoryDirective[] = []
+  for (const { header, body } of parseRawBlocks(content, 'uld-memory')) {
+    const title = header['title']
+    if (typeof title !== 'string' || title.trim().length === 0) continue
+    const rawAction = header['action']
+    let action: ExtractedMemoryDirective['action']
+    if (rawAction === undefined || rawAction === 'remember') {
+      action = 'remember'
+    } else if (rawAction === 'forget') {
+      action = 'forget'
+    } else {
+      continue // unknown action — skip the block
+    }
+    const text = body.trimEnd()
+    if (action === 'remember' && text.trim().length === 0) continue
+    directives.push({
+      action,
+      title: title.trim(),
+      content: action === 'forget' ? '' : text,
+    })
+  }
+  return directives
+}
+
+/** Extracts ```uld-item blocks: {"kind","title","status"?} header + markdown body. */
 export function extractWorkspaceItems(content: string): ExtractedWorkspaceItem[] {
   const items: ExtractedWorkspaceItem[] = []
   for (const { header, body } of parseRawBlocks(content, 'uld-item')) {
@@ -127,11 +169,17 @@ export function extractWorkspaceItems(content: string): ExtractedWorkspaceItem[]
     const title = header['title']
     if (typeof kind !== 'string' || !WORKSPACE_ITEM_KINDS.has(kind)) continue
     if (typeof title !== 'string' || title.trim().length === 0) continue
-    items.push({
+    const item: ExtractedWorkspaceItem = {
       kind: kind as WorkspaceItemKind,
       title: title.trim(),
       content: body.trimEnd(),
-    })
+    }
+    // Optional status (tolerant like the rest of the parser: invalid → absent).
+    const status = header['status']
+    if (typeof status === 'string' && WORKSPACE_ITEM_STATUSES.has(status)) {
+      item.status = status as ExtractedWorkspaceItem['status']
+    }
+    items.push(item)
   }
   return items
 }

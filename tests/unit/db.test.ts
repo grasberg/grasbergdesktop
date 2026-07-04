@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type Message, type MessageStatus } from '@shared/types'
 import { openDatabase, type AppDatabase } from '../../src/main/db/database'
+import { open } from '../../src/main/db/driver'
+import { MIGRATIONS } from '../../src/main/db/migrations'
 
 let dir: string
 let dbFile: string
@@ -140,6 +142,147 @@ describe('providers repository', () => {
     db!.providers.setKeyRow('prov-1', 'RU5DUllQVEVE', 'sk-…4f2a')
     db!.providers.remove('prov-1')
     expect(db!.providers.getEncryptedKey('prov-1')).toBeNull()
+  })
+
+  it('supports new provider types and an auth mode', () => {
+    const oai = db!.providers.create({
+      id: 'prov-oai',
+      type: 'openai',
+      label: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1',
+      defaultModelId: 'gpt-4o',
+      authMode: 'chatgpt_oauth',
+    })
+    expect(oai).toMatchObject({ type: 'openai', authMode: 'chatgpt_oauth', oauthConnected: false })
+
+    const zai = db!.providers.create({
+      id: 'prov-zai',
+      type: 'zai-coding',
+      label: 'Z.ai Coding',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      defaultModelId: 'glm-4.6',
+    })
+    // Auth mode defaults to api_key when omitted.
+    expect(zai.authMode).toBe('api_key')
+  })
+
+  it('stores + clears an OAuth session (token-free status derived)', () => {
+    db!.providers.create({
+      id: 'prov-oai',
+      type: 'openai',
+      label: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1',
+      defaultModelId: 'gpt-4o',
+      authMode: 'chatgpt_oauth',
+    })
+    db!.providers.setOAuthRow({
+      providerId: 'prov-oai',
+      encryptedAccess: 'QUNDRVNT',
+      encryptedRefresh: 'UkVGUkVTSA==',
+      accountId: 'acct_123',
+      accountLabel: 'user@example.com',
+      expiresAt: 1234567890,
+    })
+
+    const withOauth = db!.providers.getById('prov-oai')!
+    expect(withOauth.oauthConnected).toBe(true)
+    expect(withOauth.oauthAccountLabel).toBe('user@example.com')
+
+    const row = db!.providers.getOAuthRow('prov-oai')!
+    expect(row).toMatchObject({ encryptedAccess: 'QUNDRVNT', accountId: 'acct_123', expiresAt: 1234567890 })
+
+    db!.providers.deleteOAuthRow('prov-oai')
+    expect(db!.providers.getOAuthRow('prov-oai')).toBeNull()
+    expect(db!.providers.getById('prov-oai')!.oauthConnected).toBe(false)
+  })
+
+  it('migration v11 rebuilds providers FK-safely, preserving keys', () => {
+    db!.close()
+    db = null
+    rmSync(dbFile, { force: true })
+
+    // Build a v10 database by hand, then seed a provider + its key row.
+    const v10 = open(dbFile)
+    for (const migration of MIGRATIONS.filter((m) => m.version <= 10)) {
+      for (const statement of migration.statements) v10.exec(statement)
+    }
+    v10.run("INSERT INTO meta (key, value) VALUES ('schema_version', '10')")
+    const now = Date.now()
+    v10.run(
+      `INSERT INTO providers (id, type, label, base_url, default_model_id, enabled, extra_json, created_at, updated_at)
+       VALUES ('p1', 'deepseek', 'DeepSeek', 'https://api.deepseek.com/v1', 'deepseek-chat', 1, '{}', ?, ?)`,
+      [now, now]
+    )
+    v10.run(
+      `INSERT INTO provider_keys (provider_id, encrypted_key, key_preview, updated_at)
+       VALUES ('p1', 'RU5DUllQVEVE', 'sk-…4f2a', ?)`,
+      [now]
+    )
+    v10.close()
+
+    // Reopen: applies v11 (rebuild) + v12. The key row must survive the rebuild.
+    db = openDatabase(dbFile)
+    const version = db.driver.get<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'schema_version'"
+    )!.value
+    expect(Number.parseInt(version, 10)).toBeGreaterThanOrEqual(12)
+
+    const p1 = db.providers.getById('p1')!
+    expect(p1).toMatchObject({ type: 'deepseek', authMode: 'api_key', hasKey: true, keyPreview: 'sk-…4f2a' })
+    expect(db.providers.getEncryptedKey('p1')).toBe('RU5DUllQVEVE')
+  })
+
+  it('migration v13 rebuilds providers, preserving keys AND oauth; adds preset_id', () => {
+    db!.close()
+    db = null
+    rmSync(dbFile, { force: true })
+
+    // Build a v12 database by hand with a provider that has BOTH a key row and
+    // an oauth row (both cascade), to prove the FK-safe rebuild preserves both.
+    const v12 = open(dbFile)
+    for (const migration of MIGRATIONS.filter((m) => m.version <= 12)) {
+      for (const statement of migration.statements) v12.exec(statement)
+    }
+    v12.run("INSERT INTO meta (key, value) VALUES ('schema_version', '12')")
+    const now = Date.now()
+    v12.run(
+      `INSERT INTO providers (id, type, label, base_url, default_model_id, enabled, extra_json, auth_mode, created_at, updated_at)
+       VALUES ('p1', 'openai', 'OpenAI', 'https://api.openai.com/v1', 'gpt-4o', 1, '{}', 'chatgpt_oauth', ?, ?)`,
+      [now, now]
+    )
+    v12.run(
+      `INSERT INTO provider_keys (provider_id, encrypted_key, key_preview, updated_at) VALUES ('p1', 'RU5DUllQVEVE', 'sk-…4f2a', ?)`,
+      [now]
+    )
+    v12.run(
+      `INSERT INTO provider_oauth (provider_id, encrypted_access, encrypted_refresh, account_id, account_label, expires_at, updated_at)
+       VALUES ('p1', 'QUND', 'UkVG', 'acct_1', 'a@b.com', 123, ?)`,
+      [now]
+    )
+    v12.close()
+
+    db = openDatabase(dbFile)
+    const version = db.driver.get<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'schema_version'"
+    )!.value
+    expect(Number.parseInt(version, 10)).toBeGreaterThanOrEqual(13)
+
+    // Both cascading rows survived the rebuild; preset_id defaults to null.
+    const p1 = db.providers.getById('p1')!
+    expect(p1).toMatchObject({ type: 'openai', authMode: 'chatgpt_oauth', presetId: null, hasKey: true })
+    expect(db.providers.getEncryptedKey('p1')).toBe('RU5DUllQVEVE')
+    expect(db.providers.getOAuthRow('p1')).toMatchObject({ accountId: 'acct_1', accountLabel: 'a@b.com' })
+
+    // A preset-backed provider round-trips (type openai-compatible + presetId).
+    db.providers.create({
+      id: 'p2',
+      type: 'openai-compatible',
+      label: 'Groq',
+      baseUrl: 'https://api.groq.com/openai/v1',
+      defaultModelId: 'llama-3.3-70b-versatile',
+      presetId: 'groq',
+    })
+    expect(db.providers.getById('p2')).toMatchObject({ type: 'openai-compatible', presetId: 'groq' })
   })
 })
 

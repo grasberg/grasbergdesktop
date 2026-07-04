@@ -3,6 +3,7 @@ import {
   extractCodeChanges,
   extractDocument,
   extractHtmlArtifacts,
+  extractMemoryDirectives,
   extractWorkspaceItems,
 } from '../../src/main/services/mode-artifacts'
 
@@ -199,6 +200,35 @@ describe('extractWorkspaceItems', () => {
     expect(items[0].content).toBe('')
   })
 
+  it('parses a valid status from the header', () => {
+    const content = [
+      '```uld-item',
+      '{"kind":"task","title":"Ship it","status":"doing"}',
+      'working on it',
+      '```',
+    ].join('\n')
+    const items = extractWorkspaceItems(content)
+    expect(items).toHaveLength(1)
+    expect(items[0].status).toBe('doing')
+  })
+
+  it('ignores an invalid or non-string status without dropping the item', () => {
+    const content = [
+      '```uld-item',
+      '{"kind":"task","title":"Bad status","status":"blocked"}',
+      'body',
+      '```',
+      '```uld-item',
+      '{"kind":"task","title":"Numeric status","status":1}',
+      'body',
+      '```',
+    ].join('\n')
+    const items = extractWorkspaceItems(content)
+    expect(items.map((i) => i.title)).toEqual(['Bad status', 'Numeric status'])
+    expect(items[0].status).toBeUndefined()
+    expect(items[1].status).toBeUndefined()
+  })
+
   it('does not cross-match uld-change and uld-item blocks', () => {
     const content = [
       '```uld-change',
@@ -208,5 +238,96 @@ describe('extractWorkspaceItems', () => {
     ].join('\n')
     expect(extractWorkspaceItems(content)).toEqual([])
     expect(extractCodeChanges(content)).toHaveLength(1)
+  })
+})
+
+describe('extractMemoryDirectives', () => {
+  it('extracts a remember directive with a multiline body (trailing whitespace trimmed)', () => {
+    const content = [
+      'Noted — saving that.',
+      '```uld-memory',
+      '{"title":"preferred-language","action":"remember"}',
+      'The user prefers answers in Swedish.',
+      '',
+      'Formal tone.  ',
+      '```',
+    ].join('\n')
+    const directives = extractMemoryDirectives(content)
+    expect(directives).toHaveLength(1)
+    expect(directives[0]).toEqual({
+      action: 'remember',
+      title: 'preferred-language',
+      content: 'The user prefers answers in Swedish.\n\nFormal tone.',
+    })
+  })
+
+  it('defaults action to remember when the header omits it', () => {
+    const content = ['```uld-memory', '{"title":"role"}', 'Backend developer.', '```'].join('\n')
+    const directives = extractMemoryDirectives(content)
+    expect(directives).toHaveLength(1)
+    expect(directives[0].action).toBe('remember')
+  })
+
+  it('extracts a forget directive with empty content regardless of body', () => {
+    const content = [
+      '```uld-memory',
+      '{"title":"old-fact","action":"forget"}',
+      'this body is ignored',
+      '```',
+    ].join('\n')
+    const directives = extractMemoryDirectives(content)
+    expect(directives).toHaveLength(1)
+    expect(directives[0]).toEqual({ action: 'forget', title: 'old-fact', content: '' })
+  })
+
+  it('skips malformed blocks: blank title, unknown action, bad JSON, empty remember body', () => {
+    const content = [
+      '```uld-memory',
+      '{"title":"   "}',
+      'blank title',
+      '```',
+      '```uld-memory',
+      '{"title":"x","action":"archive"}',
+      'unknown action',
+      '```',
+      '```uld-memory',
+      'not json',
+      'bad header',
+      '```',
+      '```uld-memory',
+      '{"title":"empty-body"}',
+      '```',
+      '```uld-memory',
+      '{"title":"kept"}',
+      'valid memory',
+      '```',
+    ].join('\n')
+    const directives = extractMemoryDirectives(content)
+    expect(directives).toHaveLength(1)
+    expect(directives[0].title).toBe('kept')
+  })
+
+  it('extracts multiple directives in document order', () => {
+    const content = [
+      '```uld-memory',
+      '{"title":"a"}',
+      'first',
+      '```',
+      'and',
+      '```uld-memory',
+      '{"title":"b","action":"forget"}',
+      '```',
+    ].join('\n')
+    expect(extractMemoryDirectives(content).map((d) => d.title)).toEqual(['a', 'b'])
+  })
+
+  it('does not cross-match other uld block types', () => {
+    const content = [
+      '```uld-item',
+      '{"kind":"note","title":"Not a memory"}',
+      'workspace item',
+      '```',
+    ].join('\n')
+    expect(extractMemoryDirectives(content)).toEqual([])
   })
 })

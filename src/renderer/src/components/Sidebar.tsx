@@ -388,12 +388,18 @@ export default function Sidebar(): React.JSX.Element {
           onClick={() => useUiStore.getState().openSettings(true)}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="8" cy="8" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
             <path
-              d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"
+              d="M8 5.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2Z"
+              fill="none"
               stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
+              strokeWidth="1.3"
+            />
+            <path
+              d="M8 1.2l1 1.7a5.7 5.7 0 0 1 1.6.66l1.9-.5.9 1.56-1.35 1.4a5.7 5.7 0 0 1 0 1.86l1.35 1.4-.9 1.56-1.9-.5a5.7 5.7 0 0 1-1.6.66l-1 1.7h-1.8l-1-1.7a5.7 5.7 0 0 1-1.6-.66l-1.9.5-.9-1.56 1.35-1.4a5.7 5.7 0 0 1 0-1.86L1.6 4.62l.9-1.56 1.9.5A5.7 5.7 0 0 1 6 2.9l1-1.7Z"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinejoin="round"
             />
           </svg>
         </button>

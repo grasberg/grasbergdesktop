@@ -8,6 +8,7 @@ import ToolsTab from './ToolsTab'
 import McpServersTab from './McpServersTab'
 import BridgesTab from './BridgesTab'
 import PromptsTab from './PromptsTab'
+import MemoryTab from './MemoryTab'
 import AppearanceTab from './AppearanceTab'
 import PrivacyTab from './PrivacyTab'
 import AboutTab from './AboutTab'
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'mcp', label: 'MCP' },
   { id: 'bridges', label: 'Bridges' },
   { id: 'prompts', label: 'Prompts' },
+  { id: 'memory', label: 'Memory' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'about', label: 'About' },
@@ -114,6 +116,7 @@ export default function SettingsPanel() {
             {tab === 'mcp' ? <McpServersTab /> : null}
             {tab === 'bridges' ? <BridgesTab /> : null}
             {tab === 'prompts' ? <PromptsTab /> : null}
+            {tab === 'memory' ? <MemoryTab /> : null}
             {tab === 'appearance' ? <AppearanceTab /> : null}
             {tab === 'privacy' ? <PrivacyTab /> : null}
             {tab === 'about' ? <AboutTab /> : null}

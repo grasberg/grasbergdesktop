@@ -32,6 +32,9 @@ import type {
   McpServerInput,
   McpServerPatch,
   McpServerRuntime,
+  Memory,
+  MemoryInput,
+  MemoryPatch,
   SetTelegramBridgeInput,
   Workflow,
   WorkflowGraph,
@@ -40,6 +43,7 @@ import type {
   Message,
   ModelInfo,
   NormalizedError,
+  OAuthStatus,
   ProviderConfig,
   ProviderConfigInput,
   ProviderConfigPatch,
@@ -93,6 +97,9 @@ export const CHANNELS = {
   providersDeleteKey: 'providers:deleteKey',
   providersTest: 'providers:test',
   providersListModels: 'providers:listModels',
+  providersOauthStart: 'providers:oauthStart',
+  providersOauthLogout: 'providers:oauthLogout',
+  providersOauthStatus: 'providers:oauthStatus',
 
   // conversations
   convList: 'conv:list',
@@ -146,6 +153,12 @@ export const CHANNELS = {
   promptsCreate: 'prompts:create',
   promptsUpdate: 'prompts:update',
   promptsDelete: 'prompts:delete',
+
+  // memories
+  memoriesList: 'memories:list',
+  memoriesCreate: 'memories:create',
+  memoriesUpdate: 'memories:update',
+  memoriesDelete: 'memories:delete',
 
   // MCP servers
   mcpList: 'mcp:list',
@@ -303,6 +316,12 @@ export interface UldApi {
     deleteKey(id: string): Promise<IpcResult<ProviderConfig>>
     test(id: string): Promise<IpcResult<TestConnectionResult>>
     listModels(id: string): Promise<IpcResult<ModelInfo[]>>
+    /** Start the "Sign in with ChatGPT" OAuth flow (opens the system browser). */
+    oauthStart(id: string): Promise<IpcResult<OAuthStatus>>
+    /** Sign out / forget the stored OAuth session. */
+    oauthLogout(id: string): Promise<IpcResult<OAuthStatus>>
+    /** Token-free status of the provider's OAuth session. */
+    oauthStatus(id: string): Promise<IpcResult<OAuthStatus>>
   }
   conversations: {
     list(req?: ConvListRequest): Promise<IpcResult<ConversationSummary[]>>
@@ -377,6 +396,12 @@ export interface UldApi {
     list(): Promise<IpcResult<PromptTemplate[]>>
     create(input: PromptTemplateInput): Promise<IpcResult<PromptTemplate>>
     update(id: string, patch: PromptTemplatePatch): Promise<IpcResult<PromptTemplate>>
+    delete(id: string): Promise<IpcResult<void>>
+  }
+  memories: {
+    list(): Promise<IpcResult<Memory[]>>
+    create(input: MemoryInput): Promise<IpcResult<Memory>>
+    update(id: string, patch: MemoryPatch): Promise<IpcResult<Memory>>
     delete(id: string): Promise<IpcResult<void>>
   }
   mcp: {

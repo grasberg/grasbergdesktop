@@ -6,7 +6,8 @@
 
 ## Features
 
-- **Multi-provider** — first-class adapters for DeepSeek, GLM / Zhipu AI and MiniMax, plus a generic OpenAI-compatible provider type for anything else.
+- **Multi-provider** — native adapters for OpenAI, **Anthropic (Claude)**, **Google Gemini** and **Amazon Bedrock**, plus DeepSeek, GLM / Zhipu AI and MiniMax — and **120+ one-click presets** for OpenAI-compatible providers (OpenRouter, Groq, xAI, Mistral, Together, Fireworks, DeepInfra, Perplexity, Cerebras, Moonshot/Kimi, Nvidia, Qwen, Ollama, LM Studio, …), generated from the [models.dev](https://models.dev) catalog. Anything else works via the generic OpenAI-compatible type.
+- **Subscription & login auth** — use a subscription/coding-plan key (Z.ai Coding Plan, MiniMax) at the right endpoint, or **Sign in with ChatGPT** (experimental OAuth) to run OpenAI models on your ChatGPT subscription instead of a platform API key.
 - **Streaming chat** — token-by-token streaming with stop, regenerate, and edit-and-rerun; reasoning/thinking output shown separately for models that emit it (e.g. `deepseek-reasoner`).
 - **Secure key storage** — API keys are encrypted at rest with Electron `safeStorage` (Windows DPAPI, macOS Keychain, Linux libsecret) and never leave the main process.
 - **Local-first** — all history, settings and provider config in a local SQLite database. No accounts, no cloud sync, no telemetry.
@@ -74,12 +75,23 @@ Add a provider in **Settings → Providers**, pick a type, and paste an API key.
 | DeepSeek | <https://platform.deepseek.com> | `https://api.deepseek.com/v1` |
 | GLM / Zhipu AI | <https://open.bigmodel.cn> | `https://open.bigmodel.cn/api/paas/v4` |
 | MiniMax | <https://platform.minimax.io> | `https://api.minimax.io/v1` |
+| OpenAI | <https://platform.openai.com/api-keys> | `https://api.openai.com/v1` |
+| Anthropic (Claude) | <https://console.anthropic.com/settings/keys> | `https://api.anthropic.com/v1` |
+| Google Gemini | <https://aistudio.google.com/apikey> | `https://generativelanguage.googleapis.com/v1beta` |
+| Amazon Bedrock | AWS console (bearer token) | `https://bedrock-runtime.{region}.amazonaws.com` |
+| Z.ai GLM Coding Plan | <https://z.ai> (subscription) | `https://api.z.ai/api/coding/paas/v4` |
+| 120+ OpenAI-compatible presets | pick from the **Add provider** list | pre-filled per preset |
 | OpenAI-compatible (custom) | your server / vendor | — (you provide it) |
 
 Notes:
 
-- **Zhipu international:** users on the international platform (<https://api.z.ai>) can add an **OpenAI-compatible (custom)** provider with their z.ai base URL.
-- **MiniMax China mainland:** use `api.minimaxi.com` via an **OpenAI-compatible (custom)** provider.
+- **OpenAI-compatible presets:** the **Add provider** picker lists 120+ providers (from models.dev) under *OpenAI-compatible presets*. Choosing one pre-fills the base URL and model catalog — just paste the provider's key. Refresh the catalog with `scripts/generate-presets.ts`.
+- **Anthropic / Gemini:** native adapters (their own wire format); paste an API key.
+- **Amazon Bedrock:** uses a **bearer token** (`AWS_BEARER_TOKEN_BEDROCK`) via the Converse API — no AWS SigV4/SDK. Set your **region in the base-URL host**. Streaming is non-incremental in this version (one Converse response per turn).
+- **Z.ai Coding Plan:** pick the **Z.ai Coding Plan (GLM)** provider type and paste your subscription key. It targets the coding-only endpoint (`/api/coding/paas/v4`), which is **not** interchangeable with the general `/api/paas/v4` endpoint.
+- **MiniMax subscription:** a MiniMax subscription uses the same API key as pay-as-you-go — just paste the key. (China mainland: use `api.minimaxi.com` via an **OpenAI-compatible (custom)** provider.)
+- **Sign in with ChatGPT (experimental):** choose the **OpenAI** provider type and set Authentication to *Sign in with ChatGPT*. This runs an OAuth login (opening your browser) so requests are billed to your ChatGPT subscription via the ChatGPT backend. It is **reverse-engineered and unofficial** — it can stop working without notice and may be unavailable in some regions. Tokens are encrypted on-device and never leave the main process. If it stops working, add an OpenAI **API key** instead.
+- **Zhipu international:** users on the international platform (<https://api.z.ai>) can also add an **OpenAI-compatible (custom)** provider with their z.ai base URL.
 - **Anything else:** any OpenAI-compatible server works via the custom type — Ollama, vLLM, LM Studio, OpenRouter, and so on. Point it at the server's `/v1` base URL.
 
 ## Security & privacy

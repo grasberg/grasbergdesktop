@@ -13,6 +13,7 @@ import type {
   Message,
   ModelInfo,
   NormalizedError,
+  OAuthStatus,
   ProviderConfig,
   ProviderConfigInput,
   ProviderConfigPatch,
@@ -42,6 +43,10 @@ export interface ProvidersStoreState {
   deleteKey(id: string): Promise<void>
   test(id: string): Promise<TestConnectionResult>
   loadModels(id: string): Promise<ModelInfo[]>
+  /** Start "Sign in with ChatGPT" (opens the system browser); refreshes state. */
+  oauthStart(id: string): Promise<OAuthStatus>
+  /** Sign out of a provider's OAuth session; refreshes state. */
+  oauthLogout(id: string): Promise<OAuthStatus>
 }
 
 export interface ConversationsStoreState {
