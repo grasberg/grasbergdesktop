@@ -401,6 +401,40 @@ kbd {
   color: var(--text);
 }
 
+/* "New task" / "Projects" links under the mode tabs. */
+.sidebar-links {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.83rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-link:hover,
+.sidebar-link:focus-visible {
+  background: var(--bg-hover);
+}
+
+.sidebar-link.active {
+  background: var(--bg-active);
+}
+
+.sidebar-link .kbd {
+  margin-left: auto;
+}
+
 .conv-list {
   flex: 1;
   overflow-y: auto;
@@ -797,4 +831,37 @@ kbd {
 .tool-approval-hint {
   color: var(--text-muted);
   font-size: 0.75rem;
+}
+
+/* --------------------------------------------------- user question dialog */
+
+.user-question-modal {
+  max-width: 460px;
+}
+
+.user-question-text {
+  margin: 8px 0 12px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.user-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.user-question-option {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.user-question-custom {
+  display: flex;
+  gap: 8px;
+}
+
+.user-question-custom .input {
+  flex: 1;
 }

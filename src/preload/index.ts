@@ -6,7 +6,7 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CHANNELS, type UldApi } from '@shared/ipc'
-import type { McpServerRuntime, StreamEventEnvelope, ToolApprovalRequest } from '@shared/types'
+import type { McpServerRuntime, StreamEventEnvelope, ToolApprovalRequest, UserQuestionRequest } from '@shared/types'
 
 const api: UldApi = {
   app: {
@@ -106,6 +106,26 @@ const api: UldApi = {
       ipcRenderer.on(CHANNELS.toolApprovalSettled, listener)
       return () => {
         ipcRenderer.removeListener(CHANNELS.toolApprovalSettled, listener)
+      }
+    },
+    questionRespond: (requestId, answer) =>
+      ipcRenderer.invoke(CHANNELS.toolsQuestionRespond, requestId, answer),
+    onQuestionRequest: (cb) => {
+      const listener = (_event: IpcRendererEvent, req: UserQuestionRequest): void => {
+        cb(req)
+      }
+      ipcRenderer.on(CHANNELS.userQuestionRequest, listener)
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.userQuestionRequest, listener)
+      }
+    },
+    onQuestionSettled: (cb) => {
+      const listener = (_event: IpcRendererEvent, requestId: string): void => {
+        cb(requestId)
+      }
+      ipcRenderer.on(CHANNELS.userQuestionSettled, listener)
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.userQuestionSettled, listener)
       }
     },
   },

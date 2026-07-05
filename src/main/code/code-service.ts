@@ -3,9 +3,11 @@
  * file tree, safe read-only file access, and the proposed-change lifecycle.
  *
  * SAFETY INVARIANT: applyChange() is the ONLY place in the entire app that
- * writes into a user project, and it is reachable solely from the
- * code:changes:apply IPC channel — i.e. an explicit user approval click in the
- * UI. Everything else here is read-only. Every path from the model or the
+ * writes into a user project. It is reachable from exactly two user-approved
+ * paths: the code:changes:apply IPC channel (an explicit click on a proposed
+ * change) and the edit_file/write_file tools (whose every call the user
+ * approves in the tool-approval dialog before the executor may run it).
+ * Everything else here is read-only. Every path from the model or the
  * database is re-validated against the project root before any fs call.
  */
 
@@ -188,8 +190,48 @@ export class CodeService {
   }
 
   /**
+   * Creates ONE proposed CodeChange row for the edit_file/write_file tools
+   * (same diff + staleness baseline as uld-change parsing). Nothing touches
+   * the disk here; invalid/escaping paths throw instead of being skipped so
+   * the tool can report the error.
+   */
+  proposeChange(
+    conversationId: string,
+    relPath: string,
+    changeType: 'create' | 'edit',
+    newContent: string
+  ): CodeChange {
+    const conversation = this.db.conversations.getById(conversationId)
+    if (!conversation || !conversation.projectId) {
+      throw invalid('This conversation has no granted project.')
+    }
+    const project = this.db.code.projectGetById(conversation.projectId)
+    if (!project) throw invalid('Project not found.')
+
+    const abs = this.resolveInsideRoot(project.path, relPath)
+    const rel = normalizeRel(relPath)
+    const oldContent: string | null = changeType === 'create' ? '' : this.readCurrentText(abs)
+    const diff = diffLines(
+      oldContent ?? '',
+      newContent,
+      changeType === 'create' ? '/dev/null' : `a/${rel}`,
+      `b/${rel}`
+    )
+    return this.db.code.changeCreate({
+      projectId: project.id,
+      conversationId,
+      filePath: rel,
+      changeType,
+      diff,
+      newContent,
+      oldContent,
+    })
+  }
+
+  /**
    * Applies a proposed change to disk. THE ONLY WRITE PATH INTO A PROJECT —
-   * reached solely from the code:changes:apply IPC (explicit user click).
+   * reached from the code:changes:apply IPC (explicit user click) and from
+   * the approval-gated edit_file/write_file tools.
    */
   applyChange(changeId: string): CodeChange {
     const change = this.requireChange(changeId)

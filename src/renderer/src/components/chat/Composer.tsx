@@ -102,10 +102,41 @@ export default function Composer(): ReactElement {
     window.setTimeout(() => setConfirmFlash(false), 800)
   }
 
+  /**
+   * '/init' — generate AGENTS.md for the granted project. Probes for an
+   * existing file first (nothing to do then); otherwise sends the literal
+   * '/init', which main expands to the full init prompt on the wire.
+   */
+  const runInitCommand = (): void => {
+    const conv = conversation
+    if (!conv || conv.mode !== 'code' || !conv.projectId) {
+      toast('/init needs a Code conversation with a granted project folder.', 'error')
+      return
+    }
+    if (attachments.length > 0) {
+      toast('Remove the attachments before running /init.', 'error')
+      return
+    }
+    const projectId = conv.projectId
+    setValue('')
+    void (async () => {
+      const existing = await window.uld.code.readFile({ projectId, relPath: 'AGENTS.md' })
+      if (existing.ok) {
+        toast('AGENTS.md already exists in this project — nothing to create.', 'info')
+        return
+      }
+      await send('/init')
+    })()
+  }
+
   const submit = (): void => {
     const content = value.trim()
     if (!content && attachments.length === 0) return
     if (disabled) return
+    if (content === '/init') {
+      runInitCommand()
+      return
+    }
     // Never silently drop attachments still awaiting the send-confirmation:
     // block the send and pull attention to the confirm bar instead.
     if (pendingFiles && pendingFiles.length > 0) {

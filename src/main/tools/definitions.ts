@@ -16,8 +16,9 @@ import type { ToolDefinition, ToolPermissionDecision, ToolRiskLevel } from '@sha
  * an explicit permission for a tool:
  * - safe tools run without asking (they cannot touch files, network or shell),
  * - sensitive tools ask for approval on every call,
- * - dangerous tools also ask (nothing built-in is 'dangerous'; a per-call
- *   explicit approval is the strictest default that still lets the tool work).
+ * - dangerous tools also ask; per-call explicit approval is the strictest
+ *   default that still lets a tool work. Mutating tools (edit_file,
+ *   write_file, run_shell_command, computer) are 'dangerous'.
  */
 export const DEFAULT_PERMISSION_BY_RISK: Record<ToolRiskLevel, ToolPermissionDecision> = {
   safe: 'always_allow',
@@ -140,6 +141,95 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'grep',
+    name: 'grep',
+    description:
+      'Search file CONTENTS in the granted project folder with a JavaScript regular ' +
+      'expression. Returns matching lines as "relPath:lineNo: line". Optionally filter ' +
+      'which files are searched with a glob pattern (e.g. "src/**/*.ts"). Binary files, ' +
+      'oversized files and dependency/build directories are skipped. Prefer this over ' +
+      'file_search when you need a pattern rather than a plain substring.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: {
+          type: 'string',
+          description: 'JavaScript regular expression to search for (without slashes).',
+        },
+        glob: {
+          type: 'string',
+          description: 'Optional glob filter on relative paths, e.g. "src/**/*.ts" or "*.md".',
+        },
+        ignoreCase: { type: 'boolean', description: 'Case-insensitive matching (default false).' },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of matching lines to return (default 40, max 100).',
+        },
+      },
+      required: ['pattern'],
+    },
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'glob',
+    name: 'glob',
+    description:
+      'Find files in the granted project folder whose relative path matches a glob pattern ' +
+      '(e.g. "src/**/*.test.ts", "**/*.css"). Returns matching relative paths, most recently ' +
+      'modified first. Dependency/build directories are skipped.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Glob pattern, e.g. "src/**/*.ts".' },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 200,
+          description: 'Maximum number of paths to return (default 50, max 200).',
+        },
+      },
+      required: ['pattern'],
+    },
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'git',
+    name: 'git',
+    description:
+      'Run a READ-ONLY git query in the granted project folder. Actions: "status" (branch + ' +
+      'porcelain status), "diff" (working tree; set staged=true for the index; optionally limit ' +
+      'to one file with path), "log" (recent commits, one line each). This tool can never ' +
+      'modify the repository - commits, checkouts, pushes and any other mutations are not ' +
+      'possible with it. Fails cleanly when the folder is not a git repository.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'diff', 'log'] },
+        path: {
+          type: 'string',
+          description: 'Optional file path (relative to the project root) to limit diff/log to.',
+        },
+        staged: { type: 'boolean', description: 'For "diff": show staged changes instead.' },
+        maxCount: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'For "log": number of commits to show (default 20).',
+        },
+      },
+      required: ['action'],
+    },
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
     id: 'fetch_url',
     name: 'fetch_url',
     description:
@@ -156,6 +246,30 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
       },
       required: ['url'],
+    },
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'web_search',
+    name: 'web_search',
+    description:
+      'Search the web (DuckDuckGo) and return the top results as "title - url" plus a snippet ' +
+      'for each. Use it to find current information or pages to read with fetch_url. No API ' +
+      'key, no credentials; the query is sent to the search engine.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 10,
+          description: 'Maximum results to return (default 5, max 10).',
+        },
+      },
+      required: ['query'],
     },
     risk: 'sensitive',
     builtin: true,
@@ -184,6 +298,52 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       required: ['command'],
     },
     risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'edit_file',
+    name: 'edit_file',
+    description:
+      'Propose an exact string replacement in a project file and, after the user approves ' +
+      'this call, apply it to disk. Read the file first - old_string must match the current ' +
+      'content exactly and must be unique in the file (or set replace_all). The change is ' +
+      'recorded in the Changes list with a diff. Rejected approval means nothing is written.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to the project root.' },
+        old_string: { type: 'string', description: 'Exact existing text to replace.' },
+        new_string: { type: 'string', description: 'Replacement text (must differ).' },
+        replace_all: {
+          type: 'boolean',
+          description: 'Replace every occurrence instead of requiring a unique match.',
+        },
+      },
+      required: ['path', 'old_string', 'new_string'],
+    },
+    // Writes into the user's project (via the audited change pipeline) - the
+    // strictest default: per-call approval.
+    risk: 'dangerous',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'write_file',
+    name: 'write_file',
+    description:
+      'Create a new project file, or fully replace an existing one you have already read, ' +
+      'after the user approves this call. The change is recorded in the Changes list with a ' +
+      'diff. For partial changes to existing files prefer edit_file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to the project root.' },
+        content: { type: 'string', description: 'The complete new file content.' },
+      },
+      required: ['path', 'content'],
+    },
+    risk: 'dangerous',
     builtin: true,
     enabled: true,
   },
@@ -300,8 +460,102 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'string',
           description: 'Optional background the sub-agent needs (it has no other context).',
         },
+        background: {
+          type: 'boolean',
+          description:
+            'Run in the background: returns a task id immediately instead of the result. ' +
+            'Start several background tasks to work in parallel, then poll with task_output.',
+        },
       },
       required: ['task'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'task_output',
+    name: 'task_output',
+    description:
+      'Get the status and (when finished) the result of a background sub-agent task started ' +
+      'with delegate background=true. Returns "running" while the task is still working.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The task id returned by delegate.' },
+      },
+      required: ['taskId'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'task_stop',
+    name: 'task_stop',
+    description:
+      'Stop a running background sub-agent task started with delegate background=true. ' +
+      'Its partial result (if any) is discarded.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The task id returned by delegate.' },
+      },
+      required: ['taskId'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'update_task_list',
+    name: 'update_task_list',
+    description:
+      'Replace your working task list for this conversation (shown to the user as a ' +
+      'checklist). Send the FULL list on every call. Use it for multi-step work: add the ' +
+      'steps up front, keep at most one item in_progress, and mark items completed as you ' +
+      'finish them. Writes only to the app database, never to project files.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              content: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+            },
+            required: ['content', 'status'],
+          },
+          description: 'The complete, ordered task list.',
+        },
+      },
+      required: ['tasks'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'ask_user_question',
+    name: 'ask_user_question',
+    description:
+      'Ask the user ONE clarifying question with a short list of suggested answers, shown as ' +
+      'a dialog they can click (they may also type a custom answer or dismiss). Use it only ' +
+      'when you are genuinely blocked on a decision the user must make - not for questions ' +
+      'you can answer yourself from the code or the conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The complete question to ask.' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '2-4 short suggested answers.',
+        },
+      },
+      required: ['question'],
     },
     risk: 'safe',
     builtin: true,

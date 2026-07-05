@@ -19,6 +19,7 @@ import type {
   ToolDefinition,
   ToolPermissionDecision,
   ToolRiskLevel,
+  UserQuestionRequest,
 } from '@shared/types'
 import { toNormalized, unwrap } from '@/api/uld'
 import { useUiStore } from './ui'
@@ -63,6 +64,14 @@ export interface ToolsStoreState {
    * stale dialog auto-dismisses without the user having to answer it.
    */
   settleApproval(requestId: string): void
+  /** FIFO queue of ask_user_question dialogs; the dialog renders the head. */
+  questionQueue: UserQuestionRequest[]
+  /** Enqueues a question pushed from main (deduped by requestId). */
+  setPendingQuestion(req: UserQuestionRequest): void
+  /** Answers the head question (null = dismissed) and dequeues it. */
+  respondQuestion(answer: string | null): Promise<void>
+  /** Drops a question main settled on its own (timeout/abort/stopAll). */
+  settleQuestion(requestId: string): void
 }
 
 export const useToolsStore = create<ToolsStoreState>()((set, get) => ({
@@ -160,6 +169,38 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => ({
     set((s) => {
       const next = s.approvalQueue.filter((r) => r.requestId !== requestId)
       return next.length === s.approvalQueue.length ? s : { approvalQueue: next }
+    })
+  },
+
+  questionQueue: [],
+
+  setPendingQuestion(req) {
+    set((s) =>
+      s.questionQueue.some((r) => r.requestId === req.requestId)
+        ? s
+        : { questionQueue: [...s.questionQueue, req] }
+    )
+  },
+
+  async respondQuestion(answer) {
+    const pending = get().questionQueue[0]
+    if (!pending) return
+    set((s) => ({
+      questionQueue: s.questionQueue.filter((r) => r.requestId !== pending.requestId),
+    }))
+    try {
+      await unwrap(window.uld.tools.questionRespond(pending.requestId, answer))
+    } catch (e) {
+      useUiStore
+        .getState()
+        .toast(`Could not deliver the answer: ${toNormalized(e).message}`, 'error')
+    }
+  },
+
+  settleQuestion(requestId) {
+    set((s) => {
+      const next = s.questionQueue.filter((r) => r.requestId !== requestId)
+      return next.length === s.questionQueue.length ? s : { questionQueue: next }
     })
   },
 }))

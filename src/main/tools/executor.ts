@@ -33,6 +33,7 @@ import { TOOL_RESULT_MAX_CHARS } from './definitions'
 import { customToolHeaders } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
+import { runGitQuery } from './git'
 import type { ToolRegistry } from './registry'
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,28 @@ export interface ToolExecutorDeps {
   browser?: ToolBrowser | null
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: (task: string, ctx: ToolExecuteContext) => Promise<string>
+  /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
+  delegateBackground?: {
+    start(task: string, ctx: ToolExecuteContext): string
+    output(taskId: string): string
+    stop(taskId: string): string
+  } | null
+  /**
+   * Approval-gated project writes for edit_file/write_file. propose() records
+   * a CodeChange row (diff + staleness baseline); apply() is the app's single
+   * audited write path into a project. Absent => the tools report unavailable.
+   */
+  codeChanges?: {
+    propose(
+      conversationId: string,
+      relPath: string,
+      changeType: 'create' | 'edit',
+      newContent: string
+    ): { id: string } | Promise<{ id: string }>
+    apply(changeId: string): unknown
+  } | null
+  /** Persists the conversation task list (update_task_list). */
+  taskList?: { update(conversationId: string, markdown: string): string } | null
   /** Skill lookup for the 'use_skill' tool (wired to db.skills). */
   skills?: {
     getEnabledByName(name: string): { name: string; content: string } | null
@@ -112,7 +135,18 @@ export interface ToolExecuteContext {
    * The integration layer generates the requestId and routes the answer.
    */
   approval: (req: Omit<ToolApprovalRequest, 'requestId'>) => Promise<boolean>
+  /** Shows an ask_user_question dialog; null = dismissed/unanswered. */
+  askUser?: (question: string, options: string[]) => Promise<string | null>
+  /** Plan mode (code conversations): mutating tools are refused. */
+  planMode?: boolean
 }
+
+/** Tools refused while plan mode is active (read-only investigation only). */
+const PLAN_MODE_BLOCKED_TOOL_IDS: ReadonlySet<string> = new Set([
+  'edit_file',
+  'write_file',
+  'run_shell_command',
+])
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
 
@@ -130,6 +164,14 @@ const SEARCH_LINE_MAX_CHARS = 240
 const WALK_MAX_ENTRIES = 20_000
 const WALK_MAX_DEPTH = 24
 const SHELL_TIMEOUT_MS = 60_000
+const GREP_DEFAULT_RESULTS = 40
+const GREP_MAX_RESULTS = 100
+const GLOB_DEFAULT_RESULTS = 50
+const GLOB_MAX_RESULTS = 200
+const WEB_SEARCH_DEFAULT_RESULTS = 5
+const WEB_SEARCH_MAX_RESULTS = 10
+/** edit_file needs the FULL file; larger files must go through uld-change. */
+const EDIT_FILE_MAX_BYTES = 512 * 1024
 
 /** Directory names skipped while walking (dependency/build/VCS noise). */
 const IGNORED_DIR_NAMES = new Set([
@@ -184,6 +226,43 @@ function resolveWithinRoot(root: string, relPath: string): string | null {
   if (rel === '') return normalizedRoot
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null
   return target
+}
+
+/**
+ * Converts a glob pattern to an anchored RegExp over forward-slash relative
+ * paths. Supports '**' (any depth), '*' (within a segment) and '?'. A pattern
+ * without '/' matches the basename at any depth.
+ */
+export function globToRegExp(pattern: string): RegExp {
+  let normalized = pattern.trim().replace(/\\/g, '/').replace(/^\.\//, '')
+  if (!normalized.includes('/')) normalized = '**/' + normalized
+  let out = ''
+  let i = 0
+  while (i < normalized.length) {
+    const ch = normalized[i]
+    if (ch === '*') {
+      if (normalized[i + 1] === '*') {
+        // '**/' matches zero or more whole segments; bare '**' matches anything.
+        if (normalized[i + 2] === '/') {
+          out += '(?:[^/]+/)*'
+          i += 3
+        } else {
+          out += '.*'
+          i += 2
+        }
+      } else {
+        out += '[^/]*'
+        i += 1
+      }
+    } else if (ch === '?') {
+      out += '[^/]'
+      i += 1
+    } else {
+      out += /[.+^${}()|[\]\\]/.test(ch) ? '\\' + ch : ch
+      i += 1
+    }
+  }
+  return new RegExp('^' + out + '$')
 }
 
 /** Loose JSON-Schema check: object args + required keys present. */
@@ -258,6 +337,7 @@ interface WalkEntry {
   relPath: string
   absPath: string
   sizeBytes: number
+  mtimeMs: number
 }
 
 /**
@@ -288,17 +368,76 @@ async function walkProjectFiles(root: string): Promise<WalkEntry[]> {
         await walk(entryAbs, entryRel, depth + 1)
       } else if (entry.isFile()) {
         let sizeBytes = 0
+        let mtimeMs = 0
         try {
-          sizeBytes = (await fs.stat(entryAbs)).size
+          const stat = await fs.stat(entryAbs)
+          sizeBytes = stat.size
+          mtimeMs = stat.mtimeMs
         } catch {
           continue
         }
-        results.push({ relPath: entryRel, absPath: entryAbs, sizeBytes })
+        results.push({ relPath: entryRel, absPath: entryAbs, sizeBytes, mtimeMs })
       }
     }
   }
 
   await walk(path.resolve(root), '', 0)
+  return results
+}
+
+interface WebSearchHit {
+  title: string
+  url: string
+  snippet: string
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+}
+
+function stripTags(html: string): string {
+  return decodeHtmlEntities(html.replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Extracts results from DuckDuckGo's HTML endpoint. Best-effort scraping of a
+ * stable-for-years markup shape; an empty array simply means "no results".
+ */
+export function parseDuckDuckGoHtml(html: string, maxResults: number): WebSearchHit[] {
+  const results: WebSearchHit[] = []
+  const anchorRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+  const snippetRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
+  const snippets: string[] = []
+  for (let m = snippetRe.exec(html); m; m = snippetRe.exec(html)) {
+    snippets.push(stripTags(m[1]))
+  }
+  let index = 0
+  for (let m = anchorRe.exec(html); m && results.length < maxResults; m = anchorRe.exec(html)) {
+    let url = decodeHtmlEntities(m[1])
+    // Result links are redirects like //duckduckgo.com/l/?uddg=<encoded>&rut=…
+    const uddg = /[?&]uddg=([^&]+)/.exec(url)
+    if (uddg) {
+      try {
+        url = decodeURIComponent(uddg[1])
+      } catch {
+        // keep the redirect URL
+      }
+    }
+    const title = stripTags(m[2])
+    if (title.length === 0 || !url.startsWith('http')) {
+      index += 1
+      continue
+    }
+    results.push({ title, url, snippet: snippets[index] ?? '' })
+    index += 1
+  }
   return results
 }
 
@@ -350,6 +489,13 @@ export class ToolExecutor {
       return `Error: missing required argument(s) for '${definition.name}': ${missing.join(', ')}.`
     }
 
+    if (ctx.planMode && PLAN_MODE_BLOCKED_TOOL_IDS.has(definition.id)) {
+      return (
+        'Plan mode is active: only read-only investigation is allowed. Present your plan to ' +
+        "the user instead of calling '" + definition.name + "'; they can turn plan mode off to proceed."
+      )
+    }
+
     const decision = this.deps.registry.getPermission(definition)
     if (decision === 'deny') {
       return `The user has denied the tool '${definition.name}' in this app's settings; it was not run.`
@@ -375,6 +521,26 @@ export class ToolExecutor {
     switch (definition.id) {
       case 'file_search':
         return this.runFileSearch(args, ctx)
+      case 'grep':
+        return this.runGrep(args, ctx)
+      case 'glob':
+        return this.runGlob(args, ctx)
+      case 'git':
+        return this.runGit(args, ctx)
+      case 'web_search':
+        return this.runWebSearch(args)
+      case 'edit_file':
+        return this.runEditFile(args, ctx)
+      case 'write_file':
+        return this.runWriteFile(args, ctx)
+      case 'task_output':
+        return this.runTaskOutput(args)
+      case 'task_stop':
+        return this.runTaskStop(args)
+      case 'update_task_list':
+        return this.runUpdateTaskList(args, ctx)
+      case 'ask_user_question':
+        return this.runAskUserQuestion(args, ctx)
       case 'repo_map':
         return this.runRepoMap(args, ctx)
       case 'read_file':
@@ -576,6 +742,315 @@ export class ToolExecutor {
     }
   }
 
+
+  private async runGrep(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+
+    const patternSource = (getString(args, 'pattern') ?? '').trim()
+    if (patternSource.length === 0) return "Error: 'pattern' must be a non-empty string."
+    let pattern: RegExp
+    try {
+      pattern = new RegExp(patternSource, args.ignoreCase === true ? 'i' : undefined)
+    } catch (e) {
+      return 'Error: invalid regular expression: ' + errorMessage(e)
+    }
+    let globFilter: RegExp | null = null
+    const globSource = (getString(args, 'glob') ?? '').trim()
+    if (globSource.length > 0) {
+      try {
+        globFilter = globToRegExp(globSource)
+      } catch (e) {
+        return 'Error: invalid glob pattern: ' + errorMessage(e)
+      }
+    }
+    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
+    const maxResults = Number.isFinite(rawMax)
+      ? Math.min(Math.max(rawMax, 1), GREP_MAX_RESULTS)
+      : GREP_DEFAULT_RESULTS
+
+    const lines: string[] = []
+    for (const file of await walkProjectFiles(root)) {
+      if (lines.length >= maxResults) break
+      if (globFilter && !globFilter.test(file.relPath)) continue
+      if (file.sizeBytes >= SEARCH_CONTENT_MAX_BYTES) continue
+      let buffer: Buffer
+      try {
+        buffer = await fs.readFile(file.absPath)
+      } catch {
+        continue
+      }
+      if (looksBinary(buffer)) continue
+      const contentLines = buffer.toString('utf8').split(/\r?\n/)
+      for (let i = 0; i < contentLines.length && lines.length < maxResults; i++) {
+        if (!pattern.test(contentLines[i])) continue
+        const text = contentLines[i].trim().slice(0, SEARCH_LINE_MAX_CHARS)
+        lines.push(file.relPath + ':' + (i + 1) + ': ' + text)
+      }
+    }
+    if (lines.length === 0) return 'No matches found for /' + patternSource + '/.'
+    return lines.join('\n')
+  }
+
+  private async runGlob(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+
+    const patternSource = (getString(args, 'pattern') ?? '').trim()
+    if (patternSource.length === 0) return "Error: 'pattern' must be a non-empty string."
+    let pattern: RegExp
+    try {
+      pattern = globToRegExp(patternSource)
+    } catch (e) {
+      return 'Error: invalid glob pattern: ' + errorMessage(e)
+    }
+    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
+    const maxResults = Number.isFinite(rawMax)
+      ? Math.min(Math.max(rawMax, 1), GLOB_MAX_RESULTS)
+      : GLOB_DEFAULT_RESULTS
+
+    const matches = (await walkProjectFiles(root))
+      .filter((file) => pattern.test(file.relPath))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, maxResults)
+      .map((file) => file.relPath)
+    if (matches.length === 0) return 'No files match "' + patternSource + '".'
+    return matches.join('\n')
+  }
+
+  private async runGit(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+
+    const action = (getString(args, 'action') ?? '').trim()
+    const relPath = (getString(args, 'path') ?? '').trim()
+    if (relPath && !resolveWithinRoot(root, relPath)) {
+      return "Error: '" + relPath + "' is outside the granted project folder; access refused."
+    }
+
+    // SAFETY: argv is built exclusively from this fixed allowlist — the model
+    // can never add flags or subcommands, so no mutation is reachable.
+    let argv: string[]
+    switch (action) {
+      case 'status':
+        argv = ['status', '--porcelain=v1', '--branch']
+        break
+      case 'diff': {
+        argv = args.staged === true ? ['diff', '--staged'] : ['diff']
+        if (relPath) argv.push('--', relPath)
+        break
+      }
+      case 'log': {
+        const rawMax = typeof args.maxCount === 'number' ? Math.floor(args.maxCount) : NaN
+        const maxCount = Number.isFinite(rawMax) ? Math.min(Math.max(rawMax, 1), 100) : 20
+        argv = ['log', '--oneline', '--no-decorate', '-n', String(maxCount)]
+        if (relPath) argv.push('--', relPath)
+        break
+      }
+      default:
+        return "Error: unknown git action '" + action + "' (use 'status', 'diff' or 'log')."
+    }
+
+    const result = await runGitQuery(argv, root)
+    if (!result.ok) return redactSecrets('git ' + action + ' failed: ' + result.output)
+    const trimmed = result.output.trimEnd()
+    return trimmed.length > 0 ? trimmed : '(no output — nothing to show)'
+  }
+
+  private async runWebSearch(args: Record<string, unknown>): Promise<string> {
+    const query = (getString(args, 'query') ?? '').trim()
+    if (query.length === 0) return "Error: 'query' must be a non-empty string."
+    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
+    const maxResults = Number.isFinite(rawMax)
+      ? Math.min(Math.max(rawMax, 1), WEB_SEARCH_MAX_RESULTS)
+      : WEB_SEARCH_DEFAULT_RESULTS
+
+    const fetchImpl = this.deps.fetchImpl ?? fetch
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const res = await fetchImpl(
+        'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query),
+        {
+          method: 'GET',
+          signal: controller.signal,
+          headers: { accept: 'text/html' },
+        }
+      )
+      if (!res.ok) return 'Error: the search engine returned HTTP ' + res.status + '.'
+      const { text } = await readBodyCapped(res, FETCH_MAX_BYTES)
+      const results = parseDuckDuckGoHtml(text, maxResults)
+      if (results.length === 0) return 'No results found for "' + query + '".'
+      return results
+        .map((r, i) => i + 1 + '. ' + r.title + ' — ' + r.url + (r.snippet ? '\n   ' + r.snippet : ''))
+        .join('\n')
+    } catch (e) {
+      return redactSecrets('Error searching the web: ' + errorMessage(e))
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  // -- approval-gated project writes ---------------------------------------------
+
+  private requireCodeChanges(
+    ctx: ToolExecuteContext
+  ): { conversationId: string; projectId: string; root: string } | string {
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+    if (!this.deps.codeChanges || !this.deps.codeService || !ctx.conversation.projectId) {
+      return 'Error: file editing is unavailable in this build.'
+    }
+    return { conversationId: ctx.conversation.id, projectId: ctx.conversation.projectId, root }
+  }
+
+  private async runEditFile(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const gate = this.requireCodeChanges(ctx)
+    if (typeof gate === 'string') return gate
+
+    const relPath = (getString(args, 'path') ?? '').trim()
+    const oldString = getString(args, 'old_string')
+    const newString = getString(args, 'new_string')
+    if (relPath.length === 0) return "Error: 'path' must be a non-empty string."
+    if (oldString === null || oldString.length === 0) {
+      return "Error: 'old_string' must be a non-empty string."
+    }
+    if (newString === null) return "Error: 'new_string' must be a string."
+    if (oldString === newString) return "Error: 'new_string' must differ from 'old_string'."
+
+    let current: { content: string; truncated: boolean; sizeBytes: number }
+    try {
+      const read = await this.deps.codeService!.readFile(gate.projectId, relPath)
+      current = { content: read.content, truncated: read.truncated, sizeBytes: read.sizeBytes }
+    } catch (e) {
+      return redactSecrets("Error reading '" + relPath + "': " + errorMessage(e))
+    }
+    if (current.truncated || current.sizeBytes > EDIT_FILE_MAX_BYTES) {
+      return (
+        "Error: '" + relPath + "' is too large to edit with edit_file; propose a uld-change block instead."
+      )
+    }
+
+    const occurrences = current.content.split(oldString).length - 1
+    if (occurrences === 0) {
+      return "Error: old_string was not found in '" + relPath + "'. Re-read the file — it must match exactly, including whitespace."
+    }
+    const replaceAll = args.replace_all === true
+    if (occurrences > 1 && !replaceAll) {
+      return 'Error: old_string occurs ' + occurrences + " times in '" + relPath + "'. Provide a longer, unique old_string or set replace_all."
+    }
+    const newContent = replaceAll
+      ? current.content.split(oldString).join(newString)
+      : current.content.replace(oldString, newString)
+
+    try {
+      const change = await this.deps.codeChanges!.propose(gate.conversationId, relPath, 'edit', newContent)
+      await this.deps.codeChanges!.apply(change.id)
+    } catch (e) {
+      return redactSecrets("Error applying the edit to '" + relPath + "': " + errorMessage(e))
+    }
+    const what = replaceAll ? occurrences + ' occurrences' : '1 occurrence'
+    return 'Edited ' + relPath + ' (replaced ' + what + '). The change was applied and recorded in the Changes list.'
+  }
+
+  private async runWriteFile(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const gate = this.requireCodeChanges(ctx)
+    if (typeof gate === 'string') return gate
+
+    const relPath = (getString(args, 'path') ?? '').trim()
+    const content = getString(args, 'content')
+    if (relPath.length === 0) return "Error: 'path' must be a non-empty string."
+    if (content === null) return "Error: 'content' must be a string."
+    const absPath = resolveWithinRoot(gate.root, relPath)
+    if (!absPath) {
+      return "Error: '" + relPath + "' is outside the granted project folder; access refused."
+    }
+
+    let exists = false
+    try {
+      exists = (await fs.lstat(absPath)).isFile()
+    } catch {
+      exists = false
+    }
+    try {
+      const change = await this.deps.codeChanges!.propose(
+        gate.conversationId,
+        relPath,
+        exists ? 'edit' : 'create',
+        content
+      )
+      await this.deps.codeChanges!.apply(change.id)
+    } catch (e) {
+      return redactSecrets("Error writing '" + relPath + "': " + errorMessage(e))
+    }
+    return (
+      (exists ? 'Replaced ' : 'Created ') + relPath + ' (' + content.length +
+      ' chars). The change was applied and recorded in the Changes list.'
+    )
+  }
+
+  // -- background tasks + task list + questions -----------------------------------
+
+  private runTaskOutput(args: Record<string, unknown>): string {
+    if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
+    const taskId = (getString(args, 'taskId') ?? '').trim()
+    if (taskId.length === 0) return "Error: 'taskId' must be a non-empty string."
+    return this.deps.delegateBackground.output(taskId)
+  }
+
+  private runTaskStop(args: Record<string, unknown>): string {
+    if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
+    const taskId = (getString(args, 'taskId') ?? '').trim()
+    if (taskId.length === 0) return "Error: 'taskId' must be a non-empty string."
+    return this.deps.delegateBackground.stop(taskId)
+  }
+
+  private runUpdateTaskList(args: Record<string, unknown>, ctx: ToolExecuteContext): string {
+    if (!this.deps.taskList) return 'Error: the task list is unavailable in this build.'
+    const raw = args.tasks
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return "Error: 'tasks' must be a non-empty array of { content, status }."
+    }
+    const lines: string[] = []
+    for (const entry of raw) {
+      if (typeof entry !== 'object' || entry === null) {
+        return "Error: every task must be an object with 'content' and 'status'."
+      }
+      const item = entry as Record<string, unknown>
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+      const status = typeof item.status === 'string' ? item.status : ''
+      if (content.length === 0) return "Error: every task needs a non-empty 'content'."
+      if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') {
+        return "Error: task status must be 'pending', 'in_progress' or 'completed'."
+      }
+      if (status === 'completed') lines.push('- [x] ' + content)
+      else if (status === 'in_progress') lines.push('- [ ] ' + content + ' ⟵ in progress')
+      else lines.push('- [ ] ' + content)
+    }
+    return this.deps.taskList.update(ctx.conversation.id, lines.join('\n'))
+  }
+
+  private async runAskUserQuestion(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!ctx.askUser) return 'Error: asking the user a question is unavailable here.'
+    const question = (getString(args, 'question') ?? '').trim()
+    if (question.length === 0) return "Error: 'question' must be a non-empty string."
+    const options = Array.isArray(args.options)
+      ? args.options
+          .filter((option): option is string => typeof option === 'string')
+          .map((option) => option.trim())
+          .filter((option) => option.length > 0)
+          .slice(0, 4)
+      : []
+    const answer = await ctx.askUser(question, options)
+    if (answer === null || answer.trim().length === 0) {
+      return 'The user dismissed the question without answering. Proceed with your best judgment.'
+    }
+    return 'The user answered: ' + answer.trim()
+  }
+
   // -- network tools --------------------------------------------------------------
 
   private async runFetchUrl(args: Record<string, unknown>): Promise<string> {
@@ -707,6 +1182,12 @@ export class ToolExecutor {
     if (task.length === 0) return "Error: 'task' must be a non-empty string."
     const context = (getString(args, 'context') ?? '').trim()
     const prompt = context ? `${task}\n\nContext:\n${context}` : task
+    if (args.background === true) {
+      if (!this.deps.delegateBackground) {
+        return 'Error: background tasks are unavailable in this build.'
+      }
+      return this.deps.delegateBackground.start(prompt, ctx)
+    }
     return this.deps.delegate(prompt, ctx)
   }
 

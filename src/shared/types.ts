@@ -237,6 +237,8 @@ export interface ChatParams {
   topP?: number
   frequencyPenalty?: number
   presencePenalty?: number
+  /** Code mode: read-only investigation + plan first (mutating tools blocked). */
+  planMode?: boolean
 }
 
 export interface Conversation {
@@ -546,6 +548,16 @@ export interface ToolApprovalRequest {
   conversationId: string
   toolCall: ToolCallRecord
   risk: ToolRiskLevel
+}
+
+/** A structured clarifying question from the assistant (ask_user_question). */
+export interface UserQuestionRequest {
+  requestId: string
+  streamId: string
+  conversationId: string
+  question: string
+  /** Suggested answers; the user can always type a custom one instead. */
+  options: string[]
 }
 
 // ---------------------------------------------------------------------------

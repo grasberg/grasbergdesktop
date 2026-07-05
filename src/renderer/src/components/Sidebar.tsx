@@ -111,7 +111,12 @@ function ConversationRow({ summary, active }: RowProps): React.JSX.Element {
           <button
             type="button"
             className="conv-item-main"
-            onClick={() => useConversationsStore.getState().select(summary.id)}
+            onClick={() => {
+              // Leave the Workflows/Projects surface so the conversation shows.
+              useUiStore.getState().openWorkflows(false)
+              useUiStore.getState().openProjects(false)
+              useConversationsStore.getState().select(summary.id)
+            }}
             aria-current={active ? 'true' : undefined}
           >
             <span className="conv-item-top">
@@ -186,6 +191,7 @@ export default function Sidebar(): React.JSX.Element {
   const activeId = useConversationsStore((s) => s.activeId)
   const modeFilter = useConversationsStore((s) => s.modeFilter)
   const loaded = useConversationsStore((s) => s.loaded)
+  const projectsOpen = useUiStore((s) => s.projectsOpen)
   const [query, setQuery] = useState(useConversationsStore.getState().search)
 
   // Debounced search -> store + reload.
@@ -227,6 +233,9 @@ export default function Sidebar(): React.JSX.Element {
 
   const newConversation = (mode: ConversationMode): void => {
     setNewMenuOpen(false)
+    // Leave the Workflows/Projects surface so the new conversation shows.
+    useUiStore.getState().openWorkflows(false)
+    useUiStore.getState().openProjects(false)
     useConversationsStore
       .getState()
       .create(mode)
@@ -235,6 +244,11 @@ export default function Sidebar(): React.JSX.Element {
           .getState()
           .toast(`Could not create conversation: ${toNormalized(e).message}`, 'error')
       })
+  }
+
+  /** New conversation in the active mode tab ('All' falls back to chat). */
+  const newTask = (): void => {
+    newConversation(modeFilter === 'all' ? 'chat' : modeFilter)
   }
 
   const searching = query.trim().length > 0
@@ -251,7 +265,7 @@ export default function Sidebar(): React.JSX.Element {
           <button
             type="button"
             className="btn btn-primary sidebar-new"
-            title={`New chat (${modKey()}+N)`}
+            title="New chat"
             onClick={() => newConversation('chat')}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
@@ -287,7 +301,6 @@ export default function Sidebar(): React.JSX.Element {
                 onClick={() => newConversation('chat')}
               >
                 New chat
-                <span className="kbd">{modKey()}+N</span>
               </button>
               <button
                 type="button"
@@ -345,6 +358,37 @@ export default function Sidebar(): React.JSX.Element {
               {tab.label}
             </button>
           ))}
+        </div>
+        <div className="sidebar-links">
+          <button
+            type="button"
+            className="sidebar-link"
+            title={`New task in the current mode (${modKey()}+N)`}
+            onClick={newTask}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+            New task
+            <span className="kbd">{modKey()}+N</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-link${projectsOpen ? ' active' : ''}`}
+            aria-current={projectsOpen ? 'page' : undefined}
+            onClick={() => useUiStore.getState().openProjects(true)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M1.8 3.5h4.4l1.5 1.8h6.5a.7.7 0 0 1 .7.7v6.3a.7.7 0 0 1-.7.7H1.8a.7.7 0 0 1-.7-.7V4.2a.7.7 0 0 1 .7-.7Z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Projects
+          </button>
         </div>
       </div>
 

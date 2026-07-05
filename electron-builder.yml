@@ -12,6 +12,11 @@ files:
   - package.json
   - node_modules/**
 
+# Shipped skill library, seeded into the skills table on first boot.
+extraResources:
+  - from: resources/bundled-skills
+    to: bundled-skills
+
 asar: true
 
 win:

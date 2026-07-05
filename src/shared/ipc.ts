@@ -59,6 +59,7 @@ import type {
   StreamEventEnvelope,
   TestConnectionResult,
   ToolApprovalRequest,
+  UserQuestionRequest,
   ToolDefinition,
   ToolPermission,
   ToolPermissionDecision,
@@ -147,6 +148,7 @@ export const CHANNELS = {
   toolsPermissionsList: 'tools:permissions:list',
   toolsPermissionSet: 'tools:permissions:set',
   toolsApprovalRespond: 'tools:approval:respond',
+  toolsQuestionRespond: 'tools:question:respond',
   toolsCustomList: 'tools:custom:list',
   toolsCustomCreate: 'tools:custom:create',
   toolsCustomUpdate: 'tools:custom:update',
@@ -208,6 +210,9 @@ export const CHANNELS = {
   toolApprovalRequest: 'push:toolApprovalRequest',
   /** Sent when a pending approval was settled main-side (timeout, abort, respond). */
   toolApprovalSettled: 'push:toolApprovalSettled',
+  userQuestionRequest: 'push:userQuestionRequest',
+  /** Sent when a pending question was settled main-side (answer, timeout, abort). */
+  userQuestionSettled: 'push:userQuestionSettled',
   conversationsChanged: 'push:conversationsChanged',
   /** Sent with McpServerRuntime[] whenever MCP connection state changes. */
   mcpServersChanged: 'push:mcpServersChanged',
@@ -400,6 +405,10 @@ export interface UldApi {
     onApprovalRequest(cb: (req: ToolApprovalRequest) => void): () => void
     /** Fires with the requestId whenever main settles an approval (respond/timeout/abort). */
     onApprovalSettled(cb: (requestId: string) => void): () => void
+    /** Answer an ask_user_question dialog; null means the user dismissed it. */
+    questionRespond(requestId: string, answer: string | null): Promise<IpcResult<void>>
+    onQuestionRequest(cb: (req: UserQuestionRequest) => void): () => void
+    onQuestionSettled(cb: (requestId: string) => void): () => void
     /** Custom HTTP tools: full details for the edit form (values excluded). */
     customList(): Promise<IpcResult<CustomToolInfo[]>>
     /** Secret header values are encrypted in main and never returned. */

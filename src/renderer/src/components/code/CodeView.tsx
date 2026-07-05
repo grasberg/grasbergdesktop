@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { ConvUpdateRequest } from '@shared/ipc'
-import type { Attachment } from '@shared/types'
+import type { Attachment, ChatParams } from '@shared/types'
 import ChatView from '@/components/chat/ChatView'
 import { toNormalized, unwrap } from '@/api/uld'
 import { useChatStore } from '@/stores/chat'
@@ -239,6 +239,154 @@ function ContextFooter(): ReactElement | null {
 }
 
 /**
+ * Toggles plan mode on the open conversation (params.planMode). While on,
+ * main appends the plan-mode prompt section and refuses mutating tools.
+ */
+function PlanModeToggle(): ReactElement | null {
+  const conversation = useChatStore((s) => s.conversation)
+  const [busy, setBusy] = useState(false)
+  if (!conversation) return null
+  const active = conversation.params.planMode === true
+
+  const toggle = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const params: ChatParams = { ...conversation.params }
+      if (active) delete params.planMode
+      else params.planMode = true
+      const updated = await unwrap(
+        window.uld.conversations.update({ id: conversation.id, patch: { params } })
+      )
+      useChatStore.setState({ conversation: updated })
+    } catch (e) {
+      useUiStore.getState().toast(`Could not toggle plan mode: ${toNormalized(e).message}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className={`btn btn-ghost code-plan-toggle${active ? ' active' : ''}`}
+      title="Plan mode: the assistant investigates read-only and presents a plan before making changes"
+      aria-pressed={active}
+      disabled={busy}
+      onClick={() => void toggle()}
+    >
+      <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+        <path
+          d="M3 2.5h10v11H3zM5.5 5.5h5M5.5 8h5M5.5 10.5h3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </svg>
+      Plan mode{active ? ' on' : ''}
+    </button>
+  )
+}
+
+interface TaskLine {
+  text: string
+  done: boolean
+  inProgress: boolean
+}
+
+/**
+ * Read-only view of the assistant's update_task_list checklist (stored as the
+ * 'Task list' workspace item). Refreshes when a generation finishes.
+ */
+function TaskListStrip(): ReactElement | null {
+  const conversationId = useChatStore((s) => s.conversation?.id ?? null)
+  const streaming = useChatStore((s) => s.streaming)
+  const [tasks, setTasks] = useState<TaskLine[]>([])
+  const [open, setOpen] = useState(true)
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (!conversationId) {
+      setTasks([])
+      return
+    }
+    try {
+      // Re-fetch the conversation: the tool may have linked a workspace
+      // mid-stream, so the chat store's copy can be stale.
+      const conv = await unwrap(window.uld.conversations.get(conversationId))
+      if (!conv.workspaceId) {
+        setTasks([])
+        return
+      }
+      const items = await unwrap(window.uld.workspaces.itemsList(conv.workspaceId))
+      const item = items.find((i) => i.kind === 'checklist' && i.title === 'Task list')
+      if (!item) {
+        setTasks([])
+        return
+      }
+      const parsed: TaskLine[] = []
+      for (const line of item.content.split('\n')) {
+        const match = /^- \[( |x)\] (.*)$/.exec(line.trim())
+        if (!match) continue
+        const inProgress = match[2].endsWith('⟵ in progress')
+        parsed.push({
+          text: inProgress ? match[2].slice(0, -'⟵ in progress'.length).trim() : match[2],
+          done: match[1] === 'x',
+          inProgress,
+        })
+      }
+      setTasks(parsed)
+    } catch {
+      // The strip is cosmetic — never toast for it.
+    }
+  }, [conversationId])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const prevStreaming = useRef(streaming)
+  useEffect(() => {
+    const finished = prevStreaming.current !== null && streaming === null
+    prevStreaming.current = streaming
+    if (finished) void refresh()
+  }, [streaming, refresh])
+
+  if (tasks.length === 0) return null
+  const doneCount = tasks.filter((t) => t.done).length
+
+  return (
+    <div className="code-tasklist">
+      <button
+        type="button"
+        className="code-tasklist-head"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="code-tasklist-title">Tasks</span>
+        <span className="code-tasklist-count">
+          {doneCount}/{tasks.length}
+        </span>
+        <span aria-hidden>{open ? '▾' : '▸'}</span>
+      </button>
+      {open ? (
+        <ul className="code-tasklist-items">
+          {tasks.map((task, index) => (
+            <li
+              key={`${index}-${task.text}`}
+              className={`code-tasklist-item${task.done ? ' done' : ''}${task.inProgress ? ' active' : ''}`}
+            >
+              <span aria-hidden>{task.done ? '☑' : '☐'}</span> {task.text}
+              {task.inProgress ? <em> — in progress</em> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * Code mode layout: project tree (left), the unchanged chat experience
  * (center) and proposed changes (right, collapsible). Rendered by the app
  * shell whenever the open conversation has mode 'code'.
@@ -294,6 +442,10 @@ export default function CodeView(): ReactElement {
       </aside>
 
       <section className="code-pane code-pane-center" aria-label="Conversation">
+        <div className="code-center-bar">
+          <PlanModeToggle />
+          <TaskListStrip />
+        </div>
         <ChatView />
       </section>
 

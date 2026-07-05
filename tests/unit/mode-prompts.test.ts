@@ -38,6 +38,32 @@ describe('buildModeSystemPrompt', () => {
     expect(prompt).toContain('security vulnerabilities')
     expect(prompt).toContain('file_path:line_number')
     expect(prompt).toContain('Never give time estimates')
+    // Agent-style communication and task discipline.
+    expect(prompt).toContain('Lead with the outcome')
+    expect(prompt).toContain('the deliverable is your assessment')
+    expect(prompt).toContain('When you have enough information to act, act')
+    expect(prompt).toContain('match its comment density')
+    // Honest verification framing: the app never runs project code.
+    expect(prompt).toContain('you cannot run the project')
+    // De-branded: no upstream product/model names.
+    expect(prompt).not.toMatch(/claude/i)
+    // Agentic tool guidance (grep/glob/git, edit_file/write_file, tasks, web).
+    expect(prompt).toContain('grep (regex content search)')
+    expect(prompt).toContain('edit_file and write_file tools are available, prefer them')
+    expect(prompt).toContain('update_task_list')
+    expect(prompt).toContain('web_search')
+    expect(prompt).toContain('background=true')
+    expect(prompt).toContain('ask_user_question')
+  })
+
+  it('code mode appends the plan-mode section only when planMode is set', () => {
+    const planning = buildModeSystemPrompt('code', { planMode: true })
+    expect(planning).toContain('PLAN MODE IS ACTIVE')
+    expect(planning).toContain('do not call edit_file, write_file or run_shell_command')
+
+    expect(buildModeSystemPrompt('code')).not.toContain('PLAN MODE IS ACTIVE')
+    // Plan mode is a code-mode concept only.
+    expect(buildModeSystemPrompt('chat', { planMode: true })).not.toContain('PLAN MODE IS ACTIVE')
   })
 
   it('design mode instructs the uld-html format and design approach', () => {

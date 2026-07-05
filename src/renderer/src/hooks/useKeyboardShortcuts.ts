@@ -12,10 +12,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 /**
  * Global shortcuts:
- *   Ctrl/Cmd+N  new chat
+ *   Ctrl/Cmd+N  new task in the active mode tab ('All' falls back to chat)
  *   Ctrl/Cmd+K  toggle command palette
  *   Ctrl/Cmd+,  toggle settings
- *   Escape      close palette/settings/shortcuts, else stop active generation
+ *   Escape      close palette/settings/shortcuts/projects, else stop generation
  * Plain keys are ignored while typing in an input/textarea; Escape and
  * Ctrl/Cmd combos always work.
  */
@@ -29,13 +29,17 @@ export function useKeyboardShortcuts(): void {
         const key = e.key.toLowerCase()
         if (key === 'n') {
           e.preventDefault()
+          const ui = useUiStore.getState()
+          ui.openWorkflows(false)
+          ui.openProjects(false)
+          const filter = useConversationsStore.getState().modeFilter
           useConversationsStore
             .getState()
-            .create('chat')
+            .create(filter === 'all' ? 'chat' : filter)
             .catch((err: unknown) => {
               useUiStore
                 .getState()
-                .toast(`Could not create chat: ${toNormalized(err).message}`, 'error')
+                .toast(`Could not create conversation: ${toNormalized(err).message}`, 'error')
             })
           return
         }
@@ -65,6 +69,10 @@ export function useKeyboardShortcuts(): void {
         }
         if (ui.shortcutsOpen) {
           ui.openShortcuts(false)
+          return
+        }
+        if (ui.projectsOpen) {
+          ui.openProjects(false)
           return
         }
         const chat = useChatStore.getState()

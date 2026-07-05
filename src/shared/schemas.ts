@@ -16,6 +16,7 @@ export const chatParamsSchema = z
     topP: z.number().min(0).max(1).optional(),
     frequencyPenalty: z.number().min(-2).max(2).optional(),
     presencePenalty: z.number().min(-2).max(2).optional(),
+    planMode: z.boolean().optional(),
   })
   .strict()
 

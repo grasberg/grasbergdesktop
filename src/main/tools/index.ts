@@ -75,6 +75,22 @@ export interface CreateToolSystemOptions {
   browser?: ToolBrowser
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: (task: string, ctx: import('./executor').ToolExecuteContext) => Promise<string>
+  /** Background sub-agent tasks (delegate background=true, task_output, task_stop). */
+  delegateBackground?: {
+    start(task: string, ctx: import('./executor').ToolExecuteContext): string
+    output(taskId: string): string
+    stop(taskId: string): string
+  }
+  /** Approval-gated project writes for edit_file/write_file (wired to CodeService). */
+  codeChanges?: {
+    propose(
+      conversationId: string,
+      relPath: string,
+      changeType: 'create' | 'edit',
+      newContent: string
+    ): { id: string } | Promise<{ id: string }>
+    apply(changeId: string): unknown
+  }
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }
@@ -105,6 +121,30 @@ export function createToolSystem(
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
     delegate: options.delegate,
+    delegateBackground: options.delegateBackground ?? null,
+    codeChanges: options.codeChanges ?? null,
+    // update_task_list: persists the list as a 'Task list' checklist item in
+    // the conversation's workspace (created and linked on first use).
+    taskList: {
+      update: (conversationId, markdown) => {
+        const conversation = db.conversations.getById(conversationId)
+        if (!conversation) return 'Error: conversation not found.'
+        let workspaceId = conversation.workspaceId
+        if (!workspaceId) {
+          const workspace = db.workspaces.create({ name: conversation.title || 'Tasks' })
+          workspaceId = workspace.id
+          db.conversations.update(conversationId, { workspaceId })
+        }
+        db.workspaces.itemUpsertByKindTitle({
+          workspaceId,
+          kind: 'checklist',
+          title: 'Task list',
+          content: markdown,
+          origin: 'assistant',
+        })
+        return 'Task list updated.'
+      },
+    },
     skills: {
       getEnabledByName: (name) => {
         const skill = db.skills.getByName(name)

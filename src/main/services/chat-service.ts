@@ -14,6 +14,7 @@ import type {
   AuthMode,
   ChatParams,
   Conversation,
+  ConversationMode,
   Message,
   MessageStatus,
   NormalizedError,
@@ -26,6 +27,7 @@ import type {
   ToolApprovalRequest,
   ToolCallRecord,
   ToolDefinition,
+  UserQuestionRequest,
 } from '@shared/types'
 import {
   CHANNELS,
@@ -73,6 +75,49 @@ const TOOL_LIMIT_NOTE =
 /** Placeholder held in activeByConversation between reservation and start(). */
 const PENDING_STREAM = '__pending__'
 
+/** Repo-root instruction files injected into code-mode prompts (first found wins). */
+const PROJECT_INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const
+const PROJECT_INSTRUCTIONS_MAX_CHARS = 16_000
+
+/**
+ * What the '/init' slash command sends to the model in place of the literal
+ * message (the transcript still shows '/init'). Kept in main so regenerate /
+ * edit+rerun replay the same expansion.
+ */
+export const INIT_COMMAND_PROMPT = `Analyze this codebase and create an AGENTS.md file that will guide future assistant sessions working in this repository.
+
+Explore first: use repo_map, glob, grep and read_file (start with the README, package manifests, build and test configs) until you understand how the project is built, tested and organized.
+
+What to include:
+- Commonly used commands — build, lint, test, and how to run a single test.
+- The big-picture architecture that requires reading multiple files to understand: the main components and how they connect.
+- Project-specific conventions and rules an assistant must follow (naming, patterns, things deliberately done differently).
+
+What NOT to include:
+- Generic advice ("write tests", "handle errors"), exhaustive file listings, or anything obvious from a quick directory listing.
+
+If a CLAUDE.md file exists, use it as the starting point. If AGENTS.md already exists, improve it rather than duplicating it. Keep the result focused — roughly 20 to 60 lines.
+
+Create the file at the repository root with the write_file tool (path "AGENTS.md"). If file-writing tools are unavailable, emit a uld-change block instead.`
+
+/**
+ * Expands a slash command in a user message to its full prompt for the wire.
+ * Only '/init' in code mode expands; everything else passes through verbatim.
+ */
+export function expandSlashCommand(content: string, mode: ConversationMode): string {
+  if (mode === 'code' && content.trim() === '/init') return INIT_COMMAND_PROMPT
+  return content
+}
+
+/** Concurrent background sub-agent tasks (delegate background=true). */
+const MAX_BACKGROUND_TASKS = 8
+
+interface BackgroundTask {
+  status: 'running' | 'done' | 'error' | 'stopped'
+  result: string
+  controller: AbortController
+}
+
 type Broadcast = (channel: string, payload: unknown) => void
 
 // ---------------------------------------------------------------------------
@@ -97,10 +142,20 @@ export interface ChatApprovalBroker {
   ): Promise<boolean>
 }
 
+export interface ChatQuestionBroker {
+  request(
+    req: Omit<UserQuestionRequest, 'requestId'>,
+    broadcast: Broadcast,
+    signal?: AbortSignal
+  ): Promise<string | null>
+}
+
 export interface ChatToolSystem {
   registry: ChatToolRegistry
   executor: ChatToolExecutor
   broker: ChatApprovalBroker
+  /** Optional: routes ask_user_question dialogs (absent in tests/headless). */
+  questions?: ChatQuestionBroker
 }
 
 export interface ChatServiceOptions {
@@ -293,6 +348,8 @@ function messageEstimateText(message: Message): string {
 export class ChatService {
   private readonly streams = new Map<string, ActiveStream>()
   private readonly activeByConversation = new Map<string, string>()
+  private readonly backgroundTasks = new Map<string, BackgroundTask>()
+  private backgroundTaskSeq = 0
 
   constructor(
     private readonly db: AppDatabase,
@@ -394,6 +451,12 @@ export class ChatService {
    * a stuck loop can never block quit indefinitely.
    */
   async stopAll(timeoutMs = 3000): Promise<void> {
+    for (const task of this.backgroundTasks.values()) {
+      if (task.status === 'running') {
+        task.status = 'stopped'
+        task.controller.abort()
+      }
+    }
     const active = [...this.streams.values()]
     for (const { controller } of active) controller.abort()
     if (active.length === 0) return
@@ -622,6 +685,9 @@ export class ChatService {
     const enabledSkills = this.db.skills.listEnabled()
     const effectiveOpts: ModePromptOptions = {
       ...promptOpts,
+      ...(conversation.mode === 'code' && conversation.params.planMode === true
+        ? { planMode: true }
+        : {}),
       ...(enabledSkills.length > 0
         ? {
             skills: enabledSkills.map((s) => ({
@@ -650,6 +716,12 @@ export class ChatService {
     if (systemPrompt) {
       history.push({ role: 'system', content: systemPrompt })
     }
+    // Code mode: repo-root project instructions (GRASBERG.md and friends) ride
+    // along as a system note so the model follows the project's conventions.
+    if (conversation.mode === 'code' && conversation.projectId) {
+      const instructions = this.readProjectInstructions(conversation.projectId)
+      if (instructions) history.push({ role: 'system', content: instructions })
+    }
     // Condensed older turns (context compaction) go in as a system note; the
     // messages they cover (seq <= summaryThroughSeq) are then skipped below.
     const throughSeq = conversation.summaryThroughSeq ?? 0
@@ -663,9 +735,13 @@ export class ChatService {
       if (message.role !== 'user' && message.role !== 'assistant') continue
       if (message.status !== 'complete' && message.status !== 'stopped') continue
       if (message.seq <= throughSeq) continue
+      // Slash commands ('/init') stay short in the transcript but expand to
+      // their full prompt on the wire, every round and replay alike.
       const content =
         message.role === 'user'
-          ? composeUserContent(message, visionEnabled, this.options.imageDir)
+          ? message.content.trim() === '/init' && conversation.mode === 'code'
+            ? expandSlashCommand(message.content, conversation.mode)
+            : composeUserContent(message, visionEnabled, this.options.imageDir)
           : message.content
       if (contentIsEmpty(content)) continue
       // Tool calls are intentionally omitted from history in the MVP: without
@@ -842,12 +918,103 @@ export class ChatService {
   }
 
   /**
+   * Reads the project's assistant-instruction file (GRASBERG.md, or the
+   * AGENTS.md / CLAUDE.md conventions), capped. Null when none exists —
+   * always best-effort, never throws.
+   */
+  private readProjectInstructions(projectId: string): string | null {
+    try {
+      const project = this.db.code.projectGetById(projectId)
+      if (!project) return null
+      for (const name of PROJECT_INSTRUCTION_FILES) {
+        let raw: string
+        try {
+          raw = readFileSync(join(project.path, name), 'utf8')
+        } catch {
+          continue
+        }
+        const text = raw.trim()
+        if (text.length === 0) continue
+        const capped =
+          text.length > PROJECT_INSTRUCTIONS_MAX_CHARS
+            ? `${text.slice(0, PROJECT_INSTRUCTIONS_MAX_CHARS)}\n…[truncated]`
+            : text
+        return `Project instructions from ${name} (guidance for assistants working in this repository — follow it):\n\n${capped}`
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Starts a background sub-agent (delegate background=true) and returns a
+   * task-id note for the model. The task runs the same bounded delegate loop
+   * with its own AbortController; task_stop / app teardown abort it.
+   */
+  startDelegateBackground(task: string, ctx: ToolExecuteContext): string {
+    const running = [...this.backgroundTasks.values()].filter(
+      (t) => t.status === 'running'
+    ).length
+    if (running >= MAX_BACKGROUND_TASKS) {
+      return `Error: ${MAX_BACKGROUND_TASKS} background tasks are already running. Poll task_output or stop one with task_stop first.`
+    }
+    this.backgroundTaskSeq += 1
+    const taskId = `task-${this.backgroundTaskSeq}`
+    const controller = new AbortController()
+    const record: BackgroundTask = { status: 'running', result: '', controller }
+    this.backgroundTasks.set(taskId, record)
+    void this.runDelegate(task, ctx, controller.signal)
+      .then((result) => {
+        if (record.status === 'running') {
+          record.status = 'done'
+          record.result = result
+        }
+      })
+      .catch((e: unknown) => {
+        if (record.status === 'running') {
+          record.status = 'error'
+          record.result = toNormalizedError(e).message
+        }
+      })
+    return `Started background task '${taskId}'. Poll it with task_output({"taskId":"${taskId}"}); continue other work meanwhile.`
+  }
+
+  /** Status/result of a background task, as a model-readable string. */
+  delegateTaskOutput(taskId: string): string {
+    const record = this.backgroundTasks.get(taskId)
+    if (!record) return `Error: unknown task id '${taskId}'.`
+    switch (record.status) {
+      case 'running':
+        return `Task '${taskId}' is still running.`
+      case 'stopped':
+        return `Task '${taskId}' was stopped before finishing.`
+      case 'error':
+        return `Task '${taskId}' failed: ${record.result}`
+      default:
+        return `Task '${taskId}' finished:\n${record.result}`
+    }
+  }
+
+  /** Stops a running background task (its partial result is discarded). */
+  delegateTaskStop(taskId: string): string {
+    const record = this.backgroundTasks.get(taskId)
+    if (!record) return `Error: unknown task id '${taskId}'.`
+    if (record.status !== 'running') {
+      return `Task '${taskId}' already finished (${record.status}).`
+    }
+    record.status = 'stopped'
+    record.controller.abort()
+    return `Task '${taskId}' stopped.`
+  }
+
+  /**
    * Runs a sub-agent for the 'delegate' tool: a bounded, non-streaming
    * reasoning loop over the same provider/model with read-only project tools.
    * Nested tool calls reuse the parent's approval callback (so the user still
    * approves anything sensitive). Never throws — returns a string result.
    */
-  async runDelegate(task: string, ctx: ToolExecuteContext): Promise<string> {
+  async runDelegate(task: string, ctx: ToolExecuteContext, signal?: AbortSignal): Promise<string> {
     try {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
@@ -868,6 +1035,7 @@ export class ChatService {
       ]
       let final = ''
       for (let round = 0; round < DELEGATE_MAX_ROUNDS; round++) {
+        if (signal?.aborted) return 'The task was stopped.'
         const result = await adapter.chat(
           {
             modelId: resolved.modelId,
@@ -876,7 +1044,7 @@ export class ChatService {
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             stream: false,
           },
-          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
+          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal }
         )
         if (result.text.trim()) final = result.text
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
@@ -1076,6 +1244,16 @@ export class ChatService {
         // resolves false immediately when the stream is stopped.
         const approval = (req: Omit<ToolApprovalRequest, 'requestId'>): Promise<boolean> =>
           tools.broker.request(req, this.broadcast, controller.signal)
+        const questions = tools.questions
+        const askUser = questions
+          ? (question: string, options: string[]): Promise<string | null> =>
+              questions.request(
+                { streamId, conversationId, question, options },
+                this.broadcast,
+                controller.signal
+              )
+          : undefined
+        const planMode = conversation.mode === 'code' && conversation.params.planMode === true
         for (const call of roundCalls) {
           if (controller.signal.aborted) {
             throw new ProviderError('aborted', 'Generation stopped.')
@@ -1085,6 +1263,8 @@ export class ChatService {
             conversation,
             streamId,
             approval,
+            ...(askUser ? { askUser } : {}),
+            planMode,
           })
           call.result = result
           call.status = toolCallStatus(result)

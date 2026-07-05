@@ -44,6 +44,7 @@ import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
 import type { ImBridgeManager } from '../im/manager'
 import type { ApprovalBroker } from '../services/approval-broker'
+import type { QuestionBroker } from '../services/question-broker'
 import { getAdapter, resolveAdapter } from '../providers/registry'
 import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
@@ -60,6 +61,7 @@ export interface RegisterIpcDeps {
   keystore: Keystore
   toolSystem: ToolSystem
   approvalBroker: ApprovalBroker
+  questionBroker: QuestionBroker
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
   oauthManager: OpenAiOAuthManager
@@ -221,7 +223,7 @@ const convExportSchema = z.object({
 // ---------------------------------------------------------------------------
 
 export function registerIpc(deps: RegisterIpcDeps): void {
-  const { db, chatService, codeService, keystore, toolSystem, approvalBroker, oauthManager } = deps
+  const { db, chatService, codeService, keystore, toolSystem, approvalBroker, questionBroker, oauthManager } = deps
 
   const register = (channel: ChannelName, fn: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
@@ -646,6 +648,15 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       requireString(requestId, 'Request id'),
       requireBoolean(approved, 'approved')
     )
+    return undefined
+  })
+
+  // The renderer's answer to an ask_user_question dialog (null = dismissed).
+  register(CHANNELS.toolsQuestionRespond, (requestId, answer) => {
+    if (answer !== null && typeof answer !== 'string') {
+      throw new ProviderError('invalid_request', 'Answer must be a string or null.')
+    }
+    questionBroker.respond(requireString(requestId, 'Request id'), answer)
     return undefined
   })
 

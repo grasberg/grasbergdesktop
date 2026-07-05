@@ -6,6 +6,7 @@ import CoworkView from '@/components/cowork/CoworkView'
 import WriteView from '@/components/write/WriteView'
 import DesignView from '@/components/design/DesignView'
 import WorkflowsView from '@/components/workflows/WorkflowsView'
+import ProjectsView from '@/components/projects/ProjectsView'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 import Onboarding from '@/components/onboarding/Onboarding'
 import CommandPalette from '@/components/CommandPalette'
@@ -13,6 +14,7 @@ import ShortcutsHelp from '@/components/ShortcutsHelp'
 import EmptyState from '@/components/EmptyState'
 import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
+import UserQuestionDialog from '@/components/UserQuestionDialog'
 import Toasts from '@/components/Toasts'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useChatStore } from '@/stores/chat'
@@ -46,6 +48,7 @@ export default function App(): React.JSX.Element {
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
   const workflowsOpen = useUiStore((s) => s.workflowsOpen)
+  const projectsOpen = useUiStore((s) => s.projectsOpen)
 
   useKeyboardShortcuts()
 
@@ -88,6 +91,13 @@ export default function App(): React.JSX.Element {
     const unsubscribeSettled = window.uld.tools.onApprovalSettled((requestId) => {
       useToolsStore.getState().settleApproval(requestId)
     })
+    // ask_user_question dialogs, mirroring the approval flow.
+    const unsubscribeQuestion = window.uld.tools.onQuestionRequest((req) => {
+      useToolsStore.getState().setPendingQuestion(req)
+    })
+    const unsubscribeQuestionSettled = window.uld.tools.onQuestionSettled((requestId) => {
+      useToolsStore.getState().settleQuestion(requestId)
+    })
     // MCP connection state changes push a fresh runtime snapshot.
     const unsubscribeMcp = window.uld.mcp.onServersChanged((runtime) => {
       useMcpStore.getState().setRuntime(runtime)
@@ -96,6 +106,8 @@ export default function App(): React.JSX.Element {
       unsubscribeStream()
       unsubscribeApproval()
       unsubscribeSettled()
+      unsubscribeQuestion()
+      unsubscribeQuestionSettled()
       unsubscribeMcp()
     }
   }, [])
@@ -137,9 +149,14 @@ export default function App(): React.JSX.Element {
     <>
       <div className="app-layout">
         <Sidebar />
-        <main className="app-main" aria-label={workflowsOpen ? 'Workflows' : 'Conversation'}>
+        <main
+          className="app-main"
+          aria-label={workflowsOpen ? 'Workflows' : projectsOpen ? 'Projects' : 'Conversation'}
+        >
           {workflowsOpen ? (
             <WorkflowsView />
+          ) : projectsOpen ? (
+            <ProjectsView />
           ) : activeId ? (
             <ModeView mode={mode} />
           ) : (
@@ -151,6 +168,7 @@ export default function App(): React.JSX.Element {
       <CommandPalette />
       <ShortcutsHelp />
       <ToolApprovalDialog />
+      <UserQuestionDialog />
       <Toasts />
     </>
   )

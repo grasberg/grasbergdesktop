@@ -12,6 +12,8 @@ import { openDatabase, type AppDatabase } from './db/database'
 import { keystore } from './keys/keystore'
 import { ChatService } from './services/chat-service'
 import { ApprovalBroker } from './services/approval-broker'
+import { QuestionBroker } from './services/question-broker'
+import { seedBundledSkills } from './services/bundled-skills'
 import { registerCompletionHook } from './services/completion-hooks'
 import {
   extractDocument,
@@ -35,6 +37,7 @@ const PRODUCTION_CSP =
 let db: AppDatabase | null = null
 let chatService: ChatService | null = null
 let approvalBroker: ApprovalBroker | null = null
+let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let browserSession: BrowserSession | null = null
@@ -66,6 +69,7 @@ async function cleanup(): Promise<void> {
   // Resolve any pending tool approvals as declined so no executor promise
   // (and thus no tool) can outlive the user's session.
   approvalBroker?.stopAll()
+  questionBroker?.stopAll()
   imBridgeManager?.stopAll()
   oauthManager?.stopAll()
   browserSession?.close()
@@ -169,6 +173,13 @@ function bootstrap(): void {
   db = database
   // Recover generations interrupted by a crash or hard quit.
   database.messages.markDanglingStreamingAsStopped()
+  // Seed the shipped skill library (no-op once seeded at the current version).
+  // In dev the folder sits in the repo; packaged builds copy it next to the
+  // asar via electron-builder extraResources.
+  const bundledSkillsDir = app.isPackaged
+    ? join(process.resourcesPath, 'bundled-skills')
+    : join(app.getAppPath(), 'resources', 'bundled-skills')
+  void seedBundledSkills(database, bundledSkillsDir)
   // Upgrade any keys still stored with the insecure fallback to real
   // safeStorage encryption now that Electron's crypto is available.
   keystore.reencryptInsecureKeys(database)
@@ -200,6 +211,23 @@ function bootstrap(): void {
       chatService
         ? chatService.runDelegate(task, ctx)
         : Promise.resolve('Error: delegation unavailable.'),
+    delegateBackground: {
+      start: (task, ctx) =>
+        chatService
+          ? chatService.startDelegateBackground(task, ctx)
+          : 'Error: background tasks unavailable.',
+      output: (taskId) =>
+        chatService ? chatService.delegateTaskOutput(taskId) : 'Error: background tasks unavailable.',
+      stop: (taskId) =>
+        chatService ? chatService.delegateTaskStop(taskId) : 'Error: background tasks unavailable.',
+    },
+    // edit_file/write_file: propose + apply through the audited change
+    // pipeline (path jail, staleness baseline, Changes-list record).
+    codeChanges: {
+      propose: (conversationId, relPath, changeType, newContent) =>
+        codeService.proposeChange(conversationId, relPath, changeType, newContent),
+      apply: (changeId) => codeService.applyChange(changeId),
+    },
     resolveSecretHeaders: (toolId) => {
       const out: Record<string, string> = {}
       for (const cipher of database.secrets.listCiphers('custom_tool', customToolDbId(toolId))) {
@@ -214,6 +242,8 @@ function bootstrap(): void {
   })
   const broker = new ApprovalBroker()
   approvalBroker = broker
+  const questions = new QuestionBroker()
+  questionBroker = questions
   // "Sign in with ChatGPT" OAuth manager (experimental). Tokens are encrypted
   // via the keystore; the browser is opened through the OS shell.
   const oauth = new OpenAiOAuthManager({
@@ -224,7 +254,7 @@ function bootstrap(): void {
   })
   oauthManager = oauth
   chatService = new ChatService(database, broadcast, {
-    tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker },
+    tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker, questions },
     imageDir: attachmentsDir,
     browser,
     getAccessToken: (providerId) => oauth.getAccessToken(providerId),
@@ -289,6 +319,7 @@ function bootstrap(): void {
     keystore,
     toolSystem,
     approvalBroker: broker,
+    questionBroker: questions,
     mcpManager: mcp,
     imBridgeManager: imBridge,
     oauthManager: oauth,

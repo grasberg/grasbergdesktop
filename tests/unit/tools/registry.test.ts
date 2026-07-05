@@ -41,9 +41,19 @@ describe('ToolRegistry.listDefinitions', () => {
       'repo_map',
       'read_file',
       'list_directory',
+      'grep',
+      'glob',
+      'git',
       'fetch_url',
+      'web_search',
       'propose_shell_command',
+      'edit_file',
+      'write_file',
       'delegate',
+      'task_output',
+      'task_stop',
+      'update_task_list',
+      'ask_user_question',
     ])
     for (const def of definitions) {
       expect(def.builtin).toBe(true)
@@ -57,6 +67,15 @@ describe('ToolRegistry.listDefinitions', () => {
     expect(byId.get('list_directory')!.risk).toBe('sensitive')
     expect(byId.get('fetch_url')!.risk).toBe('sensitive')
     expect(byId.get('propose_shell_command')!.risk).toBe('safe')
+    // New tools: searches stay sensitive, project writes are dangerous
+    // (per-call approval), pure app-state tools are safe.
+    expect(byId.get('grep')!.risk).toBe('sensitive')
+    expect(byId.get('git')!.risk).toBe('sensitive')
+    expect(byId.get('web_search')!.risk).toBe('sensitive')
+    expect(byId.get('edit_file')!.risk).toBe('dangerous')
+    expect(byId.get('write_file')!.risk).toBe('dangerous')
+    expect(byId.get('update_task_list')!.risk).toBe('safe')
+    expect(byId.get('ask_user_question')!.risk).toBe('safe')
   })
 
   it('merges per-tool enabled flags from the database', () => {

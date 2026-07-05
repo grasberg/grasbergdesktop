@@ -626,3 +626,80 @@
   text-align: right;
   user-select: none;
 }
+
+/* ------------------------------------------ plan mode + task list strip */
+
+.code-center-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+
+.code-plan-toggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+}
+
+.code-plan-toggle.active {
+  background: var(--bg-active);
+  color: var(--text);
+  border-color: var(--accent, currentColor);
+}
+
+.code-tasklist {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.code-tasklist-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.code-tasklist-title {
+  font-weight: 600;
+}
+
+.code-tasklist-count {
+  color: var(--text-muted);
+}
+
+.code-tasklist-head span:last-child {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.code-tasklist-items {
+  margin: 0;
+  padding: 0 10px 8px;
+  list-style: none;
+}
+
+.code-tasklist-item {
+  padding: 2px 0;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.code-tasklist-item.done {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.code-tasklist-item.active em {
+  font-style: normal;
+  color: var(--accent, var(--text));
+}
