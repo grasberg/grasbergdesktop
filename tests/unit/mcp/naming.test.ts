@@ -19,4 +19,20 @@ describe('MCP tool id namespacing', () => {
     expect(id.length).toBeLessThanOrEqual(64)
     expect(id.startsWith(MCP_TOOL_ID_PREFIX)).toBe(true)
   })
+
+  it('keeps two long names distinct after truncation (no collision)', () => {
+    // Two names that share their first 64 chars must NOT collapse to one id,
+    // which would silently dispatch one tool's calls to the other.
+    const base = 'search_documents_in_knowledge_base_by_semantic_similarity_'
+    const a = namespaceMcpToolId('srv', `${base}v1`)
+    const b = namespaceMcpToolId('srv', `${base}v2`)
+    expect(a.length).toBeLessThanOrEqual(64)
+    expect(b.length).toBeLessThanOrEqual(64)
+    expect(a).not.toBe(b)
+  })
+
+  it('is deterministic for the same input', () => {
+    const name = 'x'.repeat(120)
+    expect(namespaceMcpToolId('srv', name)).toBe(namespaceMcpToolId('srv', name))
+  })
 })

@@ -80,6 +80,40 @@ describe('ImBridgeManager', () => {
     })
   })
 
+  it('pins the first Telegram sender and refuses every other chat (trust on first use)', async () => {
+    const generateReply = vi.fn(async () => 'reply')
+    const manager = new ImBridgeManager({ db, keystore, generateReply })
+    const conversation = conv()
+    // Reach the private inbound handler without starting the poll loop.
+    const inbound = (chatId: number): Promise<string> =>
+      (
+        manager as unknown as {
+          handleInbound(chatId: number, text: string, conversationId: string): Promise<string>
+        }
+      ).handleInbound(chatId, 'hi', conversation.id)
+
+    // First message pins chat 100 and is answered.
+    expect(await inbound(100)).toBe('reply')
+    expect(db.settings.get().telegramBridgeAllowedChatId).toBe(100)
+    expect(generateReply).toHaveBeenCalledTimes(1)
+
+    // A different chat is refused without ever reaching generateReply.
+    const refusal = await inbound(200)
+    expect(refusal).toMatch(/private/i)
+    expect(generateReply).toHaveBeenCalledTimes(1)
+
+    // The pinned chat still works.
+    expect(await inbound(100)).toBe('reply')
+    expect(generateReply).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the pinned chat when a new bot token is set', () => {
+    const manager = new ImBridgeManager({ db, keystore, generateReply: async () => 'ok' })
+    db.settings.update({ telegramBridgeAllowedChatId: 100 })
+    manager.setTelegram({ token: 'new-token', conversationId: 'c1', enabled: false })
+    expect(db.settings.get().telegramBridgeAllowedChatId).toBeNull()
+  })
+
   it('does not post when no webhook is configured or for non-assistant messages', async () => {
     const fetchImpl = vi.fn(async () => new Response('ok'))
     const manager = new ImBridgeManager({

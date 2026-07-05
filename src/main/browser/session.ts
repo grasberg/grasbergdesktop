@@ -66,13 +66,19 @@ function isAllowedUrl(raw: string): boolean {
 export class BrowserSession {
   private win: BrowserWindow | null = null
   private pendingScreenshot: string | null = null
+  /** The partition Session is shared/cached across window recreations; only
+   * wire its listeners once so 'will-download' handlers don't accumulate. */
+  private sessionConfigured = false
 
   private ensureWindow(): BrowserWindow {
     if (this.win && !this.win.isDestroyed()) return this.win
     const ses = electronSession.fromPartition(PARTITION)
-    // Block downloads and deny all permission requests in the browsing session.
-    ses.on('will-download', (event) => event.preventDefault())
-    ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
+    if (!this.sessionConfigured) {
+      // Block downloads and deny all permission requests in the browsing session.
+      ses.on('will-download', (event) => event.preventDefault())
+      ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
+      this.sessionConfigured = true
+    }
     const win = new BrowserWindow({
       width: VIEWPORT.width,
       height: VIEWPORT.height,

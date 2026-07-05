@@ -241,6 +241,7 @@ export const settingsPatchSchema = z
     browserToolsEnabled: z.boolean(),
     telegramBridgeEnabled: z.boolean(),
     telegramBridgeConversationId: z.string().nullable(),
+    telegramBridgeAllowedChatId: z.number().int().nullable(),
     outboundWebhookUrl: z.string().max(2000).nullable(),
   })
   .partial()

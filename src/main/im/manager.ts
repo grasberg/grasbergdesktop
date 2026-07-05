@@ -77,21 +77,43 @@ export class ImBridgeManager {
     this.bridge = new TelegramBridge({
       token,
       fetchImpl: this.deps.fetchImpl,
-      onMessage: (_chatId, text) => this.deps.generateReply(conversationId, text),
+      onMessage: (chatId, text) => this.handleInbound(chatId, text, conversationId),
       onError: () => undefined,
     })
     this.bridge.start()
   }
 
+  /**
+   * Handles one inbound Telegram message. A Telegram bot is publicly
+   * addressable, so without a sender check ANY stranger could talk to the
+   * user's bound conversation (leaking its history/memories and burning
+   * credits). We pin the FIRST chat that messages the bot as the authorized one
+   * (trust on first use) and refuse every other sender thereafter.
+   */
+  private async handleInbound(chatId: number, text: string, conversationId: string): Promise<string> {
+    const allowed = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    if (allowed === null) {
+      this.deps.db.settings.update({ telegramBridgeAllowedChatId: chatId })
+    } else if (allowed !== chatId) {
+      return 'This assistant is private and only responds to its owner.'
+    }
+    return this.deps.generateReply(conversationId, text)
+  }
+
   /** Store/replace config and (re)start or stop the bridge. */
   setTelegram(input: SetTelegramInput): ImBridgeStatus {
-    if (input.token && input.token.trim().length > 0) {
-      const { encryptedBase64, preview } = this.deps.keystore.encryptKey(input.token.trim())
+    const trimmedToken = input.token?.trim() ?? ''
+    const tokenChanged = trimmedToken.length > 0
+    if (tokenChanged) {
+      const { encryptedBase64, preview } = this.deps.keystore.encryptKey(trimmedToken)
       this.deps.db.secrets.set('im_bridge', TELEGRAM_OWNER, TOKEN_NAME, encryptedBase64, preview)
     }
     this.deps.db.settings.update({
       telegramBridgeEnabled: input.enabled,
       telegramBridgeConversationId: input.conversationId,
+      // A new bot token means a new bot: drop the old pinned chat so the next
+      // sender re-pairs, rather than leaving a stale authorization in place.
+      ...(tokenChanged ? { telegramBridgeAllowedChatId: null } : {}),
     })
     this.startBridge()
     return this.status()

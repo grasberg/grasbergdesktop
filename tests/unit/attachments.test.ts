@@ -2,7 +2,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { MAX_IMAGE_BYTES, readAttachment, readStoredImage } from '../../src/main/ipc/attachments'
+import {
+  MAX_IMAGE_BYTES,
+  isValidStorageKey,
+  readAttachment,
+  readStoredImage,
+} from '../../src/main/ipc/attachments'
 
 let dir: string
 let imageDir: string
@@ -63,5 +68,26 @@ describe('readStoredImage', () => {
     expect(await readStoredImage(imageDir, 'a/b.png')).toBeNull()
     expect(await readStoredImage(imageDir, 'notes.txt')).toBeNull()
     expect(await readStoredImage(imageDir, 'missing.png')).toBeNull()
+  })
+})
+
+describe('isValidStorageKey', () => {
+  // This guard is the single gate every on-disk storageKey read must pass
+  // (readStoredImage AND chat-service's imageDataUrl), so a traversal key can
+  // never reach the filesystem.
+  it('accepts app-generated <uuid>.<ext> keys only', () => {
+    expect(isValidStorageKey('550e8400-e29b-41d4-a716-446655440000.png')).toBe(true)
+    expect(isValidStorageKey('abc123.jpeg')).toBe(true)
+  })
+
+  it('rejects path traversal, separators and absolute/drive paths', () => {
+    expect(isValidStorageKey('../../../../Windows/win.ini')).toBe(false)
+    expect(isValidStorageKey('../secret.png')).toBe(false)
+    expect(isValidStorageKey('a/b.png')).toBe(false)
+    expect(isValidStorageKey('a\\b.png')).toBe(false)
+    expect(isValidStorageKey('/etc/passwd')).toBe(false)
+    expect(isValidStorageKey('C:\\secret.png')).toBe(false)
+    expect(isValidStorageKey('no-extension')).toBe(false)
+    expect(isValidStorageKey('')).toBe(false)
   })
 })

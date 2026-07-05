@@ -55,6 +55,7 @@ import { decryptKey } from '../keys/keystore'
 import { buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
 import type { ToolExecuteContext } from '../tools/executor'
 import { USER_DECLINED_RESULT } from '../tools/executor'
+import { isValidStorageKey } from '../ipc/attachments'
 import { runCompletionHooks } from './completion-hooks'
 
 const DEFAULT_TITLE = 'New chat'
@@ -237,6 +238,10 @@ function imageDataUrl(
 ): string | null {
   if (attachment.dataUrl) return attachment.dataUrl
   if (!imageDir || !attachment.storageKey) return null
+  // A storageKey arrives over IPC (chat.send) length-capped only, so reject
+  // anything that is not the app-generated '<uuid>.<ext>' shape before touching
+  // the filesystem — otherwise '../../..' escapes imageDir (arbitrary file read).
+  if (!isValidStorageKey(attachment.storageKey)) return null
   try {
     const buffer = readFileSync(join(imageDir, attachment.storageKey))
     return `data:${attachment.mimeType};base64,${buffer.toString('base64')}`
@@ -656,10 +661,13 @@ export class ChatService {
       return { promptOpts: { toolsAvailable: false, toolNames } }
     }
     return {
-      // Models call tools by our definition id (the registry resolves either
-      // id or name, and builtin ids double as their names).
+      // The wire function name MUST match the provider pattern ^[A-Za-z0-9_-]{1,64}$.
+      // def.name satisfies it for every source: builtins (name === id), custom
+      // tools (user name validated to that pattern — def.id is 'custom:<uuid>',
+      // which the ':' makes invalid), and MCP tools (name === namespaced id).
+      // registry.resolveForCall() maps the returned name back to the definition.
       adapterTools: enabled.map((def) => ({
-        name: def.id,
+        name: def.name,
         description: def.description,
         parameters: def.parameters,
       })),
@@ -833,54 +841,77 @@ export class ChatService {
    */
   async generateHeadless(conversationId: string, userText: string): Promise<string> {
     const conversation = this.requireConversation(conversationId)
-    const settings = this.db.settings.get()
-    const resolved = await this.resolveTarget(conversation, settings, undefined)
-
-    const userMessage: Message = {
-      id: randomUUID(),
-      conversationId,
-      role: 'user',
-      content: userText,
-      status: 'complete',
-      seq: this.db.messages.nextSeq(conversationId),
-      createdAt: Date.now(),
+    // Enforce the same single-generation-per-conversation invariant as
+    // send/regenerate/editAndRerun: without it an IM-bridge message could run a
+    // second generation over the same history while a UI stream is live,
+    // interleaving persisted turns. reserve() throws if the conversation is
+    // already busy; the caller (IM bridge) reports that back to the user.
+    this.reserve(conversation.id)
+    const streamId = randomUUID()
+    const controller = new AbortController()
+    const active: ActiveStream = {
+      controller,
+      conversationId: conversation.id,
+      done: Promise.resolve(),
     }
-    this.db.messages.insert(userMessage)
+    // Register in both maps so stop()/stopConversation()/stopAll() can abort it.
+    this.streams.set(streamId, active)
+    this.activeByConversation.set(conversation.id, streamId)
+    try {
+      const settings = this.db.settings.get()
+      const resolved = await this.resolveTarget(conversation, settings, undefined)
 
-    const toolPlan = this.planTools(resolved)
-    const visionEnabled =
-      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
-      UNKNOWN_MODEL_CAPS.vision
-    const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
-    const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
-    const result = await adapter.chat(
-      {
+      const userMessage: Message = {
+        id: randomUUID(),
+        conversationId,
+        role: 'user',
+        content: userText,
+        status: 'complete',
+        seq: this.db.messages.nextSeq(conversationId),
+        createdAt: Date.now(),
+      }
+      this.db.messages.insert(userMessage)
+
+      const toolPlan = this.planTools(resolved)
+      const visionEnabled =
+        resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
+        UNKNOWN_MODEL_CAPS.vision
+      const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
+      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
+      const result = await adapter.chat(
+        {
+          modelId: resolved.modelId,
+          messages: history,
+          params: resolved.params,
+          stream: false,
+        },
+        { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal: controller.signal }
+      )
+
+      const assistant: Message = {
+        id: randomUUID(),
+        conversationId,
+        role: 'assistant',
+        content: result.text,
+        reasoning: result.reasoning,
+        status: 'complete',
+        providerId: resolved.provider.id,
         modelId: resolved.modelId,
-        messages: history,
-        params: resolved.params,
-        stream: false,
-      },
-      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
-    )
-
-    const assistant: Message = {
-      id: randomUUID(),
-      conversationId,
-      role: 'assistant',
-      content: result.text,
-      reasoning: result.reasoning,
-      status: 'complete',
-      providerId: resolved.provider.id,
-      modelId: resolved.modelId,
-      usage: result.usage,
-      seq: this.db.messages.nextSeq(conversationId),
-      createdAt: Date.now(),
+        usage: result.usage,
+        seq: this.db.messages.nextSeq(conversationId),
+        createdAt: Date.now(),
+      }
+      this.db.messages.insert(assistant)
+      this.db.conversations.touch(conversationId, Date.now())
+      this.broadcast(CHANNELS.conversationsChanged, {})
+      await runCompletionHooks(conversation, assistant)
+      return result.text
+    } finally {
+      this.streams.delete(streamId)
+      if (this.activeByConversation.get(conversation.id) === streamId) {
+        this.activeByConversation.delete(conversation.id)
+      }
     }
-    this.db.messages.insert(assistant)
-    this.db.conversations.touch(conversationId, Date.now())
-    this.broadcast(CHANNELS.conversationsChanged, {})
-    await runCompletionHooks(conversation, assistant)
-    return result.text
   }
 
   /**
@@ -1026,7 +1057,7 @@ export class ChatService {
         ? tools.registry
             .listEnabledDefinitions()
             .filter((d) => DELEGATE_TOOL_IDS.has(d.id))
-            .map((d) => ({ name: d.id, description: d.description, parameters: d.parameters }))
+            .map((d) => ({ name: d.name, description: d.description, parameters: d.parameters }))
         : []
 
       const messages: AdapterMessage[] = [
@@ -1092,17 +1123,6 @@ export class ChatService {
     adapterTools?: AdapterToolDef[]
   ): Promise<void> {
     const conversationId = conversation.id
-    // Optional context compaction before the first round: summarize older
-    // messages when the transcript approaches the model's context window. The
-    // pass mutates `conversation.summary*` in place and persists them; on any
-    // failure it is a no-op and the full history is used.
-    await this.maybeCompact(conversation, resolved, buildOpts.settings, controller.signal)
-    const history = this.buildHistory(
-      conversation,
-      buildOpts.settings,
-      buildOpts.promptOpts,
-      buildOpts.visionEnabled
-    )
     const emit = (event: StreamEvent): void => {
       const envelope: StreamEventEnvelope = { streamId, conversationId, event }
       try {
@@ -1151,6 +1171,20 @@ export class ChatService {
     }
 
     try {
+      // Optional context compaction before the first round: summarize older
+      // messages when the transcript approaches the model's context window. The
+      // pass mutates `conversation.summary*` in place and persists them; on any
+      // failure it is a no-op and the full history is used. This and buildHistory
+      // run INSIDE the try so a DB read error is caught and finalized (and the
+      // finally clears the stream slot) instead of leaving the conversation
+      // wedged as 'streaming' forever with an unhandled rejection.
+      await this.maybeCompact(conversation, resolved, buildOpts.settings, controller.signal)
+      const history = this.buildHistory(
+        conversation,
+        buildOpts.settings,
+        buildOpts.promptOpts,
+        buildOpts.visionEnabled
+      )
       const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
       const tools = this.options.tools
       const messages: AdapterMessage[] = [...history]
@@ -1279,19 +1313,21 @@ export class ChatService {
           messages.push({ role: 'tool', content: call.result ?? '', toolCallId: call.id })
         }
 
-        // A computer-use action leaves a screenshot; give it to a vision model
-        // as a synthetic user image (OpenAI rejects images in tool messages).
-        if (buildOpts.visionEnabled && this.options.browser) {
-          const shot = this.options.browser.consumePendingScreenshot()
-          if (shot) {
-            messages.push({
-              role: 'user',
-              content: [
-                { type: 'text', text: 'Screenshot after the computer action:' },
-                { type: 'image_url', image_url: { url: shot } },
-              ],
-            })
-          }
+        // A computer-use action leaves a screenshot on the shared browser
+        // session. ALWAYS consume it here (draining every round, vision or not)
+        // so a non-vision generation can never leave one parked for a later
+        // vision generation in another conversation to pick up. It is only
+        // injected as a synthetic user image when this model has vision
+        // (OpenAI rejects images in tool messages).
+        const shot = this.options.browser?.consumePendingScreenshot() ?? null
+        if (shot && buildOpts.visionEnabled) {
+          messages.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Screenshot after the computer action:' },
+              { type: 'image_url', image_url: { url: shot } },
+            ],
+          })
         }
 
         if (controller.signal.aborted) {

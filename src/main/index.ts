@@ -6,6 +6,7 @@
 
 import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { BrowserWindow, app, session, shell } from 'electron'
 import { CHANNELS } from '@shared/ipc'
 import { openDatabase, type AppDatabase } from './db/database'
@@ -86,6 +87,11 @@ async function cleanup(): Promise<void> {
   }
 }
 
+/** Absolute file path of the app's bundled renderer entry (production). */
+function rendererIndexPath(): string {
+  return join(__dirname, '../renderer/index.html')
+}
+
 function isAllowedNavigation(url: string): boolean {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {
@@ -95,7 +101,21 @@ function isAllowedNavigation(url: string): boolean {
       return false
     }
   }
-  return url.startsWith('file://')
+  // Production: ONLY the app's own bundled index.html may load. A bare
+  // `startsWith('file://')` allowed navigating to any local HTML (e.g. a
+  // dropped file), which would run in the privileged renderer with the
+  // window.uld preload attached and no effective CSP. Compare canonical paths.
+  try {
+    const target = new URL(url)
+    if (target.protocol !== 'file:') return false
+    const allowed = pathToFileURL(rendererIndexPath())
+    return (
+      decodeURIComponent(target.pathname).toLowerCase() ===
+      decodeURIComponent(allowed.pathname).toLowerCase()
+    )
+  } catch {
+    return false
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -146,7 +166,7 @@ function createWindow(): BrowserWindow {
   if (devUrl) {
     void win.loadURL(devUrl)
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'))
+    void win.loadFile(rendererIndexPath())
   }
   return win
 }

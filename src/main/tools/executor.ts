@@ -30,7 +30,7 @@ import type { Conversation, ToolApprovalRequest, ToolCallRecord, ToolDefinition 
 import type { CodeReadFileResult } from '@shared/ipc'
 import { redactKnownSecrets, redactSecrets } from '../providers/redact'
 import { TOOL_RESULT_MAX_CHARS } from './definitions'
-import { customToolHeaders } from './custom-tools'
+import { customToolHeaders, isCustomToolId } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
 import { runGitQuery } from './git'
@@ -141,11 +141,15 @@ export interface ToolExecuteContext {
   planMode?: boolean
 }
 
-/** Tools refused while plan mode is active (read-only investigation only). */
-const PLAN_MODE_BLOCKED_TOOL_IDS: ReadonlySet<string> = new Set([
+/** Built-in tools that mutate the project/machine/web, refused in plan mode. */
+const MUTATING_BUILTIN_TOOL_IDS: ReadonlySet<string> = new Set([
   'edit_file',
   'write_file',
   'run_shell_command',
+  // The browser/computer tools act on live pages (click/type/keypress), so
+  // they are not read-only investigation either.
+  'browser',
+  'computer',
 ])
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
@@ -265,6 +269,62 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp('^' + out + '$')
 }
 
+/**
+ * Conservative catastrophic-backtracking guard for model-supplied regexes.
+ *
+ * A regex runs synchronously on the main thread over every line of every
+ * scanned file; a pattern like `(\w+\s?)*;$` takes exponential time on a long
+ * non-matching line and freezes the whole app (Stop can't even be delivered).
+ * This build has no worker/RE2 to run the match with a timeout, so instead we
+ * refuse the classic ReDoS shape: an unbounded quantifier ('*' or '+') applied
+ * to a group whose body itself contains an unbounded quantifier (directly or
+ * nested). Rejecting a few exotic-but-safe patterns is an acceptable price for
+ * never freezing; the model is told to simplify.
+ */
+export function hasCatastrophicBacktracking(source: string): boolean {
+  const stack: Array<{ quantified: boolean }> = []
+  let escaped = false
+  let inClass = false
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (inClass) {
+      if (ch === ']') inClass = false
+      continue
+    }
+    if (ch === '[') {
+      inClass = true
+      continue
+    }
+    if (ch === '(') {
+      stack.push({ quantified: false })
+      continue
+    }
+    if (ch === '*' || ch === '+') {
+      if (stack.length > 0) stack[stack.length - 1].quantified = true
+      continue
+    }
+    if (ch === ')') {
+      const group = stack.pop()
+      const next = source[i + 1]
+      const groupIsQuantified = next === '*' || next === '+' || next === '{'
+      if (group?.quantified && groupIsQuantified) return true
+      // Propagate "contains an unbounded quantifier" to the parent group so a
+      // quantifier nested any number of levels deep is still caught.
+      if (group?.quantified && stack.length > 0) stack[stack.length - 1].quantified = true
+      continue
+    }
+  }
+  return false
+}
+
 /** Loose JSON-Schema check: object args + required keys present. */
 function findMissingRequired(
   parameters: Record<string, unknown>,
@@ -315,8 +375,12 @@ async function readBodyCapped(
     if (value) {
       chunks.push(value)
       total += value.byteLength
-      if (total >= maxBytes) {
-        truncated = total > maxBytes
+      // Only declare truncation once we've actually seen more than the cap.
+      // Breaking at `>= maxBytes` mis-reported a body that ends exactly on the
+      // boundary as complete when there was still more to read; keep reading
+      // until we strictly exceed it (the join below still caps the output).
+      if (total > maxBytes) {
+        truncated = true
         await reader.cancel().catch(() => undefined)
         break
       }
@@ -489,7 +553,7 @@ export class ToolExecutor {
       return `Error: missing required argument(s) for '${definition.name}': ${missing.join(', ')}.`
     }
 
-    if (ctx.planMode && PLAN_MODE_BLOCKED_TOOL_IDS.has(definition.id)) {
+    if (ctx.planMode && this.isMutatingTool(definition)) {
       return (
         'Plan mode is active: only read-only investigation is allowed. Present your plan to ' +
         "the user instead of calling '" + definition.name + "'; they can turn plan mode off to proceed."
@@ -511,6 +575,25 @@ export class ToolExecutor {
     }
 
     return this.runTool(definition, args, ctx)
+  }
+
+  /**
+   * Whether a tool may mutate state — used to refuse it in plan mode
+   * ("read-only investigation only"). Covers all three sources, not just the
+   * built-ins: a custom HTTP tool with a non-GET method, and any MCP tool
+   * (whose side effects we can't inspect, so treated conservatively as
+   * mutating) are refused too.
+   */
+  private isMutatingTool(definition: ToolDefinition): boolean {
+    if (MUTATING_BUILTIN_TOOL_IDS.has(definition.id)) return true
+    if (isMcpToolId(definition.id)) return true
+    if (isCustomToolId(definition.id)) {
+      const record = this.deps.registry.getCustomToolRecord(definition.id)
+      // GET is read-only by convention; POST/PUT/PATCH/DELETE may mutate. When
+      // the record is missing, err on the side of refusing.
+      return !record || record.method.toUpperCase() !== 'GET'
+    }
+    return false
   }
 
   private async runTool(
@@ -749,6 +832,9 @@ export class ToolExecutor {
 
     const patternSource = (getString(args, 'pattern') ?? '').trim()
     if (patternSource.length === 0) return "Error: 'pattern' must be a non-empty string."
+    if (hasCatastrophicBacktracking(patternSource)) {
+      return "Error: that pattern risks catastrophic backtracking (a repeated group that itself repeats, e.g. '(\\w+\\s?)*'). Simplify it — avoid nesting one unbounded quantifier inside another."
+    }
     let pattern: RegExp
     try {
       pattern = new RegExp(patternSource, args.ignoreCase === true ? 'i' : undefined)
@@ -939,9 +1025,12 @@ export class ToolExecutor {
     if (occurrences > 1 && !replaceAll) {
       return 'Error: old_string occurs ' + occurrences + " times in '" + relPath + "'. Provide a longer, unique old_string or set replace_all."
     }
-    const newContent = replaceAll
-      ? current.content.split(oldString).join(newString)
-      : current.content.replace(oldString, newString)
+    // split/join for BOTH paths: it treats new_string as a literal. String
+    // .replace() would interpret '$$', '$&', '$`' and "$'" in new_string as
+    // replacement patterns and silently corrupt the written file. (When
+    // !replaceAll, occurrences is exactly 1 here, so split/join replaces the
+    // single match.)
+    const newContent = current.content.split(oldString).join(newString)
 
     try {
       const change = await this.deps.codeChanges!.propose(gate.conversationId, relPath, 'edit', newContent)

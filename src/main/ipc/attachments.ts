@@ -173,6 +173,16 @@ export async function readAttachment(
 }
 
 /**
+ * True for an app-generated attachment storage key ('<uuid>.<ext>'). Anything
+ * with path separators, '..', drive letters or other characters is rejected so
+ * a stored key can never be used to read outside the attachments dir. Every
+ * on-disk read of a storageKey MUST gate on this (see chat-service imageDataUrl).
+ */
+export function isValidStorageKey(storageKey: string): boolean {
+  return /^[A-Za-z0-9-]+\.[A-Za-z0-9]+$/.test(storageKey)
+}
+
+/**
  * Reads a stored image by its storageKey and returns a data URL, or null when
  * the file is missing or escapes the attachments dir. Read-only.
  */
@@ -181,7 +191,7 @@ export async function readStoredImage(
   storageKey: string
 ): Promise<{ dataUrl: string } | null> {
   // storageKey is an app-generated '<uuid>.<ext>' — reject anything else.
-  if (!/^[A-Za-z0-9-]+\.[A-Za-z0-9]+$/.test(storageKey)) return null
+  if (!isValidStorageKey(storageKey)) return null
   const ext = extname(storageKey).slice(1).toLowerCase()
   const mimeType = MIME_BY_EXTENSION[ext] ?? 'application/octet-stream'
   if (!mimeType.startsWith('image/')) return null

@@ -13,7 +13,11 @@ import type { Conversation, ToolCallRecord } from '@shared/types'
 import { openDatabase, type AppDatabase } from '../../../src/main/db/database'
 import { CodeService } from '../../../src/main/code/code-service'
 import { createToolSystem, USER_DECLINED_RESULT } from '../../../src/main/tools'
-import { globToRegExp, parseDuckDuckGoHtml } from '../../../src/main/tools/executor'
+import {
+  globToRegExp,
+  hasCatastrophicBacktracking,
+  parseDuckDuckGoHtml,
+} from '../../../src/main/tools/executor'
 
 let dir: string
 let db: AppDatabase
@@ -110,6 +114,15 @@ describe('grep + glob tools', () => {
     expect(invalid).toMatch(/invalid regular expression/i)
   })
 
+  it('refuses catastrophic-backtracking patterns before running them', async () => {
+    const { executor } = system()
+    const evil = await executor.execute(call('grep', { pattern: '(\\w+\\s?)*;$' }), {
+      conversation: conv(),
+      approval: approveAll,
+    })
+    expect(evil).toMatch(/catastrophic backtracking/i)
+  })
+
   it('glob lists matching files and reports empty matches', async () => {
     const { executor } = system()
     const result = await executor.execute(call('glob', { pattern: 'src/**/*.test.ts' }), {
@@ -123,6 +136,24 @@ describe('grep + glob tools', () => {
       approval: approveAll,
     })
     expect(none).toMatch(/no files match/i)
+  })
+})
+
+describe('hasCatastrophicBacktracking', () => {
+  it('flags nested unbounded quantifiers (the ReDoS shape)', () => {
+    expect(hasCatastrophicBacktracking('(\\w+\\s?)*;$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(a+)+')).toBe(true)
+    expect(hasCatastrophicBacktracking('((a+))+')).toBe(true) // nested one level deeper
+    expect(hasCatastrophicBacktracking('(a*)*')).toBe(true)
+  })
+
+  it('allows ordinary patterns', () => {
+    expect(hasCatastrophicBacktracking('needle\\s+is')).toBe(false)
+    expect(hasCatastrophicBacktracking('function\\s+\\w+')).toBe(false)
+    expect(hasCatastrophicBacktracking('(abc)+')).toBe(false) // quantified group, no inner quantifier
+    expect(hasCatastrophicBacktracking('(a|b)*')).toBe(false)
+    expect(hasCatastrophicBacktracking('\\w+')).toBe(false)
+    expect(hasCatastrophicBacktracking('[a+]+')).toBe(false) // '+' inside a char class is literal
   })
 })
 
@@ -218,6 +249,19 @@ describe('edit_file / write_file — approval-gated writes', () => {
     )
     expect(missing).toMatch(/was not found/i)
     expect(readFileSync(join(projectDir, 'dup.txt'), 'utf8')).toBe('x\nx\n')
+  })
+
+  it('writes new_string literally, without $-pattern substitution', async () => {
+    // '$&', '$$' and "$'" are String.replace() substitution patterns; the file
+    // must receive them verbatim, not the matched text / a collapsed '$'.
+    const { executor } = system()
+    const tricky = "const price = '$$5 for $& and back-to-back $`$''"
+    const result = await executor.execute(
+      call('edit_file', { path: 'src/beta.ts', old_string: 'value = 42', new_string: tricky }),
+      { conversation: conv(), approval: approveAll }
+    )
+    expect(result).toMatch(/Edited src\/beta\.ts/)
+    expect(readFileSync(join(projectDir, 'src', 'beta.ts'), 'utf8')).toContain(tricky)
   })
 
   it('a declined approval writes nothing', async () => {

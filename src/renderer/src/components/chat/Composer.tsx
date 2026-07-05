@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { Attachment } from '@shared/types'
-import { UNKNOWN_MODEL_CAPS, findCatalogModel } from '@shared/catalog'
+import { UNKNOWN_MODEL_CAPS, resolveModelInfo } from '@shared/catalog'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
@@ -71,8 +71,13 @@ export default function Composer(): ReactElement {
   })()
 
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
+  // resolveModelInfo is preset-aware: for the 120+ preset-backed
+  // 'openai-compatible' providers (empty family knownModels) it reads the
+  // preset catalog, so vision-capable preset models are recognized. The
+  // family-only findCatalogModel would return undefined and wrongly block
+  // image attachments for them.
   const visionSupported = effectiveProvider
-    ? (findCatalogModel(effectiveProvider.type, effectiveModelId)?.capabilities.vision ??
+    ? (resolveModelInfo(effectiveProvider, effectiveModelId)?.capabilities.vision ??
       UNKNOWN_MODEL_CAPS.vision)
     : false
 

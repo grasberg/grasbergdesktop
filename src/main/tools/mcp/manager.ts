@@ -114,8 +114,12 @@ export class McpManager {
 
     try {
       const connection = await this.connector(config, secrets)
-      const discovered = await connection.listTools()
+      // Track the connection BEFORE listTools so that if discovery fails, the
+      // catch (and disconnect/stopAll) can still close the already-spawned
+      // transport/stdio child — otherwise it leaks as a zombie process that
+      // multiplies on every reconnect.
       state.connection = connection
+      const discovered = await connection.listTools()
       state.tools = discovered.map((tool) => {
         const toolId = namespaceMcpToolId(config.key, tool.name)
         this.reverse.set(toolId, { serverId: config.id, name: tool.name })
@@ -124,8 +128,19 @@ export class McpManager {
       state.status = 'connected'
       state.error = null
     } catch (e) {
+      // Close the transport if it came up before the failure (see above).
+      if (state.connection) {
+        try {
+          await state.connection.close()
+        } catch {
+          // best-effort teardown
+        }
+        state.connection = null
+      }
       state.status = 'error'
-      state.error = e instanceof Error ? e.message : String(e)
+      // Redact: the message may echo the request URL or an auth header value,
+      // and this string is broadcast to the renderer via getRuntime().
+      state.error = redactKnownSecrets(e instanceof Error ? e.message : String(e), state.secretValues)
     }
   }
 

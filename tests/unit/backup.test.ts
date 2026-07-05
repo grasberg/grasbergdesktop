@@ -120,6 +120,35 @@ describe('applyBackup', () => {
     expect(target.settings.get().fontSize).toBe('medium') // untouched default
   })
 
+  it('never applies security-sensitive settings from an imported file', () => {
+    // A tampered backup must not be able to enable shell/browser execution,
+    // wire up an exfiltration webhook, or pre-authorize a Telegram sender.
+    const summary = applyBackup(target, {
+      format: BACKUP_FORMAT,
+      version: 1,
+      settings: {
+        shellExecutionEnabled: true,
+        browserToolsEnabled: true,
+        outboundWebhookUrl: 'https://attacker.example/hook',
+        telegramBridgeEnabled: true,
+        telegramBridgeConversationId: 'c1',
+        telegramBridgeAllowedChatId: 12345,
+        fontSize: 'large', // a benign key still applies
+      },
+    })
+
+    const applied = target.settings.get()
+    expect(applied.shellExecutionEnabled).toBe(false)
+    expect(applied.browserToolsEnabled).toBe(false)
+    expect(applied.outboundWebhookUrl).toBeNull()
+    expect(applied.telegramBridgeEnabled).toBe(false)
+    expect(applied.telegramBridgeConversationId).toBeNull()
+    expect(applied.telegramBridgeAllowedChatId).toBeNull()
+    // The one benign setting was applied; the six excluded ones were not.
+    expect(applied.fontSize).toBe('large')
+    expect(summary.settingsApplied).toBe(1)
+  })
+
   it('merges into existing data by title/name instead of duplicating', () => {
     target.memories.create({ title: 'lang', content: 'old value' })
     const existing = target.skills.create({ name: 'triage', content: 'old steps' })

@@ -23,7 +23,7 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
-import { PROVIDER_TYPES } from '@shared/catalog'
+import { CHATGPT_OAUTH_DEFAULT_MODEL, PROVIDER_TYPES } from '@shared/catalog'
 import type {
   AdapterChatRequest,
   AdapterChatResult,
@@ -313,14 +313,21 @@ export class OpenAICodexAdapter implements ProviderAdapter {
   }
 
   async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    return PROVIDER_TYPES.openai.knownModels
+    // The Codex backend accepts only Codex-class models, NOT the platform-API
+    // catalog (gpt-4o etc.) that PROVIDER_TYPES.openai.knownModels is headed by
+    // — offering those would make every generation fail. Surface the
+    // ChatGPT-OAuth default; the user can still type any other model id.
+    const known = PROVIDER_TYPES.openai.knownModels.find((m) => m.id === CHATGPT_OAUTH_DEFAULT_MODEL)
+    return known ? [known] : []
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
     const started = Date.now()
     try {
       const probe: AdapterChatRequest = {
-        modelId: PROVIDER_TYPES.openai.defaultModelId,
+        // Probe with a Codex-valid model — the family default (gpt-4o) is
+        // rejected by this backend, which would fail Test for a valid session.
+        modelId: CHATGPT_OAUTH_DEFAULT_MODEL,
         messages: [{ role: 'user', content: 'ping' }],
         params: { maxTokens: 1 },
         stream: false,

@@ -349,6 +349,13 @@ export interface AppSettings {
   telegramBridgeEnabled: boolean
   /** Conversation the Telegram bridge routes messages to. */
   telegramBridgeConversationId: string | null
+  /**
+   * The single Telegram chat id authorized to use the bridge. Null means "not
+   * yet paired": the first chat that messages the bot is pinned here (trust on
+   * first use) and every other sender is refused thereafter. Reset to null when
+   * a new bot token is set.
+   */
+  telegramBridgeAllowedChatId: number | null
   /** Generic outbound webhook posted on each assistant completion (opt-in). */
   outboundWebhookUrl: string | null
 }
@@ -371,6 +378,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   browserToolsEnabled: false,
   telegramBridgeEnabled: false,
   telegramBridgeConversationId: null,
+  telegramBridgeAllowedChatId: null,
   outboundWebhookUrl: null,
 }
 
