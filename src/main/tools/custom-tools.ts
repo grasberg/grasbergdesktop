@@ -19,7 +19,6 @@ import type {
 export const CUSTOM_TOOL_ID_PREFIX = 'custom:'
 
 export const CUSTOM_TOOL_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
-export type CustomToolMethod = (typeof CUSTOM_TOOL_METHODS)[number]
 
 /** Function names must be valid OpenAI tool names. */
 const NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
@@ -125,17 +124,21 @@ export function toCustomToolUpdateInput(patch: CustomToolPatch): CustomToolUpdat
   return out
 }
 
-/** Stored record -> LLM-facing definition (enabled flag applied by the registry). */
-export function customToolToDefinition(record: CustomToolRecord, enabled: boolean): ToolDefinition {
-  let parameters: Record<string, unknown> = { type: 'object', properties: {} }
+/** Parses a stored params-schema JSON ("no arguments" fallback when corrupt). */
+export function parseParamsSchema(json: string): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(record.paramsSchemaJson)
+    const parsed: unknown = JSON.parse(json)
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      parameters = parsed as Record<string, unknown>
+      return parsed as Record<string, unknown>
     }
   } catch {
     // corrupt schema — fall back to "no arguments"
   }
+  return { type: 'object', properties: {} }
+}
+
+/** Stored record -> LLM-facing definition (enabled flag applied by the registry). */
+export function customToolToDefinition(record: CustomToolRecord, enabled: boolean): ToolDefinition {
   return {
     id: customToolDefinitionId(record.id),
     name: record.name,
@@ -143,11 +146,13 @@ export function customToolToDefinition(record: CustomToolRecord, enabled: boolea
       record.description.length > 0
         ? record.description
         : `Custom HTTP tool calling ${record.method} ${record.baseUrl}.`,
-    parameters,
+    parameters: parseParamsSchema(record.paramsSchemaJson),
     risk: 'sensitive',
     builtin: false,
     enabled,
     source: 'custom',
+    // GET is read-only by convention; POST/PUT/PATCH/DELETE may mutate.
+    mutating: record.method.toUpperCase() !== 'GET',
   }
 }
 

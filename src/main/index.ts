@@ -16,11 +16,7 @@ import { ApprovalBroker } from './services/approval-broker'
 import { QuestionBroker } from './services/question-broker'
 import { seedBundledSkills } from './services/bundled-skills'
 import { registerCompletionHook } from './services/completion-hooks'
-import {
-  extractDocument,
-  extractHtmlArtifacts,
-  extractWorkspaceItems,
-} from './services/mode-artifacts'
+import { createArtifactCompletionHook } from './services/artifact-hooks'
 import { createMemoryCompletionHook } from './services/memory-hook'
 import { CodeService } from './code/code-service'
 import { createToolSystem, customToolDbId } from './tools'
@@ -280,11 +276,6 @@ function bootstrap(): void {
     getAccessToken: (providerId) => oauth.getAccessToken(providerId),
   })
 
-  // Mode side effects after each completed assistant message. Code mode
-  // registers proposed file changes (nothing is written to disk here); the
-  // renderer refreshes its change list when the stream 'done' event arrives,
-  // so no extra push channel is needed. Cowork mode saves proposed workspace
-  // items with origin 'assistant'.
   const imBridge = new ImBridgeManager({
     db: database,
     keystore,
@@ -296,41 +287,9 @@ function bootstrap(): void {
   // assistant message (gated on settings.memoryEnabled inside the hook).
   registerCompletionHook(createMemoryCompletionHook(database))
 
-  registerCompletionHook((conversation, message) => {
-    if (message.role !== 'assistant' || message.content.trim().length === 0) return
-    // Generic outbound webhook (best-effort) fires on every assistant message.
-    void imBridge.onCompletion(conversation, message)
-    if (conversation.mode === 'code' && conversation.projectId) {
-      codeService.registerProposedChanges(conversation.id, message.content)
-      return
-    }
-    if (conversation.mode === 'write') {
-      const doc = extractDocument(message.content)
-      if (doc) database.documents.upsertDoc(conversation.id, doc.title, doc.content)
-      return
-    }
-    if (conversation.mode === 'design') {
-      for (const html of extractHtmlArtifacts(message.content)) {
-        database.documents.addHtml(conversation.id, html.title, html.content)
-      }
-      return
-    }
-    if (conversation.mode === 'cowork' && conversation.workspaceId) {
-      for (const item of extractWorkspaceItems(message.content)) {
-        // Upsert by kind+title: re-emitting a block with the same kind and
-        // title updates that item (how assistants keep plans/checklists
-        // current across turns — see COWORK_SECTION in prompts.ts).
-        database.workspaces.itemUpsertByKindTitle({
-          workspaceId: conversation.workspaceId,
-          kind: item.kind,
-          title: item.title,
-          content: item.content,
-          ...(item.status !== undefined ? { status: item.status } : {}),
-          origin: 'assistant',
-        })
-      }
-    }
-  })
+  // Per-mode artifact side effects (proposed code changes, documents, HTML
+  // artifacts, workspace items) plus the generic outbound webhook.
+  registerCompletionHook(createArtifactCompletionHook(database, codeService, imBridge))
 
   registerIpc({
     db: database,

@@ -1,6 +1,6 @@
-import { toNormalized } from '@/api/uld'
+import { modKeyLabel } from '@/lib/platform'
 import { useConversationsStore } from '@/stores/conversations'
-import { useUiStore } from '@/stores/ui'
+import { toastError } from '@/stores/ui'
 
 export default function EmptyState(): React.JSX.Element {
   const newChat = (): void => {
@@ -8,11 +8,9 @@ export default function EmptyState(): React.JSX.Element {
       .getState()
       .create('chat')
       .catch((e: unknown) => {
-        useUiStore.getState().toast(`Could not create chat: ${toNormalized(e).message}`, 'error')
+        toastError('Could not create chat', e)
       })
   }
-
-  const mod = navigator.platform.toLowerCase().includes('mac') ? 'Cmd' : 'Ctrl'
 
   return (
     <div className="empty-state">
@@ -37,7 +35,7 @@ export default function EmptyState(): React.JSX.Element {
         Start a new chat
       </button>
       <p className="empty-hint">
-        Tip: press <span className="kbd">{mod}</span>+<span className="kbd">K</span> to open the
+        Tip: press <span className="kbd">{modKeyLabel}</span>+<span className="kbd">K</span> to open the
         command palette.
       </p>
     </div>

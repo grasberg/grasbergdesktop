@@ -6,9 +6,8 @@
 
 import { useEffect, useState } from 'react'
 import type { CodeProject, ConversationMode, Workspace } from '@shared/types'
-import { toNormalized } from '@/api/uld'
 import { useConversationsStore } from '@/stores/conversations'
-import { useUiStore } from '@/stores/ui'
+import { toastError, useUiStore } from '@/stores/ui'
 import './projects.css'
 
 function formatDate(ts: number): string {
@@ -44,9 +43,7 @@ export default function ProjectsView(): React.JSX.Element {
       .create(mode)
       .then(() => openProjects(false))
       .catch((e: unknown) => {
-        useUiStore
-          .getState()
-          .toast(`Could not create conversation: ${toNormalized(e).message}`, 'error')
+        toastError('Could not create conversation', e)
       })
   }
 

@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Memory, MemoryInput, MemoryPatch } from '@shared/types'
 import type { SqliteDriver } from '../driver'
+import { updateById } from './util'
 
 export interface MemoriesRepository {
   /** Ordered by updated_at DESC (most recently touched first). */
@@ -82,21 +83,13 @@ export function createMemoriesRepository(driver: SqliteDriver): MemoriesReposito
     create,
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: (string | number)[] = []
-      if (patch.title !== undefined) {
-        sets.push('title = ?')
-        params.push(patch.title)
-      }
-      if (patch.content !== undefined) {
-        sets.push('content = ?')
-        params.push(patch.content)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'memories',
+        id,
+        { title: patch.title, content: patch.content },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

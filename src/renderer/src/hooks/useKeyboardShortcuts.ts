@@ -1,8 +1,14 @@
 import { useEffect } from 'react'
-import { toNormalized } from '@/api/uld'
+import { newTaskInActiveMode } from '@/lib/new-conversation'
 import { useChatStore } from '@/stores/chat'
-import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
+
+/**
+ * The Ctrl/Cmd single-key combos owned by the global handler below
+ * (lower-cased e.key values). App.tsx swallows exactly these while
+ * onboarding is showing.
+ */
+export const GLOBAL_SHORTCUT_KEYS: readonly string[] = ['n', 'k', ',']
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
@@ -29,18 +35,7 @@ export function useKeyboardShortcuts(): void {
         const key = e.key.toLowerCase()
         if (key === 'n') {
           e.preventDefault()
-          const ui = useUiStore.getState()
-          ui.openWorkflows(false)
-          ui.openProjects(false)
-          const filter = useConversationsStore.getState().modeFilter
-          useConversationsStore
-            .getState()
-            .create(filter === 'all' ? 'chat' : filter)
-            .catch((err: unknown) => {
-              useUiStore
-                .getState()
-                .toast(`Could not create conversation: ${toNormalized(err).message}`, 'error')
-            })
+          newTaskInActiveMode()
           return
         }
         if (key === 'k') {

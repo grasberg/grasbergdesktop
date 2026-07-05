@@ -4,9 +4,9 @@
  * approval itself happens in ToolApprovalDialog.
  */
 
-import { type ReactElement } from 'react'
+import { memo, useMemo, type ReactElement } from 'react'
 import type { ToolCallRecord } from '@shared/types'
-import { prettyJson } from '@/components/ToolApprovalDialog'
+import { prettyJson } from '@/lib/format'
 import './toolcall.css'
 
 const STATUS_LABEL: Record<ToolCallRecord['status'], string> = {
@@ -31,8 +31,11 @@ function ToolIcon(): ReactElement {
   )
 }
 
-export default function ToolCallCard({ toolCall }: { toolCall: ToolCallRecord }): ReactElement {
+function ToolCallCard({ toolCall }: { toolCall: ToolCallRecord }): ReactElement {
   const hasArgs = toolCall.arguments.trim().length > 0 && toolCall.arguments.trim() !== '{}'
+  // The chat store replaces ToolCallRecords immutably, so this only recomputes
+  // when the arguments actually change (not per streaming text delta).
+  const args = useMemo(() => prettyJson(toolCall.arguments), [toolCall.arguments])
   return (
     <div className="tool-call-card" data-status={toolCall.status}>
       <div className="tool-call-head">
@@ -49,7 +52,7 @@ export default function ToolCallCard({ toolCall }: { toolCall: ToolCallRecord })
       {hasArgs ? (
         <details className="tool-call-details">
           <summary className="tool-call-summary">Arguments</summary>
-          <pre className="tool-call-pre tool-call-args mono">{prettyJson(toolCall.arguments)}</pre>
+          <pre className="tool-call-pre tool-call-args mono">{args}</pre>
         </details>
       ) : null}
       {toolCall.result ? (
@@ -61,3 +64,5 @@ export default function ToolCallCard({ toolCall }: { toolCall: ToolCallRecord })
     </div>
   )
 }
+
+export default memo(ToolCallCard)

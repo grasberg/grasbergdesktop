@@ -8,9 +8,11 @@
 
 import { useEffect, useState, type ReactElement } from 'react'
 import type { Skill } from '@shared/types'
+import { ConfirmButton, Switch } from '@/components/common/controls'
+import { useAsyncAction } from '@/hooks/useAsyncAction'
+import { useEditorState } from '@/hooks/useEditorState'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
-import { ConfirmButton, Switch, errorMessage } from './ProvidersTab'
 import { toNormalized, unwrap } from '@/api/uld'
 import './settings.css'
 
@@ -21,7 +23,7 @@ function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => v
   const [name, setName] = useState(editing?.name ?? '')
   const [description, setDescription] = useState(editing?.description ?? '')
   const [content, setContent] = useState(editing?.content ?? '')
-  const [busy, setBusy] = useState(false)
+  const [busy, run] = useAsyncAction()
 
   const submit = async (): Promise<void> => {
     if (name.trim().length === 0) {
@@ -32,19 +34,14 @@ function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => v
       toast('Add the skill instructions.', 'error')
       return
     }
-    setBusy(true)
-    try {
+    await run(async () => {
       if (editing) {
         await update(editing.id, { name, description, content })
       } else {
         await create({ name, description, content })
       }
       onDone()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   return (
@@ -100,19 +97,14 @@ export default function SkillsTab(): ReactElement {
   const remove = useSkillsStore((s) => s.remove)
   const importFolder = useSkillsStore((s) => s.importFolder)
   const toast = useUiStore((s) => s.toast)
+  const [, run] = useAsyncAction()
 
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<Skill | null>(null)
+  const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<Skill>()
   const [importing, setImporting] = useState(false)
 
   useEffect(() => {
     void load()
   }, [load])
-
-  const closeForm = (): void => {
-    setFormOpen(false)
-    setEditing(null)
-  }
 
   const runImport = async (): Promise<void> => {
     setImporting(true)
@@ -150,14 +142,7 @@ export default function SkillsTab(): ReactElement {
             {importing ? 'Importing…' : 'Import folder…'}
           </button>
           {!formOpen ? (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                setEditing(null)
-                setFormOpen(true)
-              }}
-            >
+            <button type="button" className="btn" onClick={openAdd}>
               + New skill
             </button>
           ) : null}
@@ -188,33 +173,16 @@ export default function SkillsTab(): ReactElement {
               <div className="prompt-item-actions">
                 <Switch
                   checked={skill.enabled}
-                  onChange={(v) => {
-                    void update(skill.id, { enabled: v }).catch((e: unknown) =>
-                      toast(errorMessage(e), 'error')
-                    )
-                  }}
+                  onChange={(v) => void run(() => update(skill.id, { enabled: v }))}
                   label={`Enable ${skill.name}`}
                 />
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => {
-                    setEditing(skill)
-                    setFormOpen(true)
-                  }}
-                >
+                <button type="button" className="btn btn-ghost" onClick={() => openEdit(skill)}>
                   Edit
                 </button>
                 <ConfirmButton
                   label="Delete"
                   prompt="Delete this skill?"
-                  onConfirm={async () => {
-                    try {
-                      await remove(skill.id)
-                    } catch (e) {
-                      toast(errorMessage(e), 'error')
-                    }
-                  }}
+                  onConfirm={() => run(() => remove(skill.id))}
                 />
               </div>
             </li>

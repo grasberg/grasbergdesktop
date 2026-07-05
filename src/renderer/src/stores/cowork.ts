@@ -7,9 +7,9 @@
 import { create } from 'zustand'
 import type { ConvUpdateRequest } from '@shared/ipc'
 import type { Conversation, Workspace, WorkspaceItem, WorkspaceItemKind } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
+import { unwrap } from '@/api/uld'
 import { useChatStore } from './chat'
-import { useUiStore } from './ui'
+import { toastError } from './ui'
 
 /**
  * The conversation-update patch does not (yet) carry workspaceId in the shared
@@ -56,10 +56,6 @@ let ensureToken = 0
 /** In-flight ensure per conversation, so StrictMode double-invokes and rapid
  * re-renders never create two workspaces for the same conversation. */
 const ensureInFlight = new Map<string, Promise<void>>()
-
-function toastError(e: unknown, prefix: string): void {
-  useUiStore.getState().toast(`${prefix}: ${toNormalized(e).message}`, 'error')
-}
 
 const CHECKBOX_UNCHECKED = /^(\s*[-*]\s*)\[ \]/
 const CHECKBOX_CHECKED = /^(\s*[-*]\s*)\[[xX]\]/
@@ -108,7 +104,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
           set({ workspace, items, loading: false })
         } catch (e) {
           if (token === ensureToken) set({ workspace: null, items: [], loading: false })
-          toastError(e, 'Could not open the workspace')
+          toastError('Could not open the workspace', e)
         }
       })()
 
@@ -127,7 +123,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         const items = await unwrap(window.uld.workspaces.itemsList(workspace.id))
         if (get().workspace?.id === workspace.id) set({ items })
       } catch (e) {
-        toastError(e, 'Could not load workspace items')
+        toastError('Could not load workspace items', e)
       }
     },
 
@@ -140,7 +136,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         )
         if (get().workspace?.id === workspace.id) putItem(item)
       } catch (e) {
-        toastError(e, 'Could not add the item')
+        toastError('Could not add the item', e)
       }
     },
 
@@ -149,7 +145,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         const item = await unwrap(window.uld.workspaces.itemUpdate(id, patch))
         putItem(item)
       } catch (e) {
-        toastError(e, 'Could not update the item')
+        toastError('Could not update the item', e)
       }
     },
 
@@ -158,7 +154,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         await unwrap(window.uld.workspaces.itemDelete(id))
         set((s) => ({ items: s.items.filter((x) => x.id !== id) }))
       } catch (e) {
-        toastError(e, 'Could not delete the item')
+        toastError('Could not delete the item', e)
       }
     },
 
@@ -191,7 +187,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         )
         if (get().workspace?.id === workspace.id) set({ workspace: updated })
       } catch (e) {
-        toastError(e, 'Could not save the goal')
+        toastError('Could not save the goal', e)
       }
     },
 
@@ -204,7 +200,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         const updated = await unwrap(window.uld.workspaces.update(workspace.id, { name: trimmed }))
         if (get().workspace?.id === workspace.id) set({ workspace: updated })
       } catch (e) {
-        toastError(e, 'Could not rename the workspace')
+        toastError('Could not rename the workspace', e)
       }
     },
 
@@ -218,7 +214,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         ])
         if (get().workspace?.id === workspace.id) set({ workspace: fresh, items })
       } catch (e) {
-        toastError(e, 'Could not refresh the workspace')
+        toastError('Could not refresh the workspace', e)
       }
     },
   }

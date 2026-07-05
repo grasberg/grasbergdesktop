@@ -23,7 +23,7 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
-import { CHATGPT_OAUTH_DEFAULT_MODEL, PROVIDER_TYPES } from '@shared/catalog'
+import { CHATGPT_OAUTH_DEFAULT_MODEL, CHATGPT_OAUTH_MODEL_IDS, PROVIDER_TYPES } from '@shared/catalog'
 import type {
   AdapterChatRequest,
   AdapterChatResult,
@@ -34,12 +34,14 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError, normalizeHttpError, toNormalizedError, toProviderError } from './errors'
+import { ProviderError } from './errors'
+import { checkedFetch, requireStreamBody } from './http'
+import { collectStream, probeConnection } from './native'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
 /** The ChatGPT backend Codex endpoint (fixed; not the provider's base URL). */
-export const CHATGPT_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
+const CHATGPT_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
 
 /**
  * Base instructions. OpenAI's backend inspects the request for a Codex-like
@@ -48,8 +50,6 @@ export const CHATGPT_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/resp
  */
 const BASE_INSTRUCTIONS =
   'You are a coding and general-purpose assistant operating through the Grasberg Desktop client.'
-
-type FinishReason = AdapterChatResult['finishReason']
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
@@ -229,41 +229,23 @@ export class OpenAICodexAdapter implements ProviderAdapter {
     return ctx.accountId ? [ctx.apiKey, ctx.accountId] : [ctx.apiKey]
   }
 
-  private async post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
-    const fetchImpl = ctx.fetchImpl ?? globalThis.fetch
-    let res: Response
-    try {
-      res = await fetchImpl(CHATGPT_RESPONSES_URL, {
-        method: 'POST',
-        headers: this.buildHeaders(ctx),
-        body: JSON.stringify(buildResponsesBody(req, stream)),
-        signal: ctx.signal,
-      })
-    } catch (e) {
-      throw toProviderError(e, this.type, this.secrets(ctx))
-    }
-    if (!res.ok) {
-      let bodyText = ''
-      try {
-        bodyText = await res.text()
-      } catch {
-        // normalize from status alone
-      }
-      throw normalizeHttpError(res.status, bodyText, this.type, undefined, this.secrets(ctx))
-    }
-    return res
+  private post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
+    return checkedFetch(CHATGPT_RESPONSES_URL, {
+      method: 'POST',
+      headers: this.buildHeaders(ctx),
+      body: JSON.stringify(buildResponsesBody(req, stream)),
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: this.secrets(ctx),
+      fetchImpl: ctx.fetchImpl,
+    })
   }
 
   async *chatStream(req: AdapterChatRequest, ctx: AdapterContext): AsyncGenerator<AdapterStreamEvent> {
     const res = await withRetry(() => this.post(req, ctx, true), { signal: ctx.signal })
-    if (!res.body) {
-      throw new ProviderError('server', 'ChatGPT returned an empty streaming response.', {
-        retryable: false,
-        providerType: this.type,
-      })
-    }
+    const body = requireStreamBody(res, 'ChatGPT', this.type)
     let sawToolCall = false
-    for await (const payload of parseSSE(res.body, ctx.signal)) {
+    for await (const payload of parseSSE(body, ctx.signal)) {
       let json: unknown
       try {
         json = JSON.parse(payload)
@@ -291,52 +273,25 @@ export class OpenAICodexAdapter implements ProviderAdapter {
   async chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult> {
     // The Codex backend is stream-first; accumulate the stream for the
     // non-streaming callers (e.g. the delegate sub-agent).
-    let text = ''
-    let reasoning = ''
-    const toolCalls: ToolCallRecord[] = []
-    let usage: TokenUsage | undefined
-    let finishReason: FinishReason = 'stop'
-    for await (const ev of this.chatStream({ ...req, stream: false }, ctx)) {
-      if (ev.type === 'text') text += ev.text
-      else if (ev.type === 'reasoning') reasoning += ev.text
-      else if (ev.type === 'tool_call') toolCalls.push(ev.toolCall)
-      else if (ev.type === 'usage') usage = ev.usage
-      else if (ev.type === 'finish') finishReason = ev.reason
-    }
-    return {
-      text,
-      reasoning: reasoning || undefined,
-      toolCalls,
-      usage,
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
-    }
+    return collectStream(this.chatStream({ ...req, stream: false }, ctx))
   }
 
   async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    // The Codex backend accepts only Codex-class models, NOT the platform-API
-    // catalog (gpt-4o etc.) that PROVIDER_TYPES.openai.knownModels is headed by
-    // — offering those would make every generation fail. Surface the
-    // ChatGPT-OAuth default; the user can still type any other model id.
-    const known = PROVIDER_TYPES.openai.knownModels.find((m) => m.id === CHATGPT_OAUTH_DEFAULT_MODEL)
-    return known ? [known] : []
+    // Which models this backend accepts is catalog data (CHATGPT_OAUTH_MODEL_IDS)
+    // — offering the rest of the platform catalog (gpt-4o etc.) would make
+    // every generation fail. The user can still type any other model id.
+    return PROVIDER_TYPES.openai.knownModels.filter((m) => CHATGPT_OAUTH_MODEL_IDS.includes(m.id))
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
-    const started = Date.now()
-    try {
-      const probe: AdapterChatRequest = {
-        // Probe with a Codex-valid model — the family default (gpt-4o) is
-        // rejected by this backend, which would fail Test for a valid session.
-        modelId: CHATGPT_OAUTH_DEFAULT_MODEL,
-        messages: [{ role: 'user', content: 'ping' }],
-        params: { maxTokens: 1 },
-        stream: false,
-      }
-      // A single non-streaming exchange is enough to validate the token.
-      await this.chat(probe, ctx)
-      return { ok: true, message: 'Signed in to ChatGPT (experimental).', latencyMs: Date.now() - started }
-    } catch (e) {
-      return { ok: false, message: toNormalizedError(e, this.type, this.secrets(ctx)).message }
-    }
+    // A single non-streaming exchange is enough to validate the token. Probe
+    // with a Codex-valid model — the family default (gpt-4o) is rejected by
+    // this backend, which would fail Test for a valid session.
+    return probeConnection((req) => this.chat(req, ctx), {
+      modelId: CHATGPT_OAUTH_DEFAULT_MODEL,
+      providerType: this.type,
+      secrets: this.secrets(ctx),
+      successMessage: 'Signed in to ChatGPT (experimental).',
+    })
   }
 }

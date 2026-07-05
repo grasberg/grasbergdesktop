@@ -260,7 +260,6 @@ describe('project-file tools — root confinement', () => {
     const readFile = vi.fn()
     const codeService: ToolCodeService = {
       readFile: readFile as unknown as ToolCodeService['readFile'],
-      fileTree: vi.fn(),
     }
     const { executor } = createToolSystem(db, codeService)
 
@@ -288,7 +287,7 @@ describe('project-file tools — root confinement', () => {
       truncated: false,
       sizeBytes: 17,
     }))
-    const { executor } = createToolSystem(db, { readFile, fileTree: vi.fn() })
+    const { executor } = createToolSystem(db, { readFile })
     const result = await executor.execute(call('read_file', { path: 'src/beta.ts' }), {
       conversation: conv(true),
       approval: approveAll,

@@ -14,7 +14,8 @@ import type {
   ProviderConfigPatch,
   ProviderType,
 } from '@shared/types'
-import type { SqliteDriver, SqlValue } from '../driver'
+import type { SqliteDriver } from '../driver'
+import { updateById } from './util'
 
 /** Caller resolves id/baseUrl/defaultModelId (catalog defaults) before insert. */
 export type ProviderCreateInput = ProviderConfigInput & {
@@ -137,29 +138,18 @@ export function createProvidersRepository(driver: SqliteDriver): ProvidersReposi
     },
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.label !== undefined) {
-        sets.push('label = ?')
-        params.push(patch.label)
-      }
-      if (patch.baseUrl !== undefined) {
-        sets.push('base_url = ?')
-        params.push(patch.baseUrl)
-      }
-      if (patch.defaultModelId !== undefined) {
-        sets.push('default_model_id = ?')
-        params.push(patch.defaultModelId)
-      }
-      if (patch.enabled !== undefined) {
-        sets.push('enabled = ?')
-        params.push(patch.enabled ? 1 : 0)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE providers SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'providers',
+        id,
+        {
+          label: patch.label,
+          base_url: patch.baseUrl,
+          default_model_id: patch.defaultModelId,
+          enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+        },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

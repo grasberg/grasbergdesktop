@@ -1,15 +1,8 @@
-import {
-  isValidElement,
-  memo,
-  useEffect,
-  useRef,
-  useState,
-  type ReactElement,
-  type ReactNode,
-} from 'react'
+import { isValidElement, memo, type ReactElement, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { useCopied } from '@/hooks/useCopied'
 import './chat.css'
 
 interface MarkdownProps {
@@ -25,20 +18,6 @@ function extractText(node: ReactNode): string {
     return extractText((node.props as { children?: ReactNode }).children)
   }
   return ''
-}
-
-function useCopied(): [boolean, (text: string) => void] {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<number | undefined>(undefined)
-  useEffect(() => () => window.clearTimeout(timer.current), [])
-  const copy = (text: string): void => {
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      window.clearTimeout(timer.current)
-      timer.current = window.setTimeout(() => setCopied(false), 1500)
-    })
-  }
-  return [copied, copy]
 }
 
 /** Fenced code block with a header bar: language label + copy button. */

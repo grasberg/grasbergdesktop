@@ -5,11 +5,14 @@
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { AppSettings, Memory } from '@shared/types'
+import type { Memory } from '@shared/types'
+import { ConfirmButton, Switch } from '@/components/common/controls'
+import { useAsyncAction } from '@/hooks/useAsyncAction'
+import { useEditorState } from '@/hooks/useEditorState'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useMemoriesStore } from '@/stores/memories'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
-import { ConfirmButton, Switch, errorMessage } from './ProvidersTab'
 import './settings.css'
 
 function MemoryForm({
@@ -24,26 +27,21 @@ function MemoryForm({
   const toast = useUiStore((s) => s.toast)
   const [title, setTitle] = useState(editing?.title ?? '')
   const [content, setContent] = useState(editing?.content ?? '')
-  const [busy, setBusy] = useState(false)
+  const [busy, run] = useAsyncAction()
 
   const submit = async (): Promise<void> => {
     if (title.trim().length === 0) {
       toast('Give the memory a title.', 'error')
       return
     }
-    setBusy(true)
-    try {
+    await run(async () => {
       if (editing) {
         await update(editing.id, { title, content })
       } else {
         await create({ title, content })
       }
       onDone()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   return (
@@ -83,15 +81,14 @@ function MemoryForm({
 
 export default function MemoryTab(): ReactElement {
   const settings = useSettingsStore((s) => s.settings)
-  const updateSettings = useSettingsStore((s) => s.update)
   const memories = useMemoriesStore((s) => s.memories)
   const loaded = useMemoriesStore((s) => s.loaded)
   const load = useMemoriesStore((s) => s.load)
   const remove = useMemoriesStore((s) => s.remove)
-  const toast = useUiStore((s) => s.toast)
+  const persist = usePersistSettings()
+  const [, run] = useAsyncAction()
 
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<Memory | null>(null)
+  const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<Memory>()
 
   useEffect(() => {
     void load()
@@ -99,15 +96,6 @@ export default function MemoryTab(): ReactElement {
 
   if (!settings) {
     return <p className="field-hint">Loading settings…</p>
-  }
-
-  function persist(patch: Partial<AppSettings>): void {
-    void updateSettings(patch).catch((e: unknown) => toast(errorMessage(e), 'error'))
-  }
-
-  const closeForm = (): void => {
-    setFormOpen(false)
-    setEditing(null)
   }
 
   return (
@@ -121,14 +109,7 @@ export default function MemoryTab(): ReactElement {
           </p>
         </div>
         {!formOpen ? (
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              setEditing(null)
-              setFormOpen(true)
-            }}
-          >
+          <button type="button" className="btn" onClick={openAdd}>
             + New memory
           </button>
         ) : null}
@@ -144,7 +125,7 @@ export default function MemoryTab(): ReactElement {
         </div>
         <Switch
           checked={settings.memoryEnabled}
-          onChange={(v) => persist({ memoryEnabled: v })}
+          onChange={(v) => void persist({ memoryEnabled: v })}
           label="Enable memory"
         />
       </div>
@@ -166,26 +147,13 @@ export default function MemoryTab(): ReactElement {
                 <p className="prompt-item-body">{m.content}</p>
               </div>
               <div className="prompt-item-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => {
-                    setEditing(m)
-                    setFormOpen(true)
-                  }}
-                >
+                <button type="button" className="btn btn-ghost" onClick={() => openEdit(m)}>
                   Edit
                 </button>
                 <ConfirmButton
                   label="Delete"
                   prompt="Delete this memory?"
-                  onConfirm={async () => {
-                    try {
-                      await remove(m.id)
-                    } catch (e) {
-                      toast(errorMessage(e), 'error')
-                    }
-                  }}
+                  onConfirm={() => run(() => remove(m.id))}
                 />
               </div>
             </li>

@@ -16,7 +16,7 @@ import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
 import UserQuestionDialog from '@/components/UserQuestionDialog'
 import Toasts from '@/components/Toasts'
-import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
+import { GLOBAL_SHORTCUT_KEYS, useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useChatStore } from '@/stores/chat'
 import { useConversationsStore } from '@/stores/conversations'
 import { useMcpStore } from '@/stores/mcp'
@@ -63,8 +63,7 @@ export default function App(): React.JSX.Element {
     const block = (e: KeyboardEvent): void => {
       const mod = e.ctrlKey || e.metaKey
       if (!mod || e.shiftKey || e.altKey) return
-      const key = e.key.toLowerCase()
-      if (key === 'n' || key === 'k' || e.key === ',') {
+      if (GLOBAL_SHORTCUT_KEYS.includes(e.key.toLowerCase())) {
         e.preventDefault()
         e.stopPropagation()
       }

@@ -8,7 +8,7 @@
  * value blank on edit keeps the stored value unchanged.
  */
 
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import type {
   CustomToolInfo,
   CustomToolInput,
@@ -17,10 +17,13 @@ import type {
   ToolPermissionDecision,
 } from '@shared/types'
 import { RiskBadge } from '@/components/ToolApprovalDialog'
+import { ConfirmButton, Switch } from '@/components/common/controls'
+import { useAsyncAction } from '@/hooks/useAsyncAction'
+import { useEditorState } from '@/hooks/useEditorState'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
-import { ConfirmButton, Switch, errorMessage } from './ProvidersTab'
+import { rowsFromExisting, splitRows, SecretRowsEditor, type SecretRow } from './SecretRows'
 import './tools.css'
 
 const PERMISSION_OPTIONS: ReadonlyArray<{ value: ToolPermissionDecision; label: string }> = [
@@ -80,29 +83,30 @@ function BuiltinRow({ tool }: { tool: ToolDefinition }): ReactElement {
   )
 }
 
+function ToolTable({ tools }: { tools: ToolDefinition[] }): ReactElement {
+  return (
+    <table className="tools-table">
+      <thead>
+        <tr>
+          <th scope="col">Tool</th>
+          <th scope="col">Description</th>
+          <th scope="col">Risk</th>
+          <th scope="col">Enabled</th>
+          <th scope="col">Permission</th>
+        </tr>
+      </thead>
+      <tbody>
+        {tools.map((t) => (
+          <BuiltinRow key={t.id} tool={t} />
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Custom tool form
 // ---------------------------------------------------------------------------
-
-interface HeaderRow {
-  name: string
-  value: string
-  secret: boolean
-  /** A secret header that already exists on the server (value blank = keep). */
-  existing: boolean
-}
-
-function toRows(info: CustomToolInfo | null): HeaderRow[] {
-  if (!info) return []
-  const rows: HeaderRow[] = []
-  for (const [name, value] of Object.entries(info.headers)) {
-    rows.push({ name, value, secret: false, existing: false })
-  }
-  for (const s of info.secretHeaders) {
-    rows.push({ name: s.name, value: '', secret: true, existing: true })
-  }
-  return rows
-}
 
 function CustomToolForm({
   editing,
@@ -122,19 +126,10 @@ function CustomToolForm({
   const [schemaText, setSchemaText] = useState(
     editing ? JSON.stringify(editing.paramsSchema, null, 2) : '{\n  "type": "object",\n  "properties": {}\n}'
   )
-  const [rows, setRows] = useState<HeaderRow[]>(toRows(editing))
-  const [busy, setBusy] = useState(false)
-
-  const originalSecretNames = useMemo(
-    () => new Set((editing?.secretHeaders ?? []).map((s) => s.name)),
-    [editing]
+  const [rows, setRows] = useState<SecretRow[]>(
+    editing ? rowsFromExisting(editing.headers, editing.secretHeaders.map((s) => s.name)) : []
   )
-
-  const setRow = (i: number, patch: Partial<HeaderRow>): void =>
-    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const addRow = (): void =>
-    setRows((rs) => [...rs, { name: '', value: '', secret: false, existing: false }])
-  const removeRow = (i: number): void => setRows((rs) => rs.filter((_, idx) => idx !== i))
+  const [busy, run] = useAsyncAction()
 
   const submit = async (): Promise<void> => {
     // Parse the arguments schema (empty -> default object schema).
@@ -154,24 +149,14 @@ function CustomToolForm({
       }
     }
 
-    const headers: Record<string, string> = {}
-    const setSecretHeaders: Record<string, string> = {}
-    for (const r of rows) {
-      const key = r.name.trim()
-      if (key.length === 0) continue
-      if (r.secret) {
-        if (r.value.length > 0) setSecretHeaders[key] = r.value
-        // existing secret with a blank value -> keep as is (not sent)
-      } else {
-        headers[key] = r.value
-      }
-    }
+    const {
+      publicValues: headers,
+      setSecrets: setSecretHeaders,
+      deleteSecrets: deleteSecretHeaders,
+    } = splitRows(rows, (editing?.secretHeaders ?? []).map((s) => s.name))
 
-    setBusy(true)
-    try {
+    await run(async () => {
       if (editing) {
-        const keptSecretNames = new Set(rows.filter((r) => r.secret).map((r) => r.name.trim()))
-        const deleteSecretHeaders = [...originalSecretNames].filter((n) => !keptSecretNames.has(n))
         const patch: CustomToolPatch = {
           name,
           description,
@@ -196,11 +181,7 @@ function CustomToolForm({
         await customCreate(input)
       }
       onDone()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   return (
@@ -254,44 +235,15 @@ function CustomToolForm({
 
       <div className="field">
         <span className="field-label">Headers</span>
-        {rows.map((r, i) => (
-          <div className="custom-tool-header-row" key={i}>
-            <input
-              className="input"
-              value={r.name}
-              placeholder="Header-Name"
-              aria-label="Header name"
-              onChange={(e) => setRow(i, { name: e.target.value })}
-            />
-            <input
-              className="input"
-              type={r.secret ? 'password' : 'text'}
-              value={r.value}
-              placeholder={r.secret && r.existing ? '•••••• (unchanged)' : 'value'}
-              aria-label="Header value"
-              onChange={(e) => setRow(i, { value: e.target.value })}
-            />
-            <label className="custom-tool-secret-toggle" title="Store this value encrypted">
-              <input
-                type="checkbox"
-                checked={r.secret}
-                onChange={(e) => setRow(i, { secret: e.target.checked })}
-              />
-              secret
-            </label>
-            <button
-              type="button"
-              className="btn btn-ghost btn-icon"
-              aria-label="Remove header"
-              onClick={() => removeRow(i)}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-        <button type="button" className="btn btn-ghost" onClick={addRow}>
-          + Add header
-        </button>
+        <SecretRowsEditor
+          rows={rows}
+          setRows={setRows}
+          namePlaceholder="Header-Name"
+          nameAriaLabel="Header name"
+          valueAriaLabel="Header value"
+          removeAriaLabel="Remove header"
+          addLabel="+ Add header"
+        />
         <span className="field-hint">
           Mark tokens/keys as <strong>secret</strong> — they are encrypted with your OS key store
           and never shown again.
@@ -337,7 +289,7 @@ function CustomToolRow({
   const tools = useToolsStore((s) => s.tools)
   const setEnabled = useToolsStore((s) => s.setEnabled)
   const customDelete = useToolsStore((s) => s.customDelete)
-  const toast = useUiStore((s) => s.toast)
+  const [, run] = useAsyncAction()
   const tool = tools.find((t) => t.id === info.id)
 
   return (
@@ -361,13 +313,7 @@ function CustomToolRow({
         <ConfirmButton
           label="Delete"
           prompt="Delete this tool?"
-          onConfirm={async () => {
-            try {
-              await customDelete(info.id)
-            } catch (e) {
-              toast(errorMessage(e), 'error')
-            }
-          }}
+          onConfirm={() => run(() => customDelete(info.id))}
         />
       </td>
     </tr>
@@ -381,50 +327,27 @@ export default function ToolsTab(): ReactElement {
   const load = useToolsStore((s) => s.load)
   const settings = useSettingsStore((s) => s.settings)
   const updateSettings = useSettingsStore((s) => s.update)
-  const toast = useUiStore((s) => s.toast)
+  const [, run] = useAsyncAction()
 
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<CustomToolInfo | null>(null)
+  const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<CustomToolInfo>()
 
   useEffect(() => {
     // Refresh on every visit so changes from other surfaces show up.
     void load()
   }, [load])
 
-  const toggleShell = async (enabled: boolean): Promise<void> => {
-    try {
-      await updateSettings({ shellExecutionEnabled: enabled })
-      // The run_shell_command tool appears/disappears with this setting.
+  const toggleToolFlag = (
+    key: 'shellExecutionEnabled' | 'browserToolsEnabled',
+    enabled: boolean
+  ): Promise<void> =>
+    run(async () => {
+      await updateSettings({ [key]: enabled })
+      // The gated tools appear/disappear with their setting.
       await load()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    }
-  }
-
-  const toggleBrowser = async (enabled: boolean): Promise<void> => {
-    try {
-      await updateSettings({ browserToolsEnabled: enabled })
-      await load() // the browser/computer tools appear/disappear
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    }
-  }
+    })
 
   const builtins = tools.filter((t) => t.builtin)
   const mcpTools = tools.filter((t) => t.source === 'mcp')
-
-  const openAdd = (): void => {
-    setEditing(null)
-    setFormOpen(true)
-  }
-  const openEdit = (info: CustomToolInfo): void => {
-    setEditing(info)
-    setFormOpen(true)
-  }
-  const closeForm = (): void => {
-    setFormOpen(false)
-    setEditing(null)
-  }
 
   return (
     <section aria-label="Tools">
@@ -445,22 +368,7 @@ export default function ToolsTab(): ReactElement {
           <p>No built-in tools are available in this build.</p>
         </div>
       ) : (
-        <table className="tools-table">
-          <thead>
-            <tr>
-              <th scope="col">Tool</th>
-              <th scope="col">Description</th>
-              <th scope="col">Risk</th>
-              <th scope="col">Enabled</th>
-              <th scope="col">Permission</th>
-            </tr>
-          </thead>
-          <tbody>
-            {builtins.map((t) => (
-              <BuiltinRow key={t.id} tool={t} />
-            ))}
-          </tbody>
-        </table>
+        <ToolTable tools={builtins} />
       )}
 
       <h4 className="section-subhead">Shell execution</h4>
@@ -468,7 +376,7 @@ export default function ToolsTab(): ReactElement {
         <input
           type="checkbox"
           checked={settings?.shellExecutionEnabled ?? false}
-          onChange={(e) => void toggleShell(e.target.checked)}
+          onChange={(e) => void toggleToolFlag('shellExecutionEnabled', e.target.checked)}
         />
         <span>
           Let the assistant run shell commands (with approval)
@@ -485,7 +393,7 @@ export default function ToolsTab(): ReactElement {
         <input
           type="checkbox"
           checked={settings?.browserToolsEnabled ?? false}
-          onChange={(e) => void toggleBrowser(e.target.checked)}
+          onChange={(e) => void toggleToolFlag('browserToolsEnabled', e.target.checked)}
         />
         <span>
           Let the assistant use an embedded browser
@@ -540,22 +448,7 @@ export default function ToolsTab(): ReactElement {
           <p className="field-hint">
             Discovered from your connected MCP servers (managed in the MCP tab).
           </p>
-          <table className="tools-table">
-            <thead>
-              <tr>
-                <th scope="col">Tool</th>
-                <th scope="col">Description</th>
-                <th scope="col">Risk</th>
-                <th scope="col">Enabled</th>
-                <th scope="col">Permission</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mcpTools.map((t) => (
-                <BuiltinRow key={t.id} tool={t} />
-              ))}
-            </tbody>
-          </table>
+          <ToolTable tools={mcpTools} />
         </>
       ) : null}
     </section>

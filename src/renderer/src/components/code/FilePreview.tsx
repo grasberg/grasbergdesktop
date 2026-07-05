@@ -1,16 +1,12 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, type ReactElement } from 'react'
 import Markdown from '@/components/chat/Markdown'
+import { useCopied } from '@/hooks/useCopied'
+import { formatBytes } from '@/lib/format'
 import { useCodeStore } from '@/stores/code'
 import './code.css'
 
 function isMarkdownPath(relPath: string): boolean {
   return /\.(md|markdown)$/i.test(relPath)
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /**
@@ -22,10 +18,7 @@ export default function FilePreview(): ReactElement | null {
   const openFile = useCodeStore((s) => s.openFile)
   const closePreview = useCodeStore((s) => s.closePreview)
 
-  const [copied, setCopied] = useState(false)
-  const copyTimer = useRef<number | undefined>(undefined)
-
-  useEffect(() => () => window.clearTimeout(copyTimer.current), [])
+  const [copied, copy] = useCopied()
 
   useEffect(() => {
     if (!openFile) return
@@ -37,14 +30,6 @@ export default function FilePreview(): ReactElement | null {
   }, [openFile, closePreview])
 
   if (!openFile) return null
-
-  const copy = (): void => {
-    void navigator.clipboard.writeText(openFile.content).then(() => {
-      setCopied(true)
-      window.clearTimeout(copyTimer.current)
-      copyTimer.current = window.setTimeout(() => setCopied(false), 1500)
-    })
-  }
 
   const lines = openFile.content.split('\n')
 
@@ -67,7 +52,7 @@ export default function FilePreview(): ReactElement | null {
           </span>
           <span className="badge">{formatBytes(openFile.sizeBytes)}</span>
           <div className="code-preview-actions">
-            <button type="button" className="btn" onClick={copy}>
+            <button type="button" className="btn" onClick={() => copy(openFile.content)}>
               {copied ? 'Copied' : 'Copy'}
             </button>
             <button

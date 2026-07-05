@@ -13,6 +13,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { looksBinary } from '../utils/binary'
 
 const MAX_ENTRIES = 20_000
 const MAX_DEPTH = 24
@@ -195,12 +196,6 @@ async function walk(root: string): Promise<WalkedFile[]> {
   return results
 }
 
-function looksBinary(buffer: Buffer): boolean {
-  const limit = Math.min(buffer.length, 8192)
-  for (let i = 0; i < limit; i++) if (buffer[i] === 0) return true
-  return false
-}
-
 function isEntrypoint(relPath: string): boolean {
   const base = path.basename(relPath).replace(/\.[^.]+$/, '').toLowerCase()
   return ENTRYPOINT_BASENAMES.has(base)
@@ -279,16 +274,17 @@ export class RepoMapService {
     const queryTerms = tokenize(query)
     if (queryTerms.length === 0 || index.docs.length === 0) return []
     const n = index.docs.length
+    const uniqueTerms = new Set(queryTerms)
 
     const idf = new Map<string, number>()
-    for (const term of new Set(queryTerms)) {
+    for (const term of uniqueTerms) {
       const dfCount = index.df.get(term) ?? 0
       idf.set(term, Math.log(1 + (n - dfCount + 0.5) / (dfCount + 0.5)))
     }
 
     const scored = index.docs.map((doc) => {
       let score = 0
-      for (const term of new Set(queryTerms)) {
+      for (const term of uniqueTerms) {
         const f = doc.terms.get(term)
         if (!f) continue
         const denom = f + BM25_K1 * (1 - BM25_B + (BM25_B * doc.length) / index!.avgLength)
@@ -309,10 +305,5 @@ export class RepoMapService {
       .filter((hit) => hit.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(1, maxResults))
-  }
-
-  /** Drop a project's cached index (e.g. when it is forgotten). */
-  invalidate(projectId: string): void {
-    this.cache.delete(projectId)
   }
 }

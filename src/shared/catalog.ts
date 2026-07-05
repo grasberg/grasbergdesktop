@@ -173,7 +173,9 @@ export const PROVIDER_TYPE_LIST: ProviderTypeMeta[] = Object.values(PROVIDER_TYP
 /** Capabilities to assume for a model id we know nothing about. */
 export const UNKNOWN_MODEL_CAPS: ModelCapabilities = caps({ tools: true })
 
-export function findCatalogModel(type: ProviderType, modelId: string): ModelInfo | undefined {
+// Deliberately NOT exported: it is family-only (blind to preset catalogs), so
+// callers outside this module must go through the preset-aware resolvers below.
+function findCatalogModel(type: ProviderType, modelId: string): ModelInfo | undefined {
   return PROVIDER_TYPES[type].knownModels.find((m) => m.id === modelId)
 }
 
@@ -184,6 +186,14 @@ export function providerAuthModes(type: ProviderType): AuthMode[] {
 
 /** Default model used when authenticating with ChatGPT (Codex backend). */
 export const CHATGPT_OAUTH_DEFAULT_MODEL = 'gpt-5'
+
+/**
+ * Models the ChatGPT-OAuth Codex backend accepts. It rejects the rest of the
+ * platform-API catalog (gpt-4o etc.), so the Codex adapter surfaces only these
+ * ids (the user can still type any other model id). Grow this list — not the
+ * adapter — when Codex-class siblings ship.
+ */
+export const CHATGPT_OAUTH_MODEL_IDS: readonly string[] = [CHATGPT_OAUTH_DEFAULT_MODEL]
 
 // ---------------------------------------------------------------------------
 // Model catalog resolution (preset-aware)
@@ -236,4 +246,17 @@ export function resolveModelInfo(p: ProviderCatalogRef, modelId: string): ModelI
     if (found) return found
   }
   return findCatalogModel(p.type, modelId)
+}
+
+// The unknown-model policy ("assume the capability per UNKNOWN_MODEL_CAPS")
+// lives here, once, so main and renderer can't drift apart on it.
+
+/** Whether a model accepts image input (unknown models per UNKNOWN_MODEL_CAPS). */
+export function modelSupportsVision(p: ProviderCatalogRef, modelId: string): boolean {
+  return resolveModelInfo(p, modelId)?.capabilities.vision ?? UNKNOWN_MODEL_CAPS.vision
+}
+
+/** Whether a model can call tools (unknown models per UNKNOWN_MODEL_CAPS). */
+export function modelSupportsTools(p: ProviderCatalogRef, modelId: string): boolean {
+  return resolveModelInfo(p, modelId)?.capabilities.tools ?? UNKNOWN_MODEL_CAPS.tools
 }

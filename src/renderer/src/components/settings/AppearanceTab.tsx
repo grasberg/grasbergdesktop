@@ -1,7 +1,6 @@
 import type { AppSettings, ThemeSetting } from '@shared/types'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
-import { useUiStore } from '@/stores/ui'
-import { errorMessage } from './ProvidersTab'
 
 const THEMES: { value: ThemeSetting; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -17,15 +16,10 @@ const FONT_SIZES: { value: AppSettings['fontSize']; label: string }[] = [
 
 export default function AppearanceTab() {
   const settings = useSettingsStore((s) => s.settings)
-  const update = useSettingsStore((s) => s.update)
-  const toast = useUiStore((s) => s.toast)
+  const persist = usePersistSettings()
 
   if (!settings) {
     return <p className="field-hint">Loading settings…</p>
-  }
-
-  function persist(patch: Partial<AppSettings>) {
-    void update(patch).catch((e: unknown) => toast(errorMessage(e), 'error'))
   }
 
   return (
@@ -49,7 +43,7 @@ export default function AppearanceTab() {
                 name="uld-theme"
                 value={t.value}
                 checked={settings.theme === t.value}
-                onChange={() => persist({ theme: t.value })}
+                onChange={() => void persist({ theme: t.value })}
               />
               <span className={`mini-preview mini-${t.value}`} aria-hidden="true">
                 <span className="mini-bar" />
@@ -75,7 +69,7 @@ export default function AppearanceTab() {
                 name="uld-fontsize"
                 value={f.value}
                 checked={settings.fontSize === f.value}
-                onChange={() => persist({ fontSize: f.value })}
+                onChange={() => void persist({ fontSize: f.value })}
               />
               <span>{f.label}</span>
             </label>

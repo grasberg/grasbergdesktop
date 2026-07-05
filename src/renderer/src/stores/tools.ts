@@ -21,8 +21,8 @@ import type {
   ToolRiskLevel,
   UserQuestionRequest,
 } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
-import { useUiStore } from './ui'
+import { unwrap } from '@/api/uld'
+import { toastError } from './ui'
 
 /** Mirrors DEFAULT_PERMISSION_BY_RISK in src/main/tools/definitions.ts. */
 const DEFAULT_PERMISSION_BY_RISK: Record<ToolRiskLevel, ToolPermissionDecision> = {
@@ -74,133 +74,129 @@ export interface ToolsStoreState {
   settleQuestion(requestId: string): void
 }
 
-export const useToolsStore = create<ToolsStoreState>()((set, get) => ({
-  tools: [],
-  customInfos: [],
-  permissions: {},
-  approvalQueue: [],
-  loaded: false,
-
-  async load() {
-    try {
-      const [tools, permissionList, customInfos] = await Promise.all([
-        unwrap(window.uld.tools.list()),
-        unwrap(window.uld.tools.permissionsList()),
-        unwrap(window.uld.tools.customList()),
-      ])
-      const permissions: Record<string, ToolPermissionDecision> = {}
-      for (const p of permissionList) permissions[p.toolId] = p.decision
-      set({ tools, permissions, customInfos, loaded: true })
-    } catch (e) {
-      set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load tools: ${toNormalized(e).message}`, 'error')
-    }
-  },
-
-  async customCreate(input) {
-    const infos = await unwrap(window.uld.tools.customCreate(input))
+export const useToolsStore = create<ToolsStoreState>()((set, get) => {
+  /** Applies a mutated custom-tool list, then re-syncs the registry. */
+  const applyCustomInfos = async (infos: CustomToolInfo[]): Promise<void> => {
     set({ customInfos: infos })
     await get().load()
-  },
+  }
 
-  async customUpdate(toolId, patch) {
-    const infos = await unwrap(window.uld.tools.customUpdate(toolId, patch))
-    set({ customInfos: infos })
-    await get().load()
-  },
+  return {
+    tools: [],
+    customInfos: [],
+    permissions: {},
+    approvalQueue: [],
+    loaded: false,
 
-  async customDelete(toolId) {
-    const infos = await unwrap(window.uld.tools.customDelete(toolId))
-    set({ customInfos: infos })
-    await get().load()
-  },
+    async load() {
+      try {
+        const [tools, permissionList, customInfos] = await Promise.all([
+          unwrap(window.uld.tools.list()),
+          unwrap(window.uld.tools.permissionsList()),
+          unwrap(window.uld.tools.customList()),
+        ])
+        const permissions: Record<string, ToolPermissionDecision> = {}
+        for (const p of permissionList) permissions[p.toolId] = p.decision
+        set({ tools, permissions, customInfos, loaded: true })
+      } catch (e) {
+        set({ loaded: true })
+        toastError('Failed to load tools', e)
+      }
+    },
 
-  async setEnabled(id, enabled) {
-    const before = get().tools
-    // Optimistic flip; revert on failure.
-    set((s) => ({ tools: s.tools.map((t) => (t.id === id ? { ...t, enabled } : t)) }))
-    try {
-      await unwrap(window.uld.tools.setEnabled(id, enabled))
-    } catch (e) {
-      set({ tools: before })
-      useUiStore.getState().toast(`Could not update tool: ${toNormalized(e).message}`, 'error')
-    }
-  },
+    async customCreate(input) {
+      await applyCustomInfos(await unwrap(window.uld.tools.customCreate(input)))
+    },
 
-  async setPermission(id, decision) {
-    const before = get().permissions
-    set((s) => ({ permissions: { ...s.permissions, [id]: decision } }))
-    try {
-      await unwrap(window.uld.tools.permissionSet(id, decision))
-    } catch (e) {
-      set({ permissions: before })
-      useUiStore
-        .getState()
-        .toast(`Could not update permission: ${toNormalized(e).message}`, 'error')
-    }
-  },
+    async customUpdate(toolId, patch) {
+      await applyCustomInfos(await unwrap(window.uld.tools.customUpdate(toolId, patch)))
+    },
 
-  setPendingApproval(req) {
-    set((s) =>
-      s.approvalQueue.some((r) => r.requestId === req.requestId)
-        ? s
-        : { approvalQueue: [...s.approvalQueue, req] }
-    )
-  },
+    async customDelete(toolId) {
+      await applyCustomInfos(await unwrap(window.uld.tools.customDelete(toolId)))
+    },
 
-  async respond(approved) {
-    const pending = get().approvalQueue[0]
-    if (!pending) return
-    // Dequeue first so the dialog advances to the next request and cannot
-    // double-submit; main treats an unknown requestId as already-answered.
-    set((s) => ({
-      approvalQueue: s.approvalQueue.filter((r) => r.requestId !== pending.requestId),
-    }))
-    try {
-      await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved))
-    } catch (e) {
-      useUiStore
-        .getState()
-        .toast(`Could not deliver the approval response: ${toNormalized(e).message}`, 'error')
-    }
-  },
+    async setEnabled(id, enabled) {
+      const before = get().tools
+      // Optimistic flip; revert on failure.
+      set((s) => ({ tools: s.tools.map((t) => (t.id === id ? { ...t, enabled } : t)) }))
+      try {
+        await unwrap(window.uld.tools.setEnabled(id, enabled))
+      } catch (e) {
+        set({ tools: before })
+        toastError('Could not update tool', e)
+      }
+    },
 
-  settleApproval(requestId) {
-    set((s) => {
-      const next = s.approvalQueue.filter((r) => r.requestId !== requestId)
-      return next.length === s.approvalQueue.length ? s : { approvalQueue: next }
-    })
-  },
+    async setPermission(id, decision) {
+      const before = get().permissions
+      set((s) => ({ permissions: { ...s.permissions, [id]: decision } }))
+      try {
+        await unwrap(window.uld.tools.permissionSet(id, decision))
+      } catch (e) {
+        set({ permissions: before })
+        toastError('Could not update permission', e)
+      }
+    },
 
-  questionQueue: [],
+    setPendingApproval(req) {
+      set((s) =>
+        s.approvalQueue.some((r) => r.requestId === req.requestId)
+          ? s
+          : { approvalQueue: [...s.approvalQueue, req] }
+      )
+    },
 
-  setPendingQuestion(req) {
-    set((s) =>
-      s.questionQueue.some((r) => r.requestId === req.requestId)
-        ? s
-        : { questionQueue: [...s.questionQueue, req] }
-    )
-  },
+    async respond(approved) {
+      const pending = get().approvalQueue[0]
+      if (!pending) return
+      // Dequeue first so the dialog advances to the next request and cannot
+      // double-submit; main treats an unknown requestId as already-answered.
+      set((s) => ({
+        approvalQueue: s.approvalQueue.filter((r) => r.requestId !== pending.requestId),
+      }))
+      try {
+        await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved))
+      } catch (e) {
+        toastError('Could not deliver the approval response', e)
+      }
+    },
 
-  async respondQuestion(answer) {
-    const pending = get().questionQueue[0]
-    if (!pending) return
-    set((s) => ({
-      questionQueue: s.questionQueue.filter((r) => r.requestId !== pending.requestId),
-    }))
-    try {
-      await unwrap(window.uld.tools.questionRespond(pending.requestId, answer))
-    } catch (e) {
-      useUiStore
-        .getState()
-        .toast(`Could not deliver the answer: ${toNormalized(e).message}`, 'error')
-    }
-  },
+    settleApproval(requestId) {
+      set((s) => {
+        const next = s.approvalQueue.filter((r) => r.requestId !== requestId)
+        return next.length === s.approvalQueue.length ? s : { approvalQueue: next }
+      })
+    },
 
-  settleQuestion(requestId) {
-    set((s) => {
-      const next = s.questionQueue.filter((r) => r.requestId !== requestId)
-      return next.length === s.questionQueue.length ? s : { questionQueue: next }
-    })
-  },
-}))
+    questionQueue: [],
+
+    setPendingQuestion(req) {
+      set((s) =>
+        s.questionQueue.some((r) => r.requestId === req.requestId)
+          ? s
+          : { questionQueue: [...s.questionQueue, req] }
+      )
+    },
+
+    async respondQuestion(answer) {
+      const pending = get().questionQueue[0]
+      if (!pending) return
+      set((s) => ({
+        questionQueue: s.questionQueue.filter((r) => r.requestId !== pending.requestId),
+      }))
+      try {
+        await unwrap(window.uld.tools.questionRespond(pending.requestId, answer))
+      } catch (e) {
+        toastError('Could not deliver the answer', e)
+      }
+    },
+
+    settleQuestion(requestId) {
+      set((s) => {
+        const next = s.questionQueue.filter((r) => r.requestId !== requestId)
+        return next.length === s.questionQueue.length ? s : { questionQueue: next }
+      })
+    },
+  }
+})

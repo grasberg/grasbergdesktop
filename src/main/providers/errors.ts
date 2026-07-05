@@ -46,10 +46,6 @@ export class ProviderError extends Error {
     this.providerType = opts.providerType
     if (opts.cause !== undefined) this.cause = opts.cause
   }
-
-  toNormalized(): NormalizedError {
-    return toNormalizedError(this)
-  }
 }
 
 export function abortedError(providerType?: ProviderType): ProviderError {

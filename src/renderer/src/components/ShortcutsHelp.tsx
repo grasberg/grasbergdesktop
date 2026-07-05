@@ -1,14 +1,12 @@
 import { useEffect } from 'react'
+import { modKeySymbol } from '@/lib/platform'
 import { useUiStore } from '@/stores/ui'
 import './settings/settings.css'
 
-const isMac = /mac/i.test(navigator.platform || navigator.userAgent)
-const MOD = isMac ? '⌘' : 'Ctrl'
-
 const SHORTCUTS: { label: string; keys: string[] }[] = [
-  { label: 'New chat', keys: [MOD, 'N'] },
-  { label: 'Command palette', keys: [MOD, 'K'] },
-  { label: 'Settings', keys: [MOD, ','] },
+  { label: 'New chat', keys: [modKeySymbol, 'N'] },
+  { label: 'Command palette', keys: [modKeySymbol, 'K'] },
+  { label: 'Settings', keys: [modKeySymbol, ','] },
   { label: 'Send message', keys: ['Enter'] },
   { label: 'New line', keys: ['Shift', 'Enter'] },
   { label: 'Stop generation / close dialogs', keys: ['Esc'] },

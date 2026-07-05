@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { toNormalized } from '@/api/uld'
 import type { UiStoreState } from './contracts'
 
 let toastSeq = 0
@@ -47,3 +48,8 @@ export const useUiStore = create<UiStoreState>()((set) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
   },
 }))
+
+/** Toasts a store/IPC failure as `${prefix}: ${message}`. */
+export function toastError(prefix: string, e: unknown): void {
+  useUiStore.getState().toast(`${prefix}: ${toNormalized(e).message}`, 'error')
+}

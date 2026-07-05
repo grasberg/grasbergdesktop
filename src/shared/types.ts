@@ -382,6 +382,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outboundWebhookUrl: null,
 }
 
+/**
+ * Settings that are NEVER applied from an imported backup: enabling them from
+ * an untrusted file would silently grant shell/browser execution, wire up an
+ * exfiltration webhook, or pre-authorize a Telegram sender — all behind a
+ * single "Import" click. They stay whatever the local machine already has.
+ * Kept next to AppSettings/DEFAULT_SETTINGS so adding a dangerous key and
+ * classifying it happen in the same edit.
+ */
+export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
+  'shellExecutionEnabled',
+  'browserToolsEnabled',
+  'outboundWebhookUrl',
+  'telegramBridgeEnabled',
+  'telegramBridgeConversationId',
+  'telegramBridgeAllowedChatId',
+] satisfies readonly (keyof AppSettings)[])
+
 // ---------------------------------------------------------------------------
 // Cowork
 // ---------------------------------------------------------------------------
@@ -481,6 +498,14 @@ export interface ToolDefinition {
   enabled: boolean
   /** Origin of the tool. Absent implies 'builtin' for older payloads. */
   source?: ToolSource
+  /**
+   * May mutate the project/machine/web — refused in plan mode ("read-only
+   * investigation only"). Absent means read-only. Declared where the tool is
+   * defined: builtins in definitions.ts, custom HTTP tools derived from their
+   * method (GET = read-only by convention), MCP tools always true (their side
+   * effects can't be inspected, so they're treated conservatively as mutating).
+   */
+  mutating?: boolean
 }
 
 // ---------------------------------------------------------------------------

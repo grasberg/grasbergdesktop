@@ -2,9 +2,9 @@
  * Read-only git queries for the 'git' tool.
  *
  * SAFETY: commands are spawned WITHOUT a shell from a fixed argv allowlist
- * built here — the model chooses an action ('status' | 'diff' | 'log') and at
- * most a validated relative path; it can never inject flags or subcommands.
- * Nothing here can mutate a repository.
+ * built by the executor's runGit — the model chooses an action ('status' |
+ * 'diff' | 'log') and at most a validated relative path; it can never inject
+ * flags or subcommands. Nothing here can mutate a repository.
  */
 
 import { execFile } from 'node:child_process'

@@ -6,13 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type {
-  ModelInfo,
-  ProviderType,
-  TestConnectionResult,
-  TokenUsage,
-  ToolCallRecord,
-} from '@shared/types'
+import type { ModelInfo, ProviderType, TestConnectionResult, TokenUsage } from '@shared/types'
 import { PROVIDER_TYPES } from '@shared/catalog'
 import type {
   AdapterChatRequest,
@@ -24,7 +18,8 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError, normalizeHttpError, toNormalizedError, toProviderError } from './errors'
+import { checkedFetch, joinUrl, requireStreamBody } from './http'
+import { collectStream, parseDataUrl, parseToolArguments, probeConnection } from './native'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
@@ -37,8 +32,8 @@ type Content = { role: 'user' | 'model'; parts: Part[] }
 // ---------------------------------------------------------------------------
 
 function inlineData(url: string): Part {
-  const m = /^data:([^;]+);base64,(.*)$/s.exec(url)
-  if (m) return { inlineData: { mimeType: m[1], data: m[2] } }
+  const parsed = parseDataUrl(url)
+  if (parsed) return { inlineData: { mimeType: parsed.mediaType, data: parsed.data } }
   return { text: url } // non-data image url: degrade to a text mention
 }
 
@@ -79,13 +74,7 @@ export function buildGeminiBody(req: AdapterChatRequest): Record<string, unknown
       const text = typeof m.content === 'string' ? m.content : ''
       if (text) parts.push({ text })
       for (const tc of m.toolCalls ?? []) {
-        let args: unknown = {}
-        try {
-          args = tc.arguments ? JSON.parse(tc.arguments) : {}
-        } catch {
-          args = {}
-        }
-        parts.push({ functionCall: { name: tc.name, args } })
+        parts.push({ functionCall: { name: tc.name, args: parseToolArguments(tc.arguments) } })
       }
       if (parts.length > 0) push('model', parts)
     } else {
@@ -179,48 +168,29 @@ export class GoogleAdapter implements ProviderAdapter {
   readonly type: ProviderType = 'google'
 
   private url(ctx: AdapterContext, model: string, stream: boolean): string {
-    const base = ctx.baseUrl.trim().replace(/\/+$/, '')
     const method = stream ? 'streamGenerateContent?alt=sse' : 'generateContent'
-    return `${base}/models/${encodeURIComponent(model)}:${method}`
+    return joinUrl(ctx.baseUrl, `/models/${encodeURIComponent(model)}:${method}`)
   }
 
-  private async post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
-    const fetchImpl = ctx.fetchImpl ?? globalThis.fetch
-    let res: Response
-    try {
-      res = await fetchImpl(this.url(ctx, req.modelId, stream), {
-        method: 'POST',
-        headers: { 'x-goog-api-key': ctx.apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify(buildGeminiBody(req)),
-        signal: ctx.signal,
-      })
-    } catch (e) {
-      throw toProviderError(e, this.type, [ctx.apiKey])
-    }
-    if (!res.ok) {
-      let bodyText = ''
-      try {
-        bodyText = await res.text()
-      } catch {
-        // normalize from status alone
-      }
-      throw normalizeHttpError(res.status, bodyText, this.type, undefined, [ctx.apiKey])
-    }
-    return res
+  private post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
+    return checkedFetch(this.url(ctx, req.modelId, stream), {
+      method: 'POST',
+      headers: { 'x-goog-api-key': ctx.apiKey, 'content-type': 'application/json' },
+      body: JSON.stringify(buildGeminiBody(req)),
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      fetchImpl: ctx.fetchImpl,
+    })
   }
 
   async *chatStream(req: AdapterChatRequest, ctx: AdapterContext): AsyncGenerator<AdapterStreamEvent> {
     const res = await withRetry(() => this.post(req, ctx, true), { signal: ctx.signal })
-    if (!res.body) {
-      throw new ProviderError('server', 'Gemini returned an empty streaming response.', {
-        retryable: false,
-        providerType: this.type,
-      })
-    }
+    const body = requireStreamBody(res, 'Gemini', this.type)
     let sawToolCall = false
     let pendingFinish: FinishReason | undefined
     let lastUsage: TokenUsage | undefined
-    for await (const payload of parseSSE(res.body, ctx.signal)) {
+    for await (const payload of parseSSE(body, ctx.signal)) {
       let json: unknown
       try {
         json = JSON.parse(payload)
@@ -255,25 +225,7 @@ export class GoogleAdapter implements ProviderAdapter {
   }
 
   async chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult> {
-    let text = ''
-    let reasoning = ''
-    const toolCalls: ToolCallRecord[] = []
-    let usage: TokenUsage | undefined
-    let finishReason: FinishReason = 'stop'
-    for await (const ev of this.chatStream({ ...req, stream: false }, ctx)) {
-      if (ev.type === 'text') text += ev.text
-      else if (ev.type === 'reasoning') reasoning += ev.text
-      else if (ev.type === 'tool_call') toolCalls.push(ev.toolCall)
-      else if (ev.type === 'usage') usage = ev.usage
-      else if (ev.type === 'finish') finishReason = ev.reason
-    }
-    return {
-      text,
-      reasoning: reasoning || undefined,
-      toolCalls,
-      usage,
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
-    }
+    return collectStream(this.chatStream({ ...req, stream: false }, ctx))
   }
 
   async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
@@ -281,20 +233,11 @@ export class GoogleAdapter implements ProviderAdapter {
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
-    const started = Date.now()
-    try {
-      await this.chat(
-        {
-          modelId: PROVIDER_TYPES.google.defaultModelId,
-          messages: [{ role: 'user', content: 'ping' }],
-          params: { maxTokens: 1 },
-          stream: false,
-        },
-        ctx
-      )
-      return { ok: true, message: 'Connected.', latencyMs: Date.now() - started }
-    } catch (e) {
-      return { ok: false, message: toNormalizedError(e, this.type, [ctx.apiKey]).message }
-    }
+    return probeConnection((req) => this.chat(req, ctx), {
+      modelId: PROVIDER_TYPES.google.defaultModelId,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      successMessage: 'Connected.',
+    })
   }
 }

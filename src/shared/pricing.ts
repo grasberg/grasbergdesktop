@@ -12,7 +12,6 @@
 
 import type { ProviderType, TokenUsage } from './types'
 
-export const PRICING_CURRENCY = 'USD'
 export const PRICING_DISCLAIMER =
   'Approximate estimate — provider prices change by region and plan; verify before relying on it.'
 

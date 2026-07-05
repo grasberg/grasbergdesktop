@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import type { McpServerConfig, McpTransport } from '@shared/types'
 import type { SqliteDriver } from '../driver'
+import { parseStringArray, parseStringMap, updateById } from './util'
 
 export interface McpServerCreateInput {
   name: string
@@ -55,29 +56,6 @@ interface McpServerRow {
   updated_at: number
 }
 
-function parseStringArray(text: string): string[] {
-  try {
-    const v: unknown = JSON.parse(text)
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function parseStringMap(text: string): Record<string, string> {
-  try {
-    const v: unknown = JSON.parse(text)
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const out: Record<string, string> = {}
-      for (const [k, val] of Object.entries(v)) if (typeof val === 'string') out[k] = val
-      return out
-    }
-  } catch {
-    // fall through
-  }
-  return {}
-}
-
 function toConfig(row: McpServerRow): McpServerConfig {
   return {
     id: row.id,
@@ -85,7 +63,7 @@ function toConfig(row: McpServerRow): McpServerConfig {
     name: row.name,
     transport: row.transport as McpTransport,
     command: row.command,
-    args: parseStringArray(row.args_json),
+    args: parseStringArray(row.args_json, []),
     env: parseStringMap(row.env_json),
     url: row.url,
     headers: parseStringMap(row.headers_json),
@@ -138,24 +116,21 @@ export function createMcpServersRepository(driver: SqliteDriver): McpServersRepo
     },
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: (string | number | null)[] = []
-      const push = (column: string, value: string | number | null): void => {
-        sets.push(`${column} = ?`)
-        params.push(value)
-      }
-      if (patch.name !== undefined) push('name', patch.name)
-      if (patch.command !== undefined) push('command', patch.command)
-      if (patch.args !== undefined) push('args_json', JSON.stringify(patch.args))
-      if (patch.env !== undefined) push('env_json', JSON.stringify(patch.env))
-      if (patch.url !== undefined) push('url', patch.url)
-      if (patch.headers !== undefined) push('headers_json', JSON.stringify(patch.headers))
-      if (patch.enabled !== undefined) push('enabled', patch.enabled ? 1 : 0)
-      if (sets.length > 0) {
-        push('updated_at', Date.now())
-        params.push(id)
-        driver.run(`UPDATE mcp_servers SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'mcp_servers',
+        id,
+        {
+          name: patch.name,
+          command: patch.command,
+          args_json: patch.args === undefined ? undefined : JSON.stringify(patch.args),
+          env_json: patch.env === undefined ? undefined : JSON.stringify(patch.env),
+          url: patch.url,
+          headers_json: patch.headers === undefined ? undefined : JSON.stringify(patch.headers),
+          enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+        },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

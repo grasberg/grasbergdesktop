@@ -7,13 +7,7 @@
  * Security: the api key is never logged and is passed to the error redactor.
  */
 
-import type {
-  ModelInfo,
-  ProviderType,
-  TestConnectionResult,
-  TokenUsage,
-  ToolCallRecord,
-} from '@shared/types'
+import type { ModelInfo, ProviderType, TestConnectionResult, ToolCallRecord } from '@shared/types'
 import { PROVIDER_TYPES } from '@shared/catalog'
 import type {
   AdapterChatRequest,
@@ -25,7 +19,9 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError, normalizeHttpError, toNormalizedError, toProviderError } from './errors'
+import { ProviderError } from './errors'
+import { checkedFetch, joinUrl, requireStreamBody } from './http'
+import { collectStream, parseDataUrl, parseToolArguments, probeConnection } from './native'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
@@ -39,10 +35,10 @@ type Block = Record<string, unknown>
 // Pure helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-/** Parse a `data:<mime>;base64,<data>` URL into Anthropic image source parts. */
+/** Map a `data:<mime>;base64,<data>` URL to Anthropic image source parts. */
 function imageSource(url: string): Block {
-  const m = /^data:([^;]+);base64,(.*)$/s.exec(url)
-  if (m) return { type: 'base64', media_type: m[1], data: m[2] }
+  const parsed = parseDataUrl(url)
+  if (parsed) return { type: 'base64', media_type: parsed.mediaType, data: parsed.data }
   return { type: 'url', url }
 }
 
@@ -96,13 +92,7 @@ export function toAnthropicMessages(messages: AdapterMessage[]): {
       const text = typeof m.content === 'string' ? m.content : ''
       if (text) blocks.push({ type: 'text', text })
       for (const tc of m.toolCalls ?? []) {
-        let input: unknown = {}
-        try {
-          input = tc.arguments ? JSON.parse(tc.arguments) : {}
-        } catch {
-          input = {}
-        }
-        blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input })
+        blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: parseToolArguments(tc.arguments) })
       }
       if (blocks.length > 0) push('assistant', blocks)
       continue
@@ -220,44 +210,25 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 
-  private async post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
-    const fetchImpl = ctx.fetchImpl ?? globalThis.fetch
-    const url = ctx.baseUrl.trim().replace(/\/+$/, '') + '/messages'
-    let res: Response
-    try {
-      res = await fetchImpl(url, {
-        method: 'POST',
-        headers: this.buildHeaders(ctx),
-        body: JSON.stringify(buildAnthropicBody(req, stream)),
-        signal: ctx.signal,
-      })
-    } catch (e) {
-      throw toProviderError(e, this.type, [ctx.apiKey])
-    }
-    if (!res.ok) {
-      let bodyText = ''
-      try {
-        bodyText = await res.text()
-      } catch {
-        // normalize from status alone
-      }
-      throw normalizeHttpError(res.status, bodyText, this.type, undefined, [ctx.apiKey])
-    }
-    return res
+  private post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
+    return checkedFetch(joinUrl(ctx.baseUrl, '/messages'), {
+      method: 'POST',
+      headers: this.buildHeaders(ctx),
+      body: JSON.stringify(buildAnthropicBody(req, stream)),
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      fetchImpl: ctx.fetchImpl,
+    })
   }
 
   async *chatStream(req: AdapterChatRequest, ctx: AdapterContext): AsyncGenerator<AdapterStreamEvent> {
     const res = await withRetry(() => this.post(req, ctx, true), { signal: ctx.signal })
-    if (!res.body) {
-      throw new ProviderError('server', 'Anthropic returned an empty streaming response.', {
-        retryable: false,
-        providerType: this.type,
-      })
-    }
+    const body = requireStreamBody(res, 'Anthropic', this.type)
     const state = newAnthropicState()
     let finished = false
     let sawToolCall = false
-    for await (const payload of parseSSE(res.body, ctx.signal)) {
+    for await (const payload of parseSSE(body, ctx.signal)) {
       let json: unknown
       try {
         json = JSON.parse(payload)
@@ -280,25 +251,8 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   async chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult> {
-    let text = ''
-    let reasoning = ''
-    const toolCalls: ToolCallRecord[] = []
-    let usage: TokenUsage | undefined
-    let finishReason: FinishReason = 'stop'
-    for await (const ev of this.chatStream({ ...req, stream: false }, ctx)) {
-      if (ev.type === 'text') text += ev.text
-      else if (ev.type === 'reasoning') reasoning += ev.text
-      else if (ev.type === 'tool_call') toolCalls.push(ev.toolCall)
-      else if (ev.type === 'usage') usage = usage ? mergeUsage(usage, ev.usage) : ev.usage
-      else if (ev.type === 'finish') finishReason = ev.reason
-    }
-    return {
-      text,
-      reasoning: reasoning || undefined,
-      toolCalls,
-      usage,
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
-    }
+    // Anthropic splits usage across message_start/message_delta: merge, don't replace.
+    return collectStream(this.chatStream({ ...req, stream: false }, ctx), { mergeUsage: true })
   }
 
   async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
@@ -306,28 +260,11 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
-    const started = Date.now()
-    try {
-      await this.chat(
-        {
-          modelId: PROVIDER_TYPES.anthropic.defaultModelId,
-          messages: [{ role: 'user', content: 'ping' }],
-          params: { maxTokens: 1 },
-          stream: false,
-        },
-        ctx
-      )
-      return { ok: true, message: 'Connected.', latencyMs: Date.now() - started }
-    } catch (e) {
-      return { ok: false, message: toNormalizedError(e, this.type, [ctx.apiKey]).message }
-    }
-  }
-}
-
-function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
-  return {
-    promptTokens: a.promptTokens ?? b.promptTokens,
-    completionTokens: a.completionTokens ?? b.completionTokens,
-    totalTokens: a.totalTokens ?? b.totalTokens,
+    return probeConnection((req) => this.chat(req, ctx), {
+      modelId: PROVIDER_TYPES.anthropic.defaultModelId,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      successMessage: 'Connected.',
+    })
   }
 }

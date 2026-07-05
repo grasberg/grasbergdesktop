@@ -28,9 +28,11 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { Conversation, ToolApprovalRequest, ToolCallRecord, ToolDefinition } from '@shared/types'
 import type { CodeReadFileResult } from '@shared/ipc'
+import { encodeTaskList, type TaskListItem } from '@shared/tasklist'
 import { redactKnownSecrets, redactSecrets } from '../providers/redact'
-import { TOOL_RESULT_MAX_CHARS } from './definitions'
-import { customToolHeaders, isCustomToolId } from './custom-tools'
+import { looksBinary } from '../utils/binary'
+import { capToolResult } from './definitions'
+import { customToolHeaders } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
 import { runGitQuery } from './git'
@@ -47,7 +49,6 @@ import type { ToolRegistry } from './registry'
  */
 export interface ToolCodeService {
   readFile(projectId: string, relPath: string): CodeReadFileResult | Promise<CodeReadFileResult>
-  fileTree(projectId: string): unknown
 }
 
 /** Structural subset of the repo-map service used by the executor. */
@@ -141,17 +142,6 @@ export interface ToolExecuteContext {
   planMode?: boolean
 }
 
-/** Built-in tools that mutate the project/machine/web, refused in plan mode. */
-const MUTATING_BUILTIN_TOOL_IDS: ReadonlySet<string> = new Set([
-  'edit_file',
-  'write_file',
-  'run_shell_command',
-  // The browser/computer tools act on live pages (click/type/keypress), so
-  // they are not read-only investigation either.
-  'browser',
-  'computer',
-])
-
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
 
 // ---------------------------------------------------------------------------
@@ -204,11 +194,6 @@ const IGNORED_DIR_NAMES = new Set([
 // Helpers
 // ---------------------------------------------------------------------------
 
-function capResult(text: string): string {
-  if (text.length <= TOOL_RESULT_MAX_CHARS) return text
-  return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n…[truncated]`
-}
-
 function errorMessage(e: unknown): string {
   if (e instanceof Error) {
     if (e.name === 'AbortError' || e.name === 'TimeoutError') return 'Request timed out.'
@@ -230,6 +215,22 @@ function resolveWithinRoot(root: string, relPath: string): string | null {
   if (rel === '') return normalizedRoot
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null
   return target
+}
+
+/**
+ * resolveWithinRoot + the standard refusal message: [absPath, null] when the
+ * path stays inside the root, ['', refusal] when it escapes (callers must
+ * return the refusal before using the path).
+ */
+function resolveWithinRootOrRefuse(
+  root: string,
+  relPath: string
+): [absPath: string, refusal: string | null] {
+  const absPath = resolveWithinRoot(root, relPath)
+  if (absPath === null) {
+    return ['', `Error: '${relPath}' is outside the granted project folder; access refused.`]
+  }
+  return [absPath, null]
 }
 
 /**
@@ -282,7 +283,8 @@ export function globToRegExp(pattern: string): RegExp {
  * never freezing; the model is told to simplify.
  */
 export function hasCatastrophicBacktracking(source: string): boolean {
-  const stack: Array<{ quantified: boolean }> = []
+  // One entry per open group: does its body contain an unbounded quantifier?
+  const stack: boolean[] = []
   let escaped = false
   let inClass = false
   for (let i = 0; i < source.length; i++) {
@@ -304,21 +306,21 @@ export function hasCatastrophicBacktracking(source: string): boolean {
       continue
     }
     if (ch === '(') {
-      stack.push({ quantified: false })
+      stack.push(false)
       continue
     }
     if (ch === '*' || ch === '+') {
-      if (stack.length > 0) stack[stack.length - 1].quantified = true
+      if (stack.length > 0) stack[stack.length - 1] = true
       continue
     }
     if (ch === ')') {
-      const group = stack.pop()
+      const bodyQuantified = stack.pop() ?? false
       const next = source[i + 1]
       const groupIsQuantified = next === '*' || next === '+' || next === '{'
-      if (group?.quantified && groupIsQuantified) return true
+      if (bodyQuantified && groupIsQuantified) return true
       // Propagate "contains an unbounded quantifier" to the parent group so a
       // quantifier nested any number of levels deep is still caught.
-      if (group?.quantified && stack.length > 0) stack[stack.length - 1].quantified = true
+      if (bodyQuantified && stack.length > 0) stack[stack.length - 1] = true
       continue
     }
   }
@@ -339,9 +341,25 @@ function getString(args: Record<string, unknown>, key: string): string | null {
   return typeof value === 'string' ? value : null
 }
 
-function looksBinary(buffer: Buffer): boolean {
-  const probe = buffer.subarray(0, 8192)
-  return probe.includes(0)
+/**
+ * Required string argument: [trimmedValue, null] when present and non-empty,
+ * ['', standard refusal] otherwise (callers must return the refusal before
+ * using the value).
+ */
+function requireStringArg(
+  args: Record<string, unknown>,
+  key: string
+): [value: string, error: string | null] {
+  const value = (getString(args, key) ?? '').trim()
+  if (value.length === 0) return ['', `Error: '${key}' must be a non-empty string.`]
+  return [value, null]
+}
+
+/** Integer argument floored and clamped to [1, max]; `def` when absent/not a number. */
+function clampIntArg(args: Record<string, unknown>, key: string, def: number, max: number): number {
+  const value = args[key]
+  const raw = typeof value === 'number' ? Math.floor(value) : NaN
+  return Number.isFinite(raw) ? Math.min(Math.max(raw, 1), max) : def
 }
 
 function isTextualContentType(contentType: string): boolean {
@@ -395,6 +413,12 @@ async function readBodyCapped(
     offset += slice.byteLength
   }
   return decode(joined, truncated)
+}
+
+/** Shared success shape for fetched textual responses (fetch_url + custom tools). */
+function formatHttpResponse(res: Response, text: string, truncated: boolean): string {
+  const status = `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`
+  return `${status}\n\n${text}${truncated ? '\n…[truncated at 512KB]' : ''}`
 }
 
 interface WalkEntry {
@@ -518,9 +542,9 @@ export class ToolExecutor {
    */
   async execute(toolCall: ToolCallRecord, ctx: ToolExecuteContext): Promise<string> {
     try {
-      return capResult(await this.executeInner(toolCall, ctx))
+      return capToolResult(await this.executeInner(toolCall, ctx))
     } catch (e) {
-      return capResult(redactSecrets(`Tool execution failed: ${errorMessage(e)}`))
+      return capToolResult(redactSecrets(`Tool execution failed: ${errorMessage(e)}`))
     }
   }
 
@@ -553,7 +577,8 @@ export class ToolExecutor {
       return `Error: missing required argument(s) for '${definition.name}': ${missing.join(', ')}.`
     }
 
-    if (ctx.planMode && this.isMutatingTool(definition)) {
+    // `mutating` is declared where each tool is defined (see ToolDefinition).
+    if (ctx.planMode && definition.mutating === true) {
       return (
         'Plan mode is active: only read-only investigation is allowed. Present your plan to ' +
         "the user instead of calling '" + definition.name + "'; they can turn plan mode off to proceed."
@@ -575,25 +600,6 @@ export class ToolExecutor {
     }
 
     return this.runTool(definition, args, ctx)
-  }
-
-  /**
-   * Whether a tool may mutate state — used to refuse it in plan mode
-   * ("read-only investigation only"). Covers all three sources, not just the
-   * built-ins: a custom HTTP tool with a non-GET method, and any MCP tool
-   * (whose side effects we can't inspect, so treated conservatively as
-   * mutating) are refused too.
-   */
-  private isMutatingTool(definition: ToolDefinition): boolean {
-    if (MUTATING_BUILTIN_TOOL_IDS.has(definition.id)) return true
-    if (isMcpToolId(definition.id)) return true
-    if (isCustomToolId(definition.id)) {
-      const record = this.deps.registry.getCustomToolRecord(definition.id)
-      // GET is read-only by convention; POST/PUT/PATCH/DELETE may mutate. When
-      // the record is missing, err on the side of refusing.
-      return !record || record.method.toUpperCase() !== 'GET'
-    }
-    return false
   }
 
   private async runTool(
@@ -670,12 +676,9 @@ export class ToolExecutor {
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
 
-    const query = (getString(args, 'query') ?? '').trim()
-    if (query.length === 0) return "Error: 'query' must be a non-empty string."
-    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
-    const maxResults = Number.isFinite(rawMax)
-      ? Math.min(Math.max(rawMax, 1), SEARCH_MAX_RESULTS)
-      : SEARCH_DEFAULT_RESULTS
+    const [query, queryError] = requireStringArg(args, 'query')
+    if (queryError) return queryError
+    const maxResults = clampIntArg(args, 'maxResults', SEARCH_DEFAULT_RESULTS, SEARCH_MAX_RESULTS)
 
     const needle = query.toLowerCase()
     const lines: string[] = []
@@ -718,10 +721,9 @@ export class ToolExecutor {
     if (!this.deps.repoMap || !ctx.conversation.projectId) {
       return 'Error: the repo map is unavailable in this build.'
     }
-    const query = (getString(args, 'query') ?? '').trim()
-    if (query.length === 0) return "Error: 'query' must be a non-empty string."
-    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
-    const maxResults = Number.isFinite(rawMax) ? Math.min(Math.max(rawMax, 1), 30) : 12
+    const [query, queryError] = requireStringArg(args, 'query')
+    if (queryError) return queryError
+    const maxResults = clampIntArg(args, 'maxResults', 12, 30)
 
     let hits
     try {
@@ -748,12 +750,10 @@ export class ToolExecutor {
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
 
-    const relPath = (getString(args, 'path') ?? '').trim()
-    if (relPath.length === 0) return "Error: 'path' must be a non-empty string."
-    const absPath = resolveWithinRoot(root, relPath)
-    if (!absPath) {
-      return `Error: '${relPath}' is outside the granted project folder; access refused.`
-    }
+    const [relPath, relPathError] = requireStringArg(args, 'path')
+    if (relPathError) return relPathError
+    const [absPath, refusal] = resolveWithinRootOrRefuse(root, relPath)
+    if (refusal) return refusal
 
     // Prefer the code service (shared limits/formatting) when it is wired in.
     if (this.deps.codeService && ctx.conversation.projectId) {
@@ -791,10 +791,8 @@ export class ToolExecutor {
     if (!root) return ToolExecutor.NO_PROJECT
 
     const relPath = (getString(args, 'path') ?? '.').trim() || '.'
-    const absPath = resolveWithinRoot(root, relPath)
-    if (!absPath) {
-      return `Error: '${relPath}' is outside the granted project folder; access refused.`
-    }
+    const [absPath, refusal] = resolveWithinRootOrRefuse(root, relPath)
+    if (refusal) return refusal
 
     try {
       const entries = await fs.readdir(absPath, { withFileTypes: true })
@@ -830,8 +828,8 @@ export class ToolExecutor {
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
 
-    const patternSource = (getString(args, 'pattern') ?? '').trim()
-    if (patternSource.length === 0) return "Error: 'pattern' must be a non-empty string."
+    const [patternSource, patternError] = requireStringArg(args, 'pattern')
+    if (patternError) return patternError
     if (hasCatastrophicBacktracking(patternSource)) {
       return "Error: that pattern risks catastrophic backtracking (a repeated group that itself repeats, e.g. '(\\w+\\s?)*'). Simplify it — avoid nesting one unbounded quantifier inside another."
     }
@@ -850,10 +848,7 @@ export class ToolExecutor {
         return 'Error: invalid glob pattern: ' + errorMessage(e)
       }
     }
-    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
-    const maxResults = Number.isFinite(rawMax)
-      ? Math.min(Math.max(rawMax, 1), GREP_MAX_RESULTS)
-      : GREP_DEFAULT_RESULTS
+    const maxResults = clampIntArg(args, 'maxResults', GREP_DEFAULT_RESULTS, GREP_MAX_RESULTS)
 
     const lines: string[] = []
     for (const file of await walkProjectFiles(root)) {
@@ -882,18 +877,15 @@ export class ToolExecutor {
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
 
-    const patternSource = (getString(args, 'pattern') ?? '').trim()
-    if (patternSource.length === 0) return "Error: 'pattern' must be a non-empty string."
+    const [patternSource, patternError] = requireStringArg(args, 'pattern')
+    if (patternError) return patternError
     let pattern: RegExp
     try {
       pattern = globToRegExp(patternSource)
     } catch (e) {
       return 'Error: invalid glob pattern: ' + errorMessage(e)
     }
-    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
-    const maxResults = Number.isFinite(rawMax)
-      ? Math.min(Math.max(rawMax, 1), GLOB_MAX_RESULTS)
-      : GLOB_DEFAULT_RESULTS
+    const maxResults = clampIntArg(args, 'maxResults', GLOB_DEFAULT_RESULTS, GLOB_MAX_RESULTS)
 
     const matches = (await walkProjectFiles(root))
       .filter((file) => pattern.test(file.relPath))
@@ -910,8 +902,9 @@ export class ToolExecutor {
 
     const action = (getString(args, 'action') ?? '').trim()
     const relPath = (getString(args, 'path') ?? '').trim()
-    if (relPath && !resolveWithinRoot(root, relPath)) {
-      return "Error: '" + relPath + "' is outside the granted project folder; access refused."
+    if (relPath) {
+      const [, refusal] = resolveWithinRootOrRefuse(root, relPath)
+      if (refusal) return refusal
     }
 
     // SAFETY: argv is built exclusively from this fixed allowlist — the model
@@ -927,8 +920,7 @@ export class ToolExecutor {
         break
       }
       case 'log': {
-        const rawMax = typeof args.maxCount === 'number' ? Math.floor(args.maxCount) : NaN
-        const maxCount = Number.isFinite(rawMax) ? Math.min(Math.max(rawMax, 1), 100) : 20
+        const maxCount = clampIntArg(args, 'maxCount', 20, 100)
         argv = ['log', '--oneline', '--no-decorate', '-n', String(maxCount)]
         if (relPath) argv.push('--', relPath)
         break
@@ -944,36 +936,31 @@ export class ToolExecutor {
   }
 
   private async runWebSearch(args: Record<string, unknown>): Promise<string> {
-    const query = (getString(args, 'query') ?? '').trim()
-    if (query.length === 0) return "Error: 'query' must be a non-empty string."
-    const rawMax = typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : NaN
-    const maxResults = Number.isFinite(rawMax)
-      ? Math.min(Math.max(rawMax, 1), WEB_SEARCH_MAX_RESULTS)
-      : WEB_SEARCH_DEFAULT_RESULTS
+    const [query, queryError] = requireStringArg(args, 'query')
+    if (queryError) return queryError
+    const maxResults = clampIntArg(
+      args,
+      'maxResults',
+      WEB_SEARCH_DEFAULT_RESULTS,
+      WEB_SEARCH_MAX_RESULTS
+    )
 
-    const fetchImpl = this.deps.fetchImpl ?? fetch
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
-      const res = await fetchImpl(
+      return await this.fetchWithTimeout(
         'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query),
-        {
-          method: 'GET',
-          signal: controller.signal,
-          headers: { accept: 'text/html' },
+        { method: 'GET', headers: { accept: 'text/html' } },
+        async (res) => {
+          if (!res.ok) return 'Error: the search engine returned HTTP ' + res.status + '.'
+          const { text } = await readBodyCapped(res, FETCH_MAX_BYTES)
+          const results = parseDuckDuckGoHtml(text, maxResults)
+          if (results.length === 0) return 'No results found for "' + query + '".'
+          return results
+            .map((r, i) => i + 1 + '. ' + r.title + ' — ' + r.url + (r.snippet ? '\n   ' + r.snippet : ''))
+            .join('\n')
         }
       )
-      if (!res.ok) return 'Error: the search engine returned HTTP ' + res.status + '.'
-      const { text } = await readBodyCapped(res, FETCH_MAX_BYTES)
-      const results = parseDuckDuckGoHtml(text, maxResults)
-      if (results.length === 0) return 'No results found for "' + query + '".'
-      return results
-        .map((r, i) => i + 1 + '. ' + r.title + ' — ' + r.url + (r.snippet ? '\n   ' + r.snippet : ''))
-        .join('\n')
     } catch (e) {
       return redactSecrets('Error searching the web: ' + errorMessage(e))
-    } finally {
-      clearTimeout(timer)
     }
   }
 
@@ -994,10 +981,10 @@ export class ToolExecutor {
     const gate = this.requireCodeChanges(ctx)
     if (typeof gate === 'string') return gate
 
-    const relPath = (getString(args, 'path') ?? '').trim()
+    const [relPath, relPathError] = requireStringArg(args, 'path')
     const oldString = getString(args, 'old_string')
     const newString = getString(args, 'new_string')
-    if (relPath.length === 0) return "Error: 'path' must be a non-empty string."
+    if (relPathError) return relPathError
     if (oldString === null || oldString.length === 0) {
       return "Error: 'old_string' must be a non-empty string."
     }
@@ -1046,14 +1033,12 @@ export class ToolExecutor {
     const gate = this.requireCodeChanges(ctx)
     if (typeof gate === 'string') return gate
 
-    const relPath = (getString(args, 'path') ?? '').trim()
+    const [relPath, relPathError] = requireStringArg(args, 'path')
     const content = getString(args, 'content')
-    if (relPath.length === 0) return "Error: 'path' must be a non-empty string."
+    if (relPathError) return relPathError
     if (content === null) return "Error: 'content' must be a string."
-    const absPath = resolveWithinRoot(gate.root, relPath)
-    if (!absPath) {
-      return "Error: '" + relPath + "' is outside the granted project folder; access refused."
-    }
+    const [absPath, refusal] = resolveWithinRootOrRefuse(gate.root, relPath)
+    if (refusal) return refusal
 
     let exists = false
     try {
@@ -1082,15 +1067,15 @@ export class ToolExecutor {
 
   private runTaskOutput(args: Record<string, unknown>): string {
     if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
-    const taskId = (getString(args, 'taskId') ?? '').trim()
-    if (taskId.length === 0) return "Error: 'taskId' must be a non-empty string."
+    const [taskId, taskIdError] = requireStringArg(args, 'taskId')
+    if (taskIdError) return taskIdError
     return this.deps.delegateBackground.output(taskId)
   }
 
   private runTaskStop(args: Record<string, unknown>): string {
     if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
-    const taskId = (getString(args, 'taskId') ?? '').trim()
-    if (taskId.length === 0) return "Error: 'taskId' must be a non-empty string."
+    const [taskId, taskIdError] = requireStringArg(args, 'taskId')
+    if (taskIdError) return taskIdError
     return this.deps.delegateBackground.stop(taskId)
   }
 
@@ -1100,7 +1085,7 @@ export class ToolExecutor {
     if (!Array.isArray(raw) || raw.length === 0) {
       return "Error: 'tasks' must be a non-empty array of { content, status }."
     }
-    const lines: string[] = []
+    const tasks: TaskListItem[] = []
     for (const entry of raw) {
       if (typeof entry !== 'object' || entry === null) {
         return "Error: every task must be an object with 'content' and 'status'."
@@ -1112,11 +1097,9 @@ export class ToolExecutor {
       if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') {
         return "Error: task status must be 'pending', 'in_progress' or 'completed'."
       }
-      if (status === 'completed') lines.push('- [x] ' + content)
-      else if (status === 'in_progress') lines.push('- [ ] ' + content + ' ⟵ in progress')
-      else lines.push('- [ ] ' + content)
+      tasks.push({ content, status })
     }
-    return this.deps.taskList.update(ctx.conversation.id, lines.join('\n'))
+    return this.deps.taskList.update(ctx.conversation.id, encodeTaskList(tasks))
   }
 
   private async runAskUserQuestion(
@@ -1124,8 +1107,8 @@ export class ToolExecutor {
     ctx: ToolExecuteContext
   ): Promise<string> {
     if (!ctx.askUser) return 'Error: asking the user a question is unavailable here.'
-    const question = (getString(args, 'question') ?? '').trim()
-    if (question.length === 0) return "Error: 'question' must be a non-empty string."
+    const [question, questionError] = requireStringArg(args, 'question')
+    if (questionError) return questionError
     const options = Array.isArray(args.options)
       ? args.options
           .filter((option): option is string => typeof option === 'string')
@@ -1142,6 +1125,27 @@ export class ToolExecutor {
 
   // -- network tools --------------------------------------------------------------
 
+  /**
+   * Fetches `url` and runs `consume` on the response, aborting after
+   * FETCH_TIMEOUT_MS. The timer stays armed until `consume` finishes so a slow
+   * body read times out just like slow headers; callers keep their own
+   * catch/refusal messages around this call.
+   */
+  private async fetchWithTimeout<T>(
+    url: string,
+    init: RequestInit,
+    consume: (res: Response) => Promise<T>
+  ): Promise<T> {
+    const fetchImpl = this.deps.fetchImpl ?? fetch
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      return await consume(await fetchImpl(url, { ...init, signal: controller.signal }))
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   private async runFetchUrl(args: Record<string, unknown>): Promise<string> {
     const url = (getString(args, 'url') ?? '').trim()
     let parsed: URL
@@ -1157,35 +1161,33 @@ export class ToolExecutor {
       return 'Error: URLs with embedded credentials are not allowed.'
     }
 
-    const fetchImpl = this.deps.fetchImpl ?? fetch
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
       // GET only; no credentials, cookies or custom auth are ever attached.
-      const res = await fetchImpl(parsed.toString(), {
-        method: 'GET',
-        signal: controller.signal,
-        headers: { accept: 'text/*, application/json, application/xml;q=0.9, */*;q=0.1' },
-      })
-      const contentType = res.headers.get('content-type') ?? ''
-      if (!isTextualContentType(contentType)) {
-        return `Error: refused non-textual response (content-type '${contentType || 'unknown'}'). Only text/*, JSON and XML responses are returned.`
-      }
-      const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
-      const status = `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`
-      return `${status}\n\n${text}${truncated ? '\n…[truncated at 512KB]' : ''}`
+      return await this.fetchWithTimeout(
+        parsed.toString(),
+        {
+          method: 'GET',
+          headers: { accept: 'text/*, application/json, application/xml;q=0.9, */*;q=0.1' },
+        },
+        async (res) => {
+          const contentType = res.headers.get('content-type') ?? ''
+          if (!isTextualContentType(contentType)) {
+            return `Error: refused non-textual response (content-type '${contentType || 'unknown'}'). Only text/*, JSON and XML responses are returned.`
+          }
+          const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
+          return formatHttpResponse(res, text, truncated)
+        }
+      )
     } catch (e) {
       return redactSecrets(`Error fetching URL: ${errorMessage(e)}`)
-    } finally {
-      clearTimeout(timer)
     }
   }
 
   // -- shell suggestion (NEVER executes) --------------------------------------------
 
   private runProposeShellCommand(args: Record<string, unknown>): string {
-    const command = (getString(args, 'command') ?? '').trim()
-    if (command.length === 0) return "Error: 'command' must be a non-empty string."
+    const [command, commandError] = requireStringArg(args, 'command')
+    if (commandError) return commandError
     // There is intentionally NO execution path here: no child_process, no
     // shell, nothing. The renderer shows the suggestion; the user decides.
     return `Command suggested to the user (not executed): ${command}`
@@ -1248,8 +1250,8 @@ export class ToolExecutor {
 
   private runUseSkill(args: Record<string, unknown>): string {
     if (!this.deps.skills) return 'Error: skills are unavailable in this build.'
-    const name = (getString(args, 'name') ?? '').trim()
-    if (name.length === 0) return "Error: 'name' must be a non-empty string."
+    const [name, nameError] = requireStringArg(args, 'name')
+    if (nameError) return nameError
     const skill = this.deps.skills.getEnabledByName(name)
     if (!skill) {
       const available = this.deps.skills.listEnabledNames()
@@ -1267,8 +1269,8 @@ export class ToolExecutor {
     ctx: ToolExecuteContext
   ): Promise<string> {
     if (!this.deps.delegate) return 'Error: sub-agent delegation is unavailable in this build.'
-    const task = (getString(args, 'task') ?? '').trim()
-    if (task.length === 0) return "Error: 'task' must be a non-empty string."
+    const [task, taskError] = requireStringArg(args, 'task')
+    if (taskError) return taskError
     const context = (getString(args, 'context') ?? '').trim()
     const prompt = context ? `${task}\n\nContext:\n${context}` : task
     if (args.background === true) {
@@ -1291,8 +1293,8 @@ export class ToolExecutor {
     }
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
-    const command = (getString(args, 'command') ?? '').trim()
-    if (command.length === 0) return "Error: 'command' must be a non-empty string."
+    const [command, commandError] = requireStringArg(args, 'command')
+    if (commandError) return commandError
 
     const result = await runShell(command, root, SHELL_TIMEOUT_MS)
     const parts: string[] = []
@@ -1331,7 +1333,7 @@ export class ToolExecutor {
     }
 
     const method = record.method.toUpperCase()
-    const init: RequestInit = { method, signal: undefined, headers: { ...headers } }
+    const init: RequestInit = { method, headers: { ...headers } }
     if (method === 'GET' || method === 'DELETE') {
       for (const [key, value] of Object.entries(args)) {
         url.searchParams.set(key, typeof value === 'string' ? value : JSON.stringify(value))
@@ -1341,32 +1343,23 @@ export class ToolExecutor {
       init.headers = { 'content-type': 'application/json', ...headers }
     }
 
-    const fetchImpl = this.deps.fetchImpl ?? fetch
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-    init.signal = controller.signal
     try {
-      const res = await fetchImpl(url.toString(), init)
-      const contentType = res.headers.get('content-type') ?? ''
-      if (!isTextualContentType(contentType)) {
-        return `Error: custom tool '${definition.name}' returned a non-textual response (content-type '${contentType || 'unknown'}').`
-      }
-      const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
-      const status = `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`
-      // SUCCESS path: strip only the known header/secret values so legitimate
-      // hashes/ids in the response body survive intact (generic patterns would
-      // corrupt them). Error paths below still use full redactSecrets.
-      return redactKnownSecrets(
-        `${status}\n\n${text}${truncated ? '\n…[truncated at 512KB]' : ''}`,
-        secrets
-      )
+      return await this.fetchWithTimeout(url.toString(), init, async (res) => {
+        const contentType = res.headers.get('content-type') ?? ''
+        if (!isTextualContentType(contentType)) {
+          return `Error: custom tool '${definition.name}' returned a non-textual response (content-type '${contentType || 'unknown'}').`
+        }
+        const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
+        // SUCCESS path: strip only the known header/secret values so legitimate
+        // hashes/ids in the response body survive intact (generic patterns would
+        // corrupt them). Error paths below still use full redactSecrets.
+        return redactKnownSecrets(formatHttpResponse(res, text, truncated), secrets)
+      })
     } catch (e) {
       return redactSecrets(
         `Error calling custom tool '${definition.name}': ${errorMessage(e)}`,
         secrets
       )
-    } finally {
-      clearTimeout(timer)
     }
   }
 }

@@ -12,7 +12,8 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
-import type { SqliteDriver, SqlValue } from '../driver'
+import type { SqliteDriver } from '../driver'
+import { parseJson, updateById } from './util'
 
 export interface MessagePatch {
   content?: string
@@ -60,12 +61,7 @@ interface MessageRow {
 }
 
 function parseJsonColumn<T>(text: string | null): T | undefined {
-  if (text === null || text === '') return undefined
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return undefined
-  }
+  return parseJson<T | undefined>(text, undefined)
 }
 
 function toMessage(row: MessageRow): Message {
@@ -129,36 +125,15 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
     },
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.content !== undefined) {
-        sets.push('content = ?')
-        params.push(patch.content)
-      }
-      if (patch.reasoning !== undefined) {
-        sets.push('reasoning = ?')
-        params.push(patch.reasoning)
-      }
-      if (patch.status !== undefined) {
-        sets.push('status = ?')
-        params.push(patch.status)
-      }
-      if (patch.error !== undefined) {
-        sets.push('error_json = ?')
-        params.push(patch.error === null ? null : JSON.stringify(patch.error))
-      }
-      if (patch.usage !== undefined) {
-        sets.push('usage_json = ?')
-        params.push(patch.usage === null ? null : JSON.stringify(patch.usage))
-      }
-      if (patch.toolCalls !== undefined) {
-        sets.push('tool_calls_json = ?')
-        params.push(patch.toolCalls === null ? null : JSON.stringify(patch.toolCalls))
-      }
-      if (sets.length > 0) {
-        params.push(id)
-        driver.run(`UPDATE messages SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      // messages has no updated_at column, so no touch.
+      updateById(driver, 'messages', id, {
+        content: patch.content,
+        reasoning: patch.reasoning,
+        status: patch.status,
+        error_json: patch.error == null ? patch.error : JSON.stringify(patch.error),
+        usage_json: patch.usage == null ? patch.usage : JSON.stringify(patch.usage),
+        tool_calls_json: patch.toolCalls == null ? patch.toolCalls : JSON.stringify(patch.toolCalls),
+      })
       return getById(id)
     },
 

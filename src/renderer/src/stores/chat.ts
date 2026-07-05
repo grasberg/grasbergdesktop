@@ -43,6 +43,13 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
     }))
   }
 
+  /** Replaces the message with the given id by `fn(message)`; others untouched. */
+  const patchMessage = (id: string, fn: (m: Message) => Message): void => {
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? fn(m) : m)),
+    }))
+  }
+
   return {
     conversation: null,
     messages: [],
@@ -205,59 +212,36 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
         case 'text-delta':
         case 'reasoning-delta': {
           if (!streaming) return
-          const id = streaming.assistantMessageId
-          set((s) => ({
-            messages: s.messages.map((m) => {
-              if (m.id !== id) return m
-              return event.type === 'text-delta'
-                ? { ...m, content: m.content + event.text }
-                : { ...m, reasoning: (m.reasoning ?? '') + event.text }
-            }),
-          }))
+          patchMessage(streaming.assistantMessageId, (m) =>
+            event.type === 'text-delta'
+              ? { ...m, content: m.content + event.text }
+              : { ...m, reasoning: (m.reasoning ?? '') + event.text }
+          )
           return
         }
         case 'usage': {
           if (!streaming) return
-          const id = streaming.assistantMessageId
-          set((s) => ({
-            messages: s.messages.map((m) => (m.id === id ? { ...m, usage: event.usage } : m)),
-          }))
+          patchMessage(streaming.assistantMessageId, (m) => ({ ...m, usage: event.usage }))
           return
         }
         case 'tool-call': {
           if (!streaming) return
-          const id = streaming.assistantMessageId
-          set((s) => ({
-            messages: s.messages.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    toolCalls: [
-                      ...(m.toolCalls ?? []).filter((tc) => tc.id !== event.toolCall.id),
-                      event.toolCall,
-                    ],
-                  }
-                : m
-            ),
+          patchMessage(streaming.assistantMessageId, (m) => ({
+            ...m,
+            toolCalls: [
+              ...(m.toolCalls ?? []).filter((tc) => tc.id !== event.toolCall.id),
+              event.toolCall,
+            ],
           }))
           return
         }
-        case 'done': {
-          set((s) => ({
-            messages: replaceOrAppend(s.messages, event.message.id, event.message),
-            streaming:
-              s.streaming?.streamId === envelope.streamId ? null : s.streaming,
-          }))
-          void useConversationsStore.getState().load()
-          refreshOpenConversation(envelope.conversationId)
-          return
-        }
+        case 'done':
         case 'error': {
           set((s) => ({
             messages: replaceOrAppend(s.messages, event.message.id, event.message),
             streaming:
               s.streaming?.streamId === envelope.streamId ? null : s.streaming,
-            error: event.error,
+            ...(event.type === 'error' ? { error: event.error } : {}),
           }))
           void useConversationsStore.getState().load()
           refreshOpenConversation(envelope.conversationId)

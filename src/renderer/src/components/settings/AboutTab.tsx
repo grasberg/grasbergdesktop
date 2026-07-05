@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AppInfo } from '@shared/types'
+import { errorMessage } from '@/api/uld'
 import { useUiStore } from '@/stores/ui'
-import { errorMessage } from './ProvidersTab'
 
 const PLATFORM_LABELS: Record<AppInfo['platform'], string> = {
   darwin: 'macOS',

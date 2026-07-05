@@ -5,10 +5,28 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { BrowserWindow, app, dialog, ipcMain } from 'electron'
+import {
+  BrowserWindow,
+  app,
+  dialog,
+  ipcMain,
+  type FileFilter,
+  type OpenDialogOptions,
+  type OpenDialogReturnValue,
+  type SaveDialogOptions,
+  type SaveDialogReturnValue,
+} from 'electron'
 import { z } from 'zod'
 import { CHANNELS, err, ok, type ChannelName, type PickFilesResult } from '@shared/ipc'
-import type { AppInfo, Attachment, WorkflowGraph, WorkflowInput } from '@shared/types'
+import type {
+  AppInfo,
+  Attachment,
+  ConversationMode,
+  ToolPermissionDecision,
+  WorkflowGraph,
+  WorkflowInput,
+  WorkspaceItemKind,
+} from '@shared/types'
 import { runWorkflow } from '../workflows/engine'
 import {
   CHATGPT_OAUTH_DEFAULT_MODEL,
@@ -35,6 +53,7 @@ import {
   providerConfigInputSchema,
   providerConfigPatchSchema,
   settingsPatchSchema,
+  isValidStorageKey,
 } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 import type { ChatService } from '../services/chat-service'
@@ -104,11 +123,41 @@ function requireBoolean(value: unknown, label: string): boolean {
   return value
 }
 
+/** Narrows a lookup/update result, throwing the uniform '<Label> not found.' error. */
+function found<T>(value: T | null | undefined, label: string): T {
+  if (value === null || value === undefined) throw invalid(`${label} not found.`)
+  return value
+}
+
+/** Runs `fn`, rethrowing anything it throws as invalid_request (Error message, else `fallback`). */
+function asInvalid<T>(fn: () => T, fallback: string): T {
+  try {
+    return fn()
+  } catch (e) {
+    throw invalid(e instanceof Error ? e.message : fallback)
+  }
+}
+
+/** Async variant of `asInvalid` (also converts rejections). */
+async function asInvalidAsync<T>(fn: () => Promise<T>, fallback: string): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    throw invalid(e instanceof Error ? e.message : fallback)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Schemas without a shared counterpart (hand-rolled, minimal)
 // ---------------------------------------------------------------------------
 
-const conversationModeSchema = z.enum(['chat', 'cowork', 'code', 'write', 'design'])
+const conversationModeSchema = z.enum([
+  'chat',
+  'cowork',
+  'code',
+  'write',
+  'design',
+]) satisfies z.ZodType<ConversationMode>
 
 const convListSchema = z
   .object({
@@ -150,7 +199,13 @@ const attachmentSchema = z.object({
   sizeBytes: z.number().int().nonnegative(),
   kind: z.enum(['text', 'image']).optional(),
   textContent: z.string().max(2_000_000).optional(),
-  storageKey: z.string().max(300).optional(),
+  // Only the app-generated '<uuid>.<ext>' shape is a valid key; enforcing it
+  // here keeps traversal-shaped keys out of the persisted message row.
+  storageKey: z
+    .string()
+    .max(300)
+    .refine(isValidStorageKey, { message: 'Invalid attachment storage key' })
+    .optional(),
 })
 
 const chatSendSchema = z.object({
@@ -188,7 +243,13 @@ const workspacePatchSchema = z.object({
   status: z.enum(['active', 'done', 'archived']).optional(),
 })
 
-const workspaceItemKindSchema = z.enum(['note', 'plan', 'checklist', 'doc', 'task'])
+const workspaceItemKindSchema = z.enum([
+  'note',
+  'plan',
+  'checklist',
+  'doc',
+  'task',
+]) satisfies z.ZodType<WorkspaceItemKind>
 
 const workspaceItemCreateSchema = z.object({
   workspaceId: z.string().min(1),
@@ -206,7 +267,11 @@ const workspaceItemPatchSchema = z.object({
   kind: workspaceItemKindSchema.optional(),
 })
 
-const toolPermissionDecisionSchema = z.enum(['always_allow', 'ask', 'deny'])
+const toolPermissionDecisionSchema = z.enum([
+  'always_allow',
+  'ask',
+  'deny',
+]) satisfies z.ZodType<ToolPermissionDecision>
 
 const codeReadFileSchema = z.object({
   projectId: z.string().min(1),
@@ -217,6 +282,16 @@ const convExportSchema = z.object({
   conversationId: z.string().min(1),
   format: z.enum(['markdown', 'json']),
 })
+
+const imTelegramSchema = z
+  .object({
+    token: z.string().max(4096).optional(),
+    conversationId: z.string().nullable(),
+    enabled: z.boolean(),
+  })
+  .strict()
+
+const documentExportFormatSchema = z.enum(['markdown', 'html'])
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -237,6 +312,28 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   const dialogParent = (): BrowserWindow | undefined =>
     BrowserWindow.getFocusedWindow() ?? deps.getWindows()[0]
+
+  const showOpen = (options: OpenDialogOptions): Promise<OpenDialogReturnValue> => {
+    const parent = dialogParent()
+    return parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options)
+  }
+
+  const showSave = (options: SaveDialogOptions): Promise<SaveDialogReturnValue> => {
+    const parent = dialogParent()
+    return parent ? dialog.showSaveDialog(parent, options) : dialog.showSaveDialog(options)
+  }
+
+  /** Shared save-dialog → write flow used by the export handlers. */
+  const saveTextFile = async (
+    defaultPath: string,
+    filters: FileFilter[],
+    content: string
+  ): Promise<{ canceled: boolean; path?: string }> => {
+    const result = await showSave({ defaultPath, filters })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await writeFile(result.filePath, content, 'utf8')
+    return { canceled: false, path: result.filePath }
+  }
 
   const requireProvider = (id: unknown) => {
     const provider = db.providers.getById(requireString(id, 'Provider id'))
@@ -259,23 +356,13 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   register(CHANNELS.appPickFolder, async (): Promise<string | null> => {
-    const parent = dialogParent()
-    const options = { properties: ['openDirectory'] as Array<'openDirectory'> }
-    const result = parent
-      ? await dialog.showOpenDialog(parent, options)
-      : await dialog.showOpenDialog(options)
+    const result = await showOpen({ properties: ['openDirectory'] })
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]
   })
 
   register(CHANNELS.appPickFiles, async (): Promise<PickFilesResult> => {
-    const parent = dialogParent()
-    const options = {
-      properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
-    }
-    const result = parent
-      ? await dialog.showOpenDialog(parent, options)
-      : await dialog.showOpenDialog(options)
+    const result = await showOpen({ properties: ['openFile', 'multiSelections'] })
     if (result.canceled) return { attachments: [] }
     const attachments: Attachment[] = []
     for (const filePath of result.filePaths) {
@@ -337,9 +424,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.providersUpdate, (id, patch) => {
     const providerId = requireString(id, 'Provider id')
     const parsed = parseInput(providerConfigPatchSchema, patch)
-    const updated = db.providers.update(providerId, parsed)
-    if (!updated) throw invalid('Provider not found.')
-    return updated
+    return found(db.providers.update(providerId, parsed), 'Provider')
   })
 
   register(CHANNELS.providersDelete, (id) => {
@@ -361,17 +446,13 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     const key = parseInput(apiKeySchema, apiKey)
     const { encryptedBase64, preview } = keystore.encryptKey(key)
     db.providers.setKeyRow(provider.id, encryptedBase64, preview)
-    const updated = db.providers.getById(provider.id)
-    if (!updated) throw invalid('Provider not found.')
-    return updated
+    return found(db.providers.getById(provider.id), 'Provider')
   })
 
   register(CHANNELS.providersDeleteKey, (id) => {
     const provider = requireProvider(id)
     db.providers.deleteKeyRow(provider.id)
-    const updated = db.providers.getById(provider.id)
-    if (!updated) throw invalid('Provider not found.')
-    return updated
+    return found(db.providers.getById(provider.id), 'Provider')
   })
 
   register(CHANNELS.providersTest, async (id) => {
@@ -450,17 +531,13 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     db.conversations.create(parseInput(convCreateSchema, req))
   )
 
-  register(CHANNELS.convGet, (id) => {
-    const conversation = db.conversations.getById(requireString(id, 'Conversation id'))
-    if (!conversation) throw invalid('Conversation not found.')
-    return conversation
-  })
+  register(CHANNELS.convGet, (id) =>
+    found(db.conversations.getById(requireString(id, 'Conversation id')), 'Conversation')
+  )
 
   register(CHANNELS.convUpdate, (req) => {
     const parsed = parseInput(convUpdateSchema, req)
-    const updated = db.conversations.update(parsed.id, parsed.patch)
-    if (!updated) throw invalid('Conversation not found.')
-    return updated
+    return found(db.conversations.update(parsed.id, parsed.patch), 'Conversation')
   })
 
   register(CHANNELS.convDelete, (id) => {
@@ -478,27 +555,20 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.convExport, async (req) => {
     const parsed = parseInput(convExportSchema, req)
-    const conversation = db.conversations.getById(parsed.conversationId)
-    if (!conversation) throw invalid('Conversation not found.')
+    const conversation = found(db.conversations.getById(parsed.conversationId), 'Conversation')
     const messages = db.messages.listByConversation(parsed.conversationId)
     const isMarkdown = parsed.format === 'markdown'
     const content = isMarkdown ? toMarkdown(conversation, messages) : toJson(conversation, messages)
     const ext = isMarkdown ? 'md' : 'json'
-    const dialogOptions = {
-      defaultPath: `${exportFileBase(conversation)}.${ext}`,
-      filters: [
+    return saveTextFile(
+      `${exportFileBase(conversation)}.${ext}`,
+      [
         isMarkdown
           ? { name: 'Markdown', extensions: ['md'] }
           : { name: 'JSON', extensions: ['json'] },
       ],
-    }
-    const parent = dialogParent()
-    const result = parent
-      ? await dialog.showSaveDialog(parent, dialogOptions)
-      : await dialog.showSaveDialog(dialogOptions)
-    if (result.canceled || !result.filePath) return { canceled: true }
-    await writeFile(result.filePath, content, 'utf8')
-    return { canceled: false, path: result.filePath }
+      content
+    )
   })
 
   // -- chat ------------------------------------------------------------------------
@@ -537,17 +607,16 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     db.workspaces.create(parseInput(workspaceCreateSchema, input))
   )
 
-  register(CHANNELS.workspaceGet, (id) => {
-    const workspace = db.workspaces.getById(requireString(id, 'Workspace id'))
-    if (!workspace) throw invalid('Workspace not found.')
-    return workspace
-  })
+  register(CHANNELS.workspaceGet, (id) =>
+    found(db.workspaces.getById(requireString(id, 'Workspace id')), 'Workspace')
+  )
 
   register(CHANNELS.workspaceUpdate, (id, patch) => {
     const workspaceId = requireString(id, 'Workspace id')
-    const updated = db.workspaces.update(workspaceId, parseInput(workspacePatchSchema, patch))
-    if (!updated) throw invalid('Workspace not found.')
-    return updated
+    return found(
+      db.workspaces.update(workspaceId, parseInput(workspacePatchSchema, patch)),
+      'Workspace'
+    )
   })
 
   register(CHANNELS.workspaceDelete, (id) => {
@@ -565,9 +634,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.workspaceItemUpdate, (id, patch) => {
     const itemId = requireString(id, 'Item id')
-    const updated = db.workspaces.itemUpdate(itemId, parseInput(workspaceItemPatchSchema, patch))
-    if (!updated) throw invalid('Workspace item not found.')
-    return updated
+    return found(
+      db.workspaces.itemUpdate(itemId, parseInput(workspaceItemPatchSchema, patch)),
+      'Workspace item'
+    )
   })
 
   register(CHANNELS.workspaceItemDelete, (id) => {
@@ -620,11 +690,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     const id = requireString(toolId, 'Tool id')
     const flag = requireBoolean(enabled, 'enabled')
     // The registry rejects ids it does not know (throws a plain Error).
-    try {
-      toolSystem.registry.setEnabled(id, flag)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
-    }
+    asInvalid(() => toolSystem.registry.setEnabled(id, flag), 'Unknown tool.')
     return undefined
   })
 
@@ -633,11 +699,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.toolsPermissionSet, (toolId, decision) => {
     const id = requireString(toolId, 'Tool id')
     const parsed = parseInput(toolPermissionDecisionSchema, decision)
-    try {
-      toolSystem.registry.setPermission(id, parsed)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
-    }
+    asInvalid(() => toolSystem.registry.setPermission(id, parsed), 'Unknown tool.')
     return undefined
   })
 
@@ -680,12 +742,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.toolsCustomCreate, (input) => {
     const parsed = parseInput(customToolInputSchema, input)
-    let definition
-    try {
-      definition = toolSystem.registry.addCustomTool(parsed)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Invalid custom tool.')
-    }
+    const definition = asInvalid(
+      () => toolSystem.registry.addCustomTool(parsed),
+      'Invalid custom tool.'
+    )
     storeSecretHeaders(customToolDbId(definition.id), parsed.setSecretHeaders)
     return toolSystem.registry.listCustomToolInfos()
   })
@@ -693,12 +753,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.toolsCustomUpdate, (toolId, patch) => {
     const id = requireString(toolId, 'Tool id')
     const parsed = parseInput(customToolPatchSchema, patch)
-    let definition
-    try {
-      definition = toolSystem.registry.updateCustomTool(id, parsed)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Invalid custom tool.')
-    }
+    const definition = asInvalid(
+      () => toolSystem.registry.updateCustomTool(id, parsed),
+      'Invalid custom tool.'
+    )
     const dbId = customToolDbId(definition.id)
     for (const name of parsed.deleteSecretHeaders ?? []) {
       db.secrets.remove('custom_tool', dbId, name)
@@ -710,11 +768,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.toolsCustomDelete, (toolId) => {
     const id = requireString(toolId, 'Tool id')
     const dbId = customToolDbId(id)
-    try {
-      toolSystem.registry.removeCustomTool(id)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Unknown tool.')
-    }
+    asInvalid(() => toolSystem.registry.removeCustomTool(id), 'Unknown tool.')
     db.secrets.deleteAllFor('custom_tool', dbId)
     return toolSystem.registry.listCustomToolInfos()
   })
@@ -729,9 +783,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.promptsUpdate, (id, patch) => {
     const templateId = requireString(id, 'Prompt id')
-    const updated = db.prompts.update(templateId, parseInput(promptTemplatePatchSchema, patch))
-    if (!updated) throw invalid('Prompt not found.')
-    return updated
+    return found(db.prompts.update(templateId, parseInput(promptTemplatePatchSchema, patch)), 'Prompt')
   })
 
   register(CHANNELS.promptsDelete, (id) => {
@@ -749,9 +801,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.memoriesUpdate, (id, patch) => {
     const memoryId = requireString(id, 'Memory id')
-    const updated = db.memories.update(memoryId, parseInput(memoryPatchSchema, patch))
-    if (!updated) throw invalid('Memory not found.')
-    return updated
+    return found(db.memories.update(memoryId, parseInput(memoryPatchSchema, patch)), 'Memory')
   })
 
   register(CHANNELS.memoriesDelete, (id) => {
@@ -767,9 +817,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.skillsUpdate, (id, patch) => {
     const skillId = requireString(id, 'Skill id')
-    const updated = db.skills.update(skillId, parseInput(skillPatchSchema, patch))
-    if (!updated) throw invalid('Skill not found.')
-    return updated
+    return found(db.skills.update(skillId, parseInput(skillPatchSchema, patch)), 'Skill')
   })
 
   register(CHANNELS.skillsDelete, (id) => {
@@ -779,12 +827,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.skillsImportFolder, async (path) => {
     const folder = requireString(path, 'Folder path')
-    let result
-    try {
-      result = await readSkillsFromFolder(folder)
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Could not read the folder.')
-    }
+    const result = await asInvalidAsync(
+      () => readSkillsFromFolder(folder),
+      'Could not read the folder.'
+    )
     return result.skills.map((skill) =>
       db.skills.upsertByName({
         name: skill.name,
@@ -800,28 +846,18 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.backupExport, async () => {
     const date = new Date().toISOString().slice(0, 10)
-    const options = {
-      defaultPath: `grasberg-backup-${date}.json`,
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-    }
-    const parent = dialogParent()
-    const result = parent
-      ? await dialog.showSaveDialog(parent, options)
-      : await dialog.showSaveDialog(options)
-    if (result.canceled || !result.filePath) return { canceled: true }
-    await writeFile(result.filePath, JSON.stringify(buildBackup(db), null, 2), 'utf8')
-    return { canceled: false, path: result.filePath }
+    return saveTextFile(
+      `grasberg-backup-${date}.json`,
+      [{ name: 'JSON', extensions: ['json'] }],
+      JSON.stringify(buildBackup(db), null, 2)
+    )
   })
 
   register(CHANNELS.backupImport, async () => {
-    const options = {
-      properties: ['openFile'] as Array<'openFile'>,
+    const result = await showOpen({
+      properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }],
-    }
-    const parent = dialogParent()
-    const result = parent
-      ? await dialog.showOpenDialog(parent, options)
-      : await dialog.showOpenDialog(options)
+    })
     if (result.canceled || result.filePaths.length === 0) return { canceled: true }
     let raw: unknown
     try {
@@ -829,11 +865,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     } catch {
       throw invalid('The selected file is not valid JSON.')
     }
-    try {
-      return { canceled: false, ...applyBackup(db, raw) }
-    } catch (e) {
-      throw invalid(e instanceof Error ? e.message : 'Could not import the backup.')
-    }
+    return asInvalid(
+      () => ({ canceled: false, ...applyBackup(db, raw) }),
+      'Could not import the backup.'
+    )
   })
 
   // -- MCP servers ------------------------------------------------------------
@@ -882,19 +917,9 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.imStatus, () => imBridgeManager.status())
 
-  register(CHANNELS.imSetTelegram, (input) => {
-    const parsed = parseInput(
-      z
-        .object({
-          token: z.string().max(4096).optional(),
-          conversationId: z.string().nullable(),
-          enabled: z.boolean(),
-        })
-        .strict(),
-      input
-    )
-    return imBridgeManager.setTelegram(parsed)
-  })
+  register(CHANNELS.imSetTelegram, (input) =>
+    imBridgeManager.setTelegram(parseInput(imTelegramSchema, input))
+  )
 
   register(CHANNELS.imSetWebhook, (url) => {
     if (url !== null && typeof url !== 'string') throw invalid('Webhook URL must be a string or null.')
@@ -911,8 +936,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     const id = requireString(conversationId, 'Conversation id')
     if (typeof content !== 'string') throw invalid('Document content must be a string.')
     if (content.length > 2_000_000) throw invalid('Document is too large.')
-    const existing = db.documents.getDoc(id)
-    return db.documents.upsertDoc(id, existing?.title ?? 'Document', content)
+    return db.documents.upsertDoc(id, undefined, content)
   })
 
   register(CHANNELS.documentsListHtml, (conversationId) =>
@@ -921,28 +945,21 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.documentsExport, async (id, format) => {
     const docId = requireString(id, 'Document id')
-    const fmt = parseInput(z.enum(['markdown', 'html']), format)
-    const doc = db.documents.getById(docId)
-    if (!doc) throw invalid('Document not found.')
+    const fmt = parseInput(documentExportFormatSchema, format)
+    const doc = found(db.documents.getById(docId), 'Document')
     const isHtml = fmt === 'html'
     const content = isHtml ? documentToHtml(doc.title, doc.kind, doc.content) : doc.content
     const ext = isHtml ? 'html' : doc.kind === 'html' ? 'html' : 'md'
     const base = (doc.title || 'document').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '-') || 'document'
-    const options = {
-      defaultPath: `${base}.${ext}`,
-      filters: [
+    return saveTextFile(
+      `${base}.${ext}`,
+      [
         isHtml
           ? { name: 'HTML', extensions: ['html'] }
           : { name: 'Markdown', extensions: ['md'] },
       ],
-    }
-    const parent = dialogParent()
-    const result = parent
-      ? await dialog.showSaveDialog(parent, options)
-      : await dialog.showSaveDialog(options)
-    if (result.canceled || !result.filePath) return { canceled: true }
-    await writeFile(result.filePath, content, 'utf8')
-    return { canceled: false, path: result.filePath }
+      content
+    )
   })
 
   // -- workflows --------------------------------------------------------------
@@ -964,11 +981,9 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.workflowsList, () => db.workflows.list())
   register(CHANNELS.workflowsGet, (id) => db.workflows.getById(requireString(id, 'Workflow id')))
   register(CHANNELS.workflowsCreate, (input) => db.workflows.create(asWorkflowInput(input)))
-  register(CHANNELS.workflowsUpdate, (id, input) => {
-    const updated = db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input))
-    if (!updated) throw invalid('Workflow not found.')
-    return updated
-  })
+  register(CHANNELS.workflowsUpdate, (id, input) =>
+    found(db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input)), 'Workflow')
+  )
   register(CHANNELS.workflowsDelete, (id) => {
     db.workflows.remove(requireString(id, 'Workflow id'))
     return undefined

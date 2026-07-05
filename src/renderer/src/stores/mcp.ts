@@ -11,8 +11,8 @@ import type {
   McpServerPatch,
   McpServerRuntime,
 } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
-import { useUiStore } from './ui'
+import { unwrap } from '@/api/uld'
+import { toastError } from './ui'
 
 export interface McpStoreState {
   servers: McpServerConfig[]
@@ -35,56 +35,54 @@ function indexRuntime(runtime: McpServerRuntime[]): Record<string, McpServerRunt
   return out
 }
 
-export const useMcpStore = create<McpStoreState>()((set, get) => ({
-  servers: [],
-  runtime: {},
-  loaded: false,
-
-  async load() {
-    try {
-      const [servers, runtime] = await Promise.all([
-        unwrap(window.uld.mcp.list()),
-        unwrap(window.uld.mcp.status()),
-      ])
-      set({ servers, runtime: indexRuntime(runtime), loaded: true })
-    } catch (e) {
-      set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load MCP servers: ${toNormalized(e).message}`, 'error')
-    }
-  },
-
-  async create(input) {
-    const servers = await unwrap(window.uld.mcp.create(input))
+export const useMcpStore = create<McpStoreState>()((set, get) => {
+  /** Applies a mutated config list, then re-syncs configs + runtime. */
+  const applyServers = (servers: McpServerConfig[]): void => {
     set({ servers })
-    void get()
-      .load()
-      .catch(() => undefined)
-  },
+    void get().load()
+  }
 
-  async update(id, patch) {
-    const servers = await unwrap(window.uld.mcp.update(id, patch))
-    set({ servers })
-    void get().load().catch(() => undefined)
-  },
+  return {
+    servers: [],
+    runtime: {},
+    loaded: false,
 
-  async remove(id) {
-    const servers = await unwrap(window.uld.mcp.delete(id))
-    set({ servers })
-    void get().load().catch(() => undefined)
-  },
+    async load() {
+      try {
+        const [servers, runtime] = await Promise.all([
+          unwrap(window.uld.mcp.list()),
+          unwrap(window.uld.mcp.status()),
+        ])
+        set({ servers, runtime: indexRuntime(runtime), loaded: true })
+      } catch (e) {
+        set({ loaded: true })
+        toastError('Failed to load MCP servers', e)
+      }
+    },
 
-  async setEnabled(id, enabled) {
-    const servers = await unwrap(window.uld.mcp.setEnabled(id, enabled))
-    set({ servers })
-    void get().load().catch(() => undefined)
-  },
+    async create(input) {
+      applyServers(await unwrap(window.uld.mcp.create(input)))
+    },
 
-  async reconnect(id) {
-    const runtime = await unwrap(window.uld.mcp.reconnect(id))
-    set({ runtime: indexRuntime(runtime) })
-  },
+    async update(id, patch) {
+      applyServers(await unwrap(window.uld.mcp.update(id, patch)))
+    },
 
-  setRuntime(runtime) {
-    set({ runtime: indexRuntime(runtime) })
-  },
-}))
+    async remove(id) {
+      applyServers(await unwrap(window.uld.mcp.delete(id)))
+    },
+
+    async setEnabled(id, enabled) {
+      applyServers(await unwrap(window.uld.mcp.setEnabled(id, enabled)))
+    },
+
+    async reconnect(id) {
+      const runtime = await unwrap(window.uld.mcp.reconnect(id))
+      set({ runtime: indexRuntime(runtime) })
+    },
+
+    setRuntime(runtime) {
+      set({ runtime: indexRuntime(runtime) })
+    },
+  }
+})

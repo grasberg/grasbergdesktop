@@ -5,45 +5,22 @@
 
 import { create } from 'zustand'
 import type { PromptTemplate, PromptTemplateInput, PromptTemplatePatch } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
-import { useUiStore } from './ui'
+import { createSimpleListActions, type SimpleListActions } from './simple-list'
 
-export interface PromptsStoreState {
+export interface PromptsStoreState
+  extends SimpleListActions<PromptTemplateInput, PromptTemplatePatch> {
   templates: PromptTemplate[]
   loaded: boolean
-  load(): Promise<void>
-  /** Mutations reject with a NormalizedError on failure (callers toast). */
-  create(input: PromptTemplateInput): Promise<void>
-  update(id: string, patch: PromptTemplatePatch): Promise<void>
-  remove(id: string): Promise<void>
 }
 
-export const usePromptsStore = create<PromptsStoreState>()((set, get) => ({
+export const usePromptsStore = create<PromptsStoreState>()((set) => ({
   templates: [],
   loaded: false,
 
-  async load() {
-    try {
-      const templates = await unwrap(window.uld.prompts.list())
-      set({ templates, loaded: true })
-    } catch (e) {
-      set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load prompts: ${toNormalized(e).message}`, 'error')
-    }
-  },
-
-  async create(input) {
-    await unwrap(window.uld.prompts.create(input))
-    await get().load()
-  },
-
-  async update(id, patch) {
-    await unwrap(window.uld.prompts.update(id, patch))
-    await get().load()
-  },
-
-  async remove(id) {
-    await unwrap(window.uld.prompts.delete(id))
-    await get().load()
-  },
+  ...createSimpleListActions<PromptTemplate, PromptTemplateInput, PromptTemplatePatch>({
+    label: 'prompts',
+    api: window.uld.prompts,
+    onLoaded: (templates) => set({ templates, loaded: true }),
+    onLoadFailed: () => set({ loaded: true }),
+  }),
 }))

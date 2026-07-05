@@ -10,7 +10,12 @@
  */
 
 import { z } from 'zod'
-import { DEFAULT_SETTINGS, type BackupSummary } from '@shared/types'
+import {
+  DEFAULT_SETTINGS,
+  SECURITY_SENSITIVE_SETTING_KEYS,
+  type AppSettings,
+  type BackupSummary,
+} from '@shared/types'
 import { settingsPatchSchema } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 
@@ -84,21 +89,6 @@ const skillItemSchema = z
   .passthrough()
 
 /**
- * Settings that are NEVER applied from an imported backup: enabling them from
- * an untrusted file would silently grant shell/browser execution, wire up an
- * exfiltration webhook, or pre-authorize a Telegram sender — all behind a
- * single "Import" click. They stay whatever the local machine already has.
- */
-const IMPORT_EXCLUDED_SETTING_KEYS: ReadonlySet<string> = new Set([
-  'shellExecutionEnabled',
-  'browserToolsEnabled',
-  'outboundWebhookUrl',
-  'telegramBridgeEnabled',
-  'telegramBridgeConversationId',
-  'telegramBridgeAllowedChatId',
-])
-
-/**
  * Applies a parsed backup file to the database. Throws only when `raw` is not
  * a Grasberg backup at all; individually invalid entries are skipped.
  */
@@ -115,17 +105,22 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
     skippedItems: 0,
   }
 
-  // Settings: validate key by key so one bad value never blocks the rest.
-  // Security-sensitive keys are never taken from a backup (see the set above).
+  // Settings: validate key by key so one bad value never blocks the rest;
+  // the valid keys accumulate into one patch applied with a single write.
+  // Security-sensitive keys are never taken from a backup — applying them from
+  // an untrusted file would grant shell/browser execution or wire up
+  // exfiltration behind a single "Import" click (see the shared set's docs).
   if (data.settings) {
+    const patch: Partial<AppSettings> = {}
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
       if (!(key in data.settings)) continue
-      if (IMPORT_EXCLUDED_SETTING_KEYS.has(key)) continue
+      if (SECURITY_SENSITIVE_SETTING_KEYS.has(key)) continue
       const single = settingsPatchSchema.safeParse({ [key]: data.settings[key] })
       if (!single.success) continue
-      db.settings.update(single.data)
+      Object.assign(patch, single.data)
       summary.settingsApplied += 1
     }
+    if (summary.settingsApplied > 0) db.settings.update(patch)
   }
 
   for (const item of data.memories ?? []) {

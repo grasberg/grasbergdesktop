@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactElement } from 'react'
 import type { FileTreeNode } from '@shared/types'
+import { formatBytes } from '@/lib/format'
 import { useCodeStore } from '@/stores/code'
 import './code.css'
 
@@ -7,12 +8,6 @@ import './code.css'
 const SIZE_BADGE_THRESHOLD = 100 * 1024
 /** Above this many nodes we show a "large tree" note. */
 const HUGE_TREE_THRESHOLD = 2500
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 function countNodes(node: FileTreeNode): number {
   let n = 1
@@ -77,7 +72,7 @@ function FileNode({ node, depth }: { node: FileTreeNode; depth: number }): React
           <span className="code-tree-name">{node.name}</span>
         </button>
         {large && node.sizeBytes !== undefined && (
-          <span className="badge code-tree-size">{formatBytes(node.sizeBytes)}</span>
+          <span className="badge code-tree-size">{formatBytes(node.sizeBytes, 0)}</span>
         )}
       </div>
     </li>

@@ -44,7 +44,7 @@ const BASE_URL_MESSAGE = 'Base URL must use https:// (http is only allowed for l
  * (localhost / 127.0.0.1 / [::1]) so local servers like Ollama/LM Studio work
  * while remote endpoints can never receive the Bearer key over plaintext.
  */
-function isAllowedBaseUrl(value: string): boolean {
+export function isAllowedBaseUrl(value: string): boolean {
   let url: URL
   try {
     url = new URL(value)
@@ -222,6 +222,18 @@ export function isAllowedHttpUrl(value: string): boolean {
   return isAllowedBaseUrl(value)
 }
 
+/**
+ * True for an app-generated attachment storage key ('<uuid>.<ext>'). Anything
+ * with path separators, '..', drive letters or other characters is rejected so
+ * a stored key can never be used to read outside the attachments dir. Enforced
+ * at the IPC boundary (chat.send attachmentSchema); every on-disk read of a
+ * storageKey gates on it again as defense in depth (readStoredImage,
+ * chat-service imageDataUrl).
+ */
+export function isValidStorageKey(storageKey: string): boolean {
+  return /^[A-Za-z0-9-]+\.[A-Za-z0-9]+$/.test(storageKey)
+}
+
 export const settingsPatchSchema = z
   .object({
     theme: z.enum(['system', 'light', 'dark']),
@@ -241,7 +253,10 @@ export const settingsPatchSchema = z
     browserToolsEnabled: z.boolean(),
     telegramBridgeEnabled: z.boolean(),
     telegramBridgeConversationId: z.string().nullable(),
-    telegramBridgeAllowedChatId: z.number().int().nullable(),
+    // telegramBridgeAllowedChatId is deliberately absent: it is the bridge's
+    // trust-on-first-use pairing pin, owned by main (ImBridgeManager writes it
+    // via the settings repo). Accepting it here would let the renderer — or a
+    // tampered backup — pre-authorize an arbitrary Telegram sender.
     outboundWebhookUrl: z.string().max(2000).nullable(),
   })
   .partial()

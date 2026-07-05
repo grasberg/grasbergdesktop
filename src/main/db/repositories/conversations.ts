@@ -3,6 +3,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { ConvListRequest, ConvUpdateRequest } from '@shared/ipc'
 import type {
   ChatParams,
   Conversation,
@@ -10,13 +11,9 @@ import type {
   ConversationSummary,
 } from '@shared/types'
 import type { SqliteDriver, SqlValue } from '../driver'
+import { parseJson, updateById } from './util'
 
-export interface ConversationListRequest {
-  mode?: ConversationMode
-  /** Case-insensitive substring match over title OR any message content. */
-  search?: string
-  limit?: number
-}
+export type ConversationListRequest = ConvListRequest
 
 export interface ConversationCreateInput {
   mode: ConversationMode
@@ -24,20 +21,11 @@ export interface ConversationCreateInput {
   providerId?: string | null
   modelId?: string | null
   systemPrompt?: string | null
-  params?: ChatParams
   workspaceId?: string | null
   projectId?: string | null
 }
 
-export type ConversationPatch = Partial<{
-  title: string
-  providerId: string | null
-  modelId: string | null
-  systemPrompt: string | null
-  params: ChatParams
-  workspaceId: string | null
-  projectId: string | null
-}>
+export type ConversationPatch = ConvUpdateRequest['patch']
 
 export interface ConversationsRepository {
   list(req?: ConversationListRequest): ConversationSummary[]
@@ -79,13 +67,11 @@ interface SummaryRow {
 }
 
 function parseParams(text: string | null): ChatParams {
-  if (!text) return {}
-  try {
-    const value = JSON.parse(text)
-    return typeof value === 'object' && value !== null ? (value as ChatParams) : {}
-  } catch {
-    return {}
-  }
+  return parseJson<ChatParams>(
+    text,
+    {},
+    (value): value is ChatParams => typeof value === 'object' && value !== null
+  )
 }
 
 function toConversation(row: ConversationRow): Conversation {
@@ -179,7 +165,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         providerId: input.providerId ?? null,
         modelId: input.modelId ?? null,
         systemPrompt: input.systemPrompt ?? null,
-        params: input.params ?? {},
+        params: {},
         workspaceId: input.workspaceId ?? null,
         projectId: input.projectId ?? null,
         createdAt: now,
@@ -210,41 +196,21 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
     getById,
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.title !== undefined) {
-        sets.push('title = ?')
-        params.push(patch.title)
-      }
-      if (patch.providerId !== undefined) {
-        sets.push('provider_id = ?')
-        params.push(patch.providerId)
-      }
-      if (patch.modelId !== undefined) {
-        sets.push('model_id = ?')
-        params.push(patch.modelId)
-      }
-      if (patch.systemPrompt !== undefined) {
-        sets.push('system_prompt = ?')
-        params.push(patch.systemPrompt)
-      }
-      if (patch.params !== undefined) {
-        sets.push('params_json = ?')
-        params.push(JSON.stringify(patch.params))
-      }
-      if (patch.workspaceId !== undefined) {
-        sets.push('workspace_id = ?')
-        params.push(patch.workspaceId)
-      }
-      if (patch.projectId !== undefined) {
-        sets.push('project_id = ?')
-        params.push(patch.projectId)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'conversations',
+        id,
+        {
+          title: patch.title,
+          provider_id: patch.providerId,
+          model_id: patch.modelId,
+          system_prompt: patch.systemPrompt,
+          params_json: patch.params === undefined ? undefined : JSON.stringify(patch.params),
+          workspace_id: patch.workspaceId,
+          project_id: patch.projectId,
+        },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

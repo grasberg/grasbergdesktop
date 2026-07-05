@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { Attachment } from '@shared/types'
-import { UNKNOWN_MODEL_CAPS, resolveModelInfo } from '@shared/catalog'
+import { modelSupportsVision } from '@shared/catalog'
+import { formatBytes } from '@/lib/format'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
@@ -10,12 +11,6 @@ import './chat.css'
 
 const MAX_TEXTAREA_HEIGHT = 240 // ~10 lines
 const CHAR_COUNT_THRESHOLD = 2000
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 export default function Composer(): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
@@ -71,14 +66,11 @@ export default function Composer(): ReactElement {
   })()
 
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
-  // resolveModelInfo is preset-aware: for the 120+ preset-backed
-  // 'openai-compatible' providers (empty family knownModels) it reads the
-  // preset catalog, so vision-capable preset models are recognized. The
-  // family-only findCatalogModel would return undefined and wrongly block
-  // image attachments for them.
+  // Preset-aware: for the 120+ preset-backed 'openai-compatible' providers
+  // (empty family knownModels) the preset catalog is consulted, so
+  // vision-capable preset models are recognized.
   const visionSupported = effectiveProvider
-    ? (resolveModelInfo(effectiveProvider, effectiveModelId)?.capabilities.vision ??
-      UNKNOWN_MODEL_CAPS.vision)
+    ? modelSupportsVision(effectiveProvider, effectiveModelId)
     : false
 
   const isStreaming = streaming !== null

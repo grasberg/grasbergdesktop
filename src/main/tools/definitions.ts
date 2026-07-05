@@ -29,6 +29,12 @@ export const DEFAULT_PERMISSION_BY_RISK: Record<ToolRiskLevel, ToolPermissionDec
 /** Result strings are capped at this length (with a truncation marker). */
 export const TOOL_RESULT_MAX_CHARS = 8000
 
+/** Caps a tool result at TOOL_RESULT_MAX_CHARS, appending a truncation marker. */
+export function capToolResult(text: string): string {
+  if (text.length <= TOOL_RESULT_MAX_CHARS) return text
+  return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n…[truncated]`
+}
+
 /**
  * Built-in tools shipped with the app. `enabled: true` is the default; the
  * registry overlays the user's per-tool enabled flags from the database.
@@ -327,6 +333,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     risk: 'dangerous',
     builtin: true,
     enabled: true,
+    mutating: true,
   },
   {
     id: 'write_file',
@@ -346,6 +353,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     risk: 'dangerous',
     builtin: true,
     enabled: true,
+    mutating: true,
   },
   {
     id: 'browser',
@@ -372,6 +380,8 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     risk: 'sensitive',
     builtin: true,
     enabled: true,
+    // Acts on live pages (click/type/keypress) - not read-only investigation.
+    mutating: true,
   },
   {
     id: 'computer',
@@ -417,6 +427,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     risk: 'dangerous',
     builtin: true,
     enabled: true,
+    mutating: true,
   },
   {
     id: 'use_skill',
@@ -589,10 +600,6 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     risk: 'dangerous',
     builtin: true,
     enabled: true,
+    mutating: true,
   },
 ]
-
-/** Convenience id set for "is this one of ours?" checks. */
-export const BUILTIN_TOOL_IDS: ReadonlySet<string> = new Set(
-  BUILTIN_TOOL_DEFINITIONS.map((tool) => tool.id)
-)

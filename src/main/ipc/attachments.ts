@@ -8,9 +8,11 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import type { Attachment } from '@shared/types'
+import { isValidStorageKey } from '@shared/schemas'
+import { looksBinary } from '../utils/binary'
 
 /** Files larger than this keep their metadata but no textContent. */
-export const MAX_ATTACHMENT_TEXT_BYTES = 512 * 1024
+const MAX_ATTACHMENT_TEXT_BYTES = 512 * 1024
 
 /**
  * Images larger than this keep metadata only (not sent). base64 inflates ~33%
@@ -107,17 +109,8 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   ttf: 'font/ttf',
 }
 
-/** Null-byte sniff over the head of the file — a cheap binary detector. */
-function looksBinary(buffer: Buffer): boolean {
-  const limit = Math.min(buffer.length, 8192)
-  for (let i = 0; i < limit; i++) {
-    if (buffer[i] === 0) return true
-  }
-  return false
-}
-
 /** True for a raster image type we can send to vision models. */
-export function isSupportedImage(ext: string, mimeType: string): boolean {
+function isSupportedImage(ext: string, mimeType: string): boolean {
   return IMAGE_EXTENSIONS.has(ext) && mimeType.startsWith('image/')
 }
 
@@ -170,16 +163,6 @@ export async function readAttachment(
   } catch {
     return null
   }
-}
-
-/**
- * True for an app-generated attachment storage key ('<uuid>.<ext>'). Anything
- * with path separators, '..', drive letters or other characters is rejected so
- * a stored key can never be used to read outside the attachments dir. Every
- * on-disk read of a storageKey MUST gate on this (see chat-service imageDataUrl).
- */
-export function isValidStorageKey(storageKey: string): boolean {
-  return /^[A-Za-z0-9-]+\.[A-Za-z0-9]+$/.test(storageKey)
 }
 
 /**

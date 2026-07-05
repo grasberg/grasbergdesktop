@@ -2,12 +2,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import {
-  MAX_IMAGE_BYTES,
-  isValidStorageKey,
-  readAttachment,
-  readStoredImage,
-} from '../../src/main/ipc/attachments'
+import { MAX_IMAGE_BYTES, readAttachment, readStoredImage } from '../../src/main/ipc/attachments'
+import { isValidStorageKey } from '@shared/schemas'
 
 let dir: string
 let imageDir: string

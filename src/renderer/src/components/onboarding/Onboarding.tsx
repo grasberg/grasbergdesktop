@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { ConversationMode, ProviderConfig, TestConnectionResult } from '@shared/types'
+import type { ConversationMode, ProviderConfig } from '@shared/types'
+import { errorMessage } from '@/api/uld'
+import { TestResult } from '@/components/common/controls'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
+import { useTestConnection } from '@/hooks/useTestConnection'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
-import { errorMessage, ProviderAddForm } from '../settings/ProvidersTab'
+import { ProviderAddForm } from '../settings/ProviderAddForm'
 import appIcon from '@/assets/icon.png'
 import '../settings/settings.css'
 
@@ -48,11 +52,9 @@ function VerifyStep({ provider }: { provider: ProviderConfig }) {
   const updateSettings = useSettingsStore((s) => s.update)
   const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
   const loadModels = useProvidersStore((s) => s.loadModels)
-  const test = useProvidersStore((s) => s.test)
   const toast = useUiStore((s) => s.toast)
 
-  const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null)
+  const { testing, result: testResult, run: runTest } = useTestConnection(provider.id)
   const [custom, setCustom] = useState('')
 
   const models = modelsByProvider[provider.id] ?? []
@@ -67,18 +69,6 @@ function VerifyStep({ provider }: { provider: ProviderConfig }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.id])
-
-  async function runTest() {
-    setTesting(true)
-    setTestResult(null)
-    try {
-      setTestResult(await test(provider.id))
-    } catch (e) {
-      setTestResult({ ok: false, message: errorMessage(e) })
-    } finally {
-      setTesting(false)
-    }
-  }
 
   async function choose(modelId: string) {
     try {
@@ -100,24 +90,7 @@ function VerifyStep({ provider }: { provider: ProviderConfig }) {
         <button type="button" className="btn" onClick={() => void runTest()} disabled={testing}>
           Test connection
         </button>
-        {testing ? (
-          <span className="test-result" role="status">
-            <span className="spinner" aria-hidden="true" /> Testing…
-          </span>
-        ) : testResult ? (
-          testResult.ok ? (
-            <span className="test-result ok" role="status">
-              {['Connected']
-                .concat(testResult.latencyMs != null ? [`${testResult.latencyMs}ms`] : [])
-                .concat(testResult.modelCount != null ? [`${testResult.modelCount} models`] : [])
-                .join(' · ')}
-            </span>
-          ) : (
-            <span className="test-result err" role="status">
-              {testResult.message}
-            </span>
-          )
-        ) : null}
+        <TestResult testing={testing} result={testResult} />
       </div>
 
       {models.length > 0 ? (
@@ -206,6 +179,7 @@ export default function Onboarding() {
   const loadProviders = useProvidersStore((s) => s.load)
   const createConversation = useConversationsStore((s) => s.create)
   const toast = useUiStore((s) => s.toast)
+  const persist = usePersistSettings()
 
   const [step, setStep] = useState(0)
   const [createdProviderId, setCreatedProviderId] = useState<string | null>(null)
@@ -227,9 +201,7 @@ export default function Onboarding() {
     null
 
   function skip() {
-    void updateSettings({ onboardingCompleted: true }).catch((e: unknown) =>
-      toast(errorMessage(e), 'error')
-    )
+    void persist({ onboardingCompleted: true })
   }
 
   async function startSession(mode: ConversationMode) {

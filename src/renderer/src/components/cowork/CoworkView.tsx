@@ -6,8 +6,9 @@
  * proposals are parsed main-side on stream completion).
  */
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import ChatView from '@/components/chat/ChatView'
+import { useOnGenerationSettled } from '@/hooks/useOnGenerationSettled'
 import { useChatStore } from '@/stores/chat'
 import { useCoworkStore } from '@/stores/cowork'
 import WorkspaceItems from './WorkspaceItems'
@@ -117,13 +118,7 @@ export default function CoworkView(): ReactElement {
 
   // When a stream completes (streaming -> null), assistant-proposed items may
   // have been persisted main-side — pick them up.
-  const wasStreaming = useRef(false)
-  useEffect(() => {
-    if (wasStreaming.current && streaming === null) {
-      void useCoworkStore.getState().refresh()
-    }
-    wasStreaming.current = streaming !== null
-  }, [streaming])
+  useOnGenerationSettled(() => void useCoworkStore.getState().refresh())
 
   const summarize = (): void => {
     void useChatStore.getState().send(SUMMARIZE_PROMPT)

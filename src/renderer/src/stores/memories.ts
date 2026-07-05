@@ -5,45 +5,21 @@
 
 import { create } from 'zustand'
 import type { Memory, MemoryInput, MemoryPatch } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
-import { useUiStore } from './ui'
+import { createSimpleListActions, type SimpleListActions } from './simple-list'
 
-export interface MemoriesStoreState {
+export interface MemoriesStoreState extends SimpleListActions<MemoryInput, MemoryPatch> {
   memories: Memory[]
   loaded: boolean
-  load(): Promise<void>
-  /** Mutations reject with a NormalizedError on failure (callers toast). */
-  create(input: MemoryInput): Promise<void>
-  update(id: string, patch: MemoryPatch): Promise<void>
-  remove(id: string): Promise<void>
 }
 
-export const useMemoriesStore = create<MemoriesStoreState>()((set, get) => ({
+export const useMemoriesStore = create<MemoriesStoreState>()((set) => ({
   memories: [],
   loaded: false,
 
-  async load() {
-    try {
-      const memories = await unwrap(window.uld.memories.list())
-      set({ memories, loaded: true })
-    } catch (e) {
-      set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load memories: ${toNormalized(e).message}`, 'error')
-    }
-  },
-
-  async create(input) {
-    await unwrap(window.uld.memories.create(input))
-    await get().load()
-  },
-
-  async update(id, patch) {
-    await unwrap(window.uld.memories.update(id, patch))
-    await get().load()
-  },
-
-  async remove(id) {
-    await unwrap(window.uld.memories.delete(id))
-    await get().load()
-  },
+  ...createSimpleListActions<Memory, MemoryInput, MemoryPatch>({
+    label: 'memories',
+    api: window.uld.memories,
+    onLoaded: (memories) => set({ memories, loaded: true }),
+    onLoadFailed: () => set({ loaded: true }),
+  }),
 }))

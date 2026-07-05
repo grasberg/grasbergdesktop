@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Workflow, WorkflowGraph, WorkflowInput } from '@shared/types'
 import type { SqliteDriver } from '../driver'
+import { parseJson } from './util'
 
 const EMPTY_GRAPH: WorkflowGraph = { nodes: [], edges: [] }
 
@@ -26,14 +27,10 @@ interface WorkflowRow {
 }
 
 function parseGraph(text: string): WorkflowGraph {
-  try {
-    const v: unknown = JSON.parse(text)
-    if (v && typeof v === 'object' && Array.isArray((v as WorkflowGraph).nodes)) {
-      const g = v as WorkflowGraph
-      return { nodes: g.nodes ?? [], edges: Array.isArray(g.edges) ? g.edges : [] }
-    }
-  } catch {
-    // fall through
+  const v = parseJson<unknown>(text, undefined)
+  if (v && typeof v === 'object' && Array.isArray((v as WorkflowGraph).nodes)) {
+    const g = v as WorkflowGraph
+    return { nodes: g.nodes ?? [], edges: Array.isArray(g.edges) ? g.edges : [] }
   }
   return { ...EMPTY_GRAPH }
 }

@@ -18,7 +18,7 @@ import type {
 import type { AppDatabase } from '../../db/database'
 import type { Keystore } from '../../keys/keystore'
 import { redactKnownSecrets } from '../../providers/redact'
-import { TOOL_RESULT_MAX_CHARS } from '../definitions'
+import { capToolResult } from '../definitions'
 import { namespaceMcpToolId } from './naming'
 import { defaultMcpConnector, type McpConnection, type McpConnector } from './transports'
 
@@ -82,6 +82,16 @@ export class McpManager {
     state.tools = []
   }
 
+  /** Best-effort close of a connection (errors ignored). */
+  private async closeQuietly(conn: McpConnection | null): Promise<void> {
+    if (!conn) return
+    try {
+      await conn.close()
+    } catch {
+      // best-effort teardown
+    }
+  }
+
   private async disconnect(serverId: string): Promise<void> {
     const state = this.states.get(serverId)
     if (!state) return
@@ -90,13 +100,7 @@ export class McpManager {
     state.connection = null
     state.status = 'disconnected'
     state.error = null
-    if (conn) {
-      try {
-        await conn.close()
-      } catch {
-        // best-effort teardown
-      }
-    }
+    await this.closeQuietly(conn)
   }
 
   private async connect(config: McpServerConfig): Promise<void> {
@@ -129,14 +133,8 @@ export class McpManager {
       state.error = null
     } catch (e) {
       // Close the transport if it came up before the failure (see above).
-      if (state.connection) {
-        try {
-          await state.connection.close()
-        } catch {
-          // best-effort teardown
-        }
-        state.connection = null
-      }
+      await this.closeQuietly(state.connection)
+      state.connection = null
       state.status = 'error'
       // Redact: the message may echo the request URL or an auth header value,
       // and this string is broadcast to the renderer via getRuntime().
@@ -164,6 +162,8 @@ export class McpManager {
           builtin: false,
           enabled: isEnabled(tool.toolId),
           source: 'mcp',
+          // MCP side effects can't be inspected - conservatively mutating.
+          mutating: true,
         })
       }
     }
@@ -188,9 +188,7 @@ export class McpManager {
       )
     }
     const body = raw.isError ? `Tool reported an error:\n${raw.content}` : raw.content
-    const capped =
-      body.length > TOOL_RESULT_MAX_CHARS ? `${body.slice(0, TOOL_RESULT_MAX_CHARS)}\n…[truncated]` : body
-    return redactKnownSecrets(capped, state.secretValues)
+    return redactKnownSecrets(capToolResult(body), state.secretValues)
   }
 
   // -- runtime + config queries ----------------------------------------------

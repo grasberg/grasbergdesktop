@@ -32,7 +32,7 @@ export function computeDelayMs(
 }
 
 /** Resolves after `ms`, or rejects with an 'aborted' ProviderError on signal. */
-export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortedError())

@@ -26,13 +26,16 @@
 import type { Conversation } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import { ToolRegistry, type DynamicToolSource } from './registry'
-import { ToolExecutor, type ToolBrowser, type ToolCodeService } from './executor'
+import {
+  ToolExecutor,
+  type ToolBrowser,
+  type ToolCodeService,
+  type ToolExecutorDeps,
+} from './executor'
 import { RepoMapService } from '../code/repo-map'
 
 /** MCP surface the tool system consumes (satisfied by McpManager). */
-export type ToolMcpSource = DynamicToolSource & {
-  callTool(toolId: string, args: Record<string, unknown>): Promise<string>
-}
+export type ToolMcpSource = DynamicToolSource & NonNullable<ToolExecutorDeps['mcpClient']>
 
 export { ToolRegistry } from './registry'
 export {
@@ -44,7 +47,6 @@ export {
 } from './executor'
 export {
   BUILTIN_TOOL_DEFINITIONS,
-  BUILTIN_TOOL_IDS,
   DEFAULT_PERMISSION_BY_RISK,
   TOOL_RESULT_MAX_CHARS,
 } from './definitions'
@@ -74,23 +76,11 @@ export interface CreateToolSystemOptions {
   /** Embedded browser backing the browser/computer tools. */
   browser?: ToolBrowser
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
-  delegate?: (task: string, ctx: import('./executor').ToolExecuteContext) => Promise<string>
+  delegate?: ToolExecutorDeps['delegate']
   /** Background sub-agent tasks (delegate background=true, task_output, task_stop). */
-  delegateBackground?: {
-    start(task: string, ctx: import('./executor').ToolExecuteContext): string
-    output(taskId: string): string
-    stop(taskId: string): string
-  }
+  delegateBackground?: NonNullable<ToolExecutorDeps['delegateBackground']>
   /** Approval-gated project writes for edit_file/write_file (wired to CodeService). */
-  codeChanges?: {
-    propose(
-      conversationId: string,
-      relPath: string,
-      changeType: 'create' | 'edit',
-      newContent: string
-    ): { id: string } | Promise<{ id: string }>
-    apply(changeId: string): unknown
-  }
+  codeChanges?: NonNullable<ToolExecutorDeps['codeChanges']>
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }

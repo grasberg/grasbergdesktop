@@ -37,13 +37,15 @@ import {
 } from '@shared/ipc'
 import {
   PROVIDER_TYPES,
-  UNKNOWN_MODEL_CAPS,
+  modelSupportsTools,
+  modelSupportsVision,
   resolveModelCatalog,
   resolveModelInfo,
 } from '@shared/catalog'
 import type { AppDatabase } from '../db/database'
 import type { MessagePatch } from '../db/repositories/messages'
 import type {
+  AdapterContext,
   AdapterMessage,
   AdapterToolDef,
   ContentPart,
@@ -55,7 +57,7 @@ import { decryptKey } from '../keys/keystore'
 import { buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
 import type { ToolExecuteContext } from '../tools/executor'
 import { USER_DECLINED_RESULT } from '../tools/executor'
-import { isValidStorageKey } from '../ipc/attachments'
+import { isValidStorageKey } from '@shared/schemas'
 import { runCompletionHooks } from './completion-hooks'
 
 const DEFAULT_TITLE = 'New chat'
@@ -198,6 +200,18 @@ interface ToolPlan {
   adapterTools?: AdapterToolDef[]
   /** Mode-prompt options (manual-instructions fallback when unsupported). */
   promptOpts: ModePromptOptions
+}
+
+/**
+ * Registry definition -> wire format. The wire function name MUST match the
+ * provider pattern ^[A-Za-z0-9_-]{1,64}$ — def.name satisfies it for every
+ * source: builtins (name === id), custom tools (user name validated to that
+ * pattern — def.id is 'custom:<uuid>', which the ':' makes invalid), and MCP
+ * tools (name === namespaced id). registry.resolveForCall() maps the returned
+ * name back to the definition.
+ */
+function toAdapterToolDef(def: ToolDefinition): AdapterToolDef {
+  return { name: def.name, description: def.description, parameters: def.parameters }
 }
 
 /** Sums token usage across tool-loop rounds (missing fields stay missing). */
@@ -363,36 +377,16 @@ export class ChatService {
   ) {}
 
   async send(req: ChatSendRequest): Promise<StartStreamResult> {
-    const conversation = this.requireConversation(req.conversationId)
-    this.reserve(conversation.id)
-    try {
+    return this.withReservation(req.conversationId, async (conversation) => {
       const settings = this.db.settings.get()
       const resolved = await this.resolveTarget(conversation, settings, req.overrides)
-
-      // Content is stored as typed; attachment text is inlined only on the wire.
-      const userMessage: Message = {
-        id: randomUUID(),
-        conversationId: conversation.id,
-        role: 'user',
-        content: req.content,
-        attachments: req.attachments && req.attachments.length > 0 ? req.attachments : undefined,
-        status: 'complete',
-        seq: this.db.messages.nextSeq(conversation.id),
-        createdAt: Date.now(),
-      }
-      this.db.messages.insert(userMessage)
-
+      const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
       return this.start(conversation, settings, resolved, userMessage)
-    } catch (e) {
-      this.releaseReservation(conversation.id)
-      throw e
-    }
+    })
   }
 
   async regenerate(req: ChatRegenerateRequest): Promise<StartStreamResult> {
-    const conversation = this.requireConversation(req.conversationId)
-    this.reserve(conversation.id)
-    try {
+    return this.withReservation(req.conversationId, async (conversation) => {
       const messages = this.db.messages.listByConversation(conversation.id)
       const target = messages.find((m) => m.id === req.messageId)
       if (!target || target.role !== 'assistant') {
@@ -409,16 +403,11 @@ export class ChatService {
       const resolved = await this.resolveTarget(conversation, settings, undefined)
       this.db.messages.deleteById(target.id)
       return this.start(conversation, settings, resolved, null)
-    } catch (e) {
-      this.releaseReservation(conversation.id)
-      throw e
-    }
+    })
   }
 
   async editAndRerun(req: ChatEditAndRerunRequest): Promise<StartStreamResult> {
-    const conversation = this.requireConversation(req.conversationId)
-    this.reserve(conversation.id)
-    try {
+    return this.withReservation(req.conversationId, async (conversation) => {
       const messages = this.db.messages.listByConversation(conversation.id)
       const target = messages.find((m) => m.id === req.messageId)
       if (!target || target.role !== 'user') {
@@ -432,10 +421,7 @@ export class ChatService {
       }
       this.db.messages.deleteAfterSeq(conversation.id, target.seq)
       return this.start(conversation, settings, resolved, updated)
-    } catch (e) {
-      this.releaseReservation(conversation.id)
-      throw e
-    }
+    })
   }
 
   stop(streamId: string): void {
@@ -516,6 +502,56 @@ export class ChatService {
     }
   }
 
+  /**
+   * Looks up the conversation, reserves its single-generation slot, and runs
+   * `fn`. On any throw the PENDING reservation is released (a no-op once the
+   * generation has registered its real stream id via start()/registerStream).
+   */
+  private async withReservation<T>(
+    conversationId: string,
+    fn: (conversation: Conversation) => Promise<T>
+  ): Promise<T> {
+    const conversation = this.requireConversation(conversationId)
+    this.reserve(conversation.id)
+    try {
+      return await fn(conversation)
+    } catch (e) {
+      this.releaseReservation(conversation.id)
+      throw e
+    }
+  }
+
+  /**
+   * Registers a generation in both tracking maps (overwriting the PENDING
+   * reservation) so stop()/stopConversation()/stopAll() can reach it. The
+   * caller must assign the real work promise to `active.done` and pair this
+   * with releaseStream() when the work settles.
+   */
+  private registerStream(conversationId: string): {
+    streamId: string
+    controller: AbortController
+    active: ActiveStream
+  } {
+    const streamId = randomUUID()
+    const controller = new AbortController()
+    const active: ActiveStream = { controller, conversationId, done: Promise.resolve() }
+    this.streams.set(streamId, active)
+    this.activeByConversation.set(conversationId, streamId)
+    return { streamId, controller, active }
+  }
+
+  /**
+   * Drops a settled generation from both maps. The conversation slot is only
+   * cleared while it still points at this stream, so a newer stream's slot is
+   * never clobbered by a stale finalizer.
+   */
+  private releaseStream(streamId: string, conversationId: string): void {
+    this.streams.delete(streamId)
+    if (this.activeByConversation.get(conversationId) === streamId) {
+      this.activeByConversation.delete(conversationId)
+    }
+  }
+
   private async resolveTarget(
     conversation: Conversation,
     settings: AppSettings,
@@ -583,6 +619,48 @@ export class ChatService {
     return { provider, modelId, params, apiKey, accountId }
   }
 
+  /** Adapter for the resolved provider (test seam first, then the registry). */
+  private adapterFor(resolved: ResolvedTarget): ProviderAdapter {
+    return (this.options.resolveAdapter ?? resolveAdapterForProvider)(
+      resolved.provider.type,
+      resolved.provider.authMode
+    )
+  }
+
+  /** Per-call adapter context for the resolved target. */
+  private adapterCtx(resolved: ResolvedTarget, signal?: AbortSignal): AdapterContext {
+    return {
+      apiKey: resolved.apiKey,
+      baseUrl: resolved.provider.baseUrl,
+      accountId: resolved.accountId,
+      modelCatalog: resolveModelCatalog(resolved.provider),
+      signal,
+    }
+  }
+
+  /**
+   * Builds and persists a user message. Content is stored as typed; attachment
+   * text is inlined only on the wire.
+   */
+  private insertUserMessage(
+    conversationId: string,
+    content: string,
+    attachments?: Message['attachments']
+  ): Message {
+    const userMessage: Message = {
+      id: randomUUID(),
+      conversationId,
+      role: 'user',
+      content,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      status: 'complete',
+      seq: this.db.messages.nextSeq(conversationId),
+      createdAt: Date.now(),
+    }
+    this.db.messages.insert(userMessage)
+    return userMessage
+  }
+
   /** Inserts the placeholder, snapshots history, and kicks off the detached loop. */
   private start(
     conversation: Conversation,
@@ -604,18 +682,8 @@ export class ChatService {
     this.db.messages.insert(assistantMessage)
 
     const toolPlan = this.planTools(resolved)
-    const visionEnabled =
-      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
-      UNKNOWN_MODEL_CAPS.vision
-    const streamId = randomUUID()
-    const controller = new AbortController()
-    const active: ActiveStream = {
-      controller,
-      conversationId: conversation.id,
-      done: Promise.resolve(),
-    }
-    this.streams.set(streamId, active)
-    this.activeByConversation.set(conversation.id, streamId)
+    const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
+    const { streamId, controller, active } = this.registerStream(conversation.id)
 
     // History is built inside runStream, AFTER an optional (async) context
     // compaction pass, so the summary and the pruned transcript are in sync.
@@ -635,7 +703,6 @@ export class ChatService {
       controller,
       toolPlan.adapterTools
     )
-    void active.done
 
     return { streamId, userMessage, assistantMessage }
   }
@@ -653,24 +720,12 @@ export class ChatService {
     const enabled = tools.registry.listEnabledDefinitions()
     if (enabled.length === 0) return { promptOpts: {} }
 
-    const modelSupportsTools =
-      resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.tools ??
-      UNKNOWN_MODEL_CAPS.tools
     const toolNames = enabled.map((def) => def.name)
-    if (!modelSupportsTools) {
+    if (!modelSupportsTools(resolved.provider, resolved.modelId)) {
       return { promptOpts: { toolsAvailable: false, toolNames } }
     }
     return {
-      // The wire function name MUST match the provider pattern ^[A-Za-z0-9_-]{1,64}$.
-      // def.name satisfies it for every source: builtins (name === id), custom
-      // tools (user name validated to that pattern — def.id is 'custom:<uuid>',
-      // which the ':' makes invalid), and MCP tools (name === namespaced id).
-      // registry.resolveForCall() maps the returned name back to the definition.
-      adapterTools: enabled.map((def) => ({
-        name: def.name,
-        description: def.description,
-        parameters: def.parameters,
-      })),
+      adapterTools: enabled.map(toAdapterToolDef),
       promptOpts: { toolsAvailable: true, toolNames },
     }
   }
@@ -810,7 +865,7 @@ export class ChatService {
         parts.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${messageEstimateText(m)}`)
       }
 
-      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
+      const adapter = this.adapterFor(resolved)
       const result = await adapter.chat(
         {
           modelId: resolved.modelId,
@@ -821,7 +876,7 @@ export class ChatService {
           params: { maxTokens: 1024 },
           stream: false,
         },
-        { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal }
+        this.adapterCtx(resolved, signal)
       )
       const summary = result.text.trim()
       if (summary.length === 0) return
@@ -847,71 +902,64 @@ export class ChatService {
     // interleaving persisted turns. reserve() throws if the conversation is
     // already busy; the caller (IM bridge) reports that back to the user.
     this.reserve(conversation.id)
-    const streamId = randomUUID()
-    const controller = new AbortController()
-    const active: ActiveStream = {
-      controller,
-      conversationId: conversation.id,
-      done: Promise.resolve(),
-    }
-    // Register in both maps so stop()/stopConversation()/stopAll() can abort it.
-    this.streams.set(streamId, active)
-    this.activeByConversation.set(conversation.id, streamId)
+    const { streamId, controller, active } = this.registerStream(conversation.id)
+    const work = this.runHeadless(conversation, userText, controller.signal)
+    // Track the work so stopAll() can await its persistence on quit (same
+    // contract as the streaming path); errors surface via `await work` below.
+    active.done = work.then(
+      () => undefined,
+      () => undefined
+    )
     try {
-      const settings = this.db.settings.get()
-      const resolved = await this.resolveTarget(conversation, settings, undefined)
-
-      const userMessage: Message = {
-        id: randomUUID(),
-        conversationId,
-        role: 'user',
-        content: userText,
-        status: 'complete',
-        seq: this.db.messages.nextSeq(conversationId),
-        createdAt: Date.now(),
-      }
-      this.db.messages.insert(userMessage)
-
-      const toolPlan = this.planTools(resolved)
-      const visionEnabled =
-        resolveModelInfo(resolved.provider, resolved.modelId)?.capabilities.vision ??
-        UNKNOWN_MODEL_CAPS.vision
-      const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
-      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
-      const result = await adapter.chat(
-        {
-          modelId: resolved.modelId,
-          messages: history,
-          params: resolved.params,
-          stream: false,
-        },
-        { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal: controller.signal }
-      )
-
-      const assistant: Message = {
-        id: randomUUID(),
-        conversationId,
-        role: 'assistant',
-        content: result.text,
-        reasoning: result.reasoning,
-        status: 'complete',
-        providerId: resolved.provider.id,
-        modelId: resolved.modelId,
-        usage: result.usage,
-        seq: this.db.messages.nextSeq(conversationId),
-        createdAt: Date.now(),
-      }
-      this.db.messages.insert(assistant)
-      this.db.conversations.touch(conversationId, Date.now())
-      this.broadcast(CHANNELS.conversationsChanged, {})
-      await runCompletionHooks(conversation, assistant)
-      return result.text
+      return await work
     } finally {
-      this.streams.delete(streamId)
-      if (this.activeByConversation.get(conversation.id) === streamId) {
-        this.activeByConversation.delete(conversation.id)
-      }
+      this.releaseStream(streamId, conversation.id)
     }
+  }
+
+  private async runHeadless(
+    conversation: Conversation,
+    userText: string,
+    signal: AbortSignal
+  ): Promise<string> {
+    const conversationId = conversation.id
+    const settings = this.db.settings.get()
+    const resolved = await this.resolveTarget(conversation, settings, undefined)
+
+    this.insertUserMessage(conversationId, userText)
+
+    const toolPlan = this.planTools(resolved)
+    const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
+    const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
+    const adapter = this.adapterFor(resolved)
+    const result = await adapter.chat(
+      {
+        modelId: resolved.modelId,
+        messages: history,
+        params: resolved.params,
+        stream: false,
+      },
+      this.adapterCtx(resolved, signal)
+    )
+
+    const assistant: Message = {
+      id: randomUUID(),
+      conversationId,
+      role: 'assistant',
+      content: result.text,
+      reasoning: result.reasoning,
+      status: 'complete',
+      providerId: resolved.provider.id,
+      modelId: resolved.modelId,
+      usage: result.usage,
+      seq: this.db.messages.nextSeq(conversationId),
+      createdAt: Date.now(),
+    }
+    this.db.messages.insert(assistant)
+    this.db.conversations.touch(conversationId, Date.now())
+    this.broadcast(CHANNELS.conversationsChanged, {})
+    await runCompletionHooks(conversation, assistant)
+    return result.text
   }
 
   /**
@@ -935,7 +983,7 @@ export class ChatService {
       updatedAt: 0,
     }
     const resolved = await this.resolveTarget(stub, settings, { providerId, modelId })
-    const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
+    const adapter = this.adapterFor(resolved)
     const result = await adapter.chat(
       {
         modelId: resolved.modelId,
@@ -943,7 +991,7 @@ export class ChatService {
         params: resolved.params,
         stream: false,
       },
-      { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider) }
+      this.adapterCtx(resolved)
     )
     return result.text
   }
@@ -1050,14 +1098,14 @@ export class ChatService {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
       const resolved = await this.resolveTarget(parent, settings, undefined)
-      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
+      const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
 
       const toolDefs: AdapterToolDef[] = tools
         ? tools.registry
             .listEnabledDefinitions()
             .filter((d) => DELEGATE_TOOL_IDS.has(d.id))
-            .map((d) => ({ name: d.name, description: d.description, parameters: d.parameters }))
+            .map(toAdapterToolDef)
         : []
 
       const messages: AdapterMessage[] = [
@@ -1075,7 +1123,7 @@ export class ChatService {
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             stream: false,
           },
-          { apiKey: resolved.apiKey, baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider), signal }
+          this.adapterCtx(resolved, signal)
         )
         if (result.text.trim()) final = result.text
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
@@ -1185,7 +1233,7 @@ export class ChatService {
         buildOpts.promptOpts,
         buildOpts.visionEnabled
       )
-      const adapter = (this.options.resolveAdapter ?? resolveAdapterForProvider)(resolved.provider.type, resolved.provider.authMode)
+      const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
       const messages: AdapterMessage[] = [...history]
 
@@ -1212,11 +1260,7 @@ export class ChatService {
             tools: adapterTools,
             stream: true,
           },
-          {
-            apiKey: resolved.apiKey,
-            baseUrl: resolved.provider.baseUrl, accountId: resolved.accountId, modelCatalog: resolveModelCatalog(resolved.provider),
-            signal: controller.signal,
-          }
+          this.adapterCtx(resolved, controller.signal)
         )
         for await (const event of stream) {
           switch (event.type) {
@@ -1356,10 +1400,7 @@ export class ChatService {
         if (finalMessage) emit({ type: 'error', error: normalized, message: finalMessage })
       }
     } finally {
-      this.streams.delete(streamId)
-      if (this.activeByConversation.get(conversationId) === streamId) {
-        this.activeByConversation.delete(conversationId)
-      }
+      this.releaseStream(streamId, conversationId)
     }
   }
 

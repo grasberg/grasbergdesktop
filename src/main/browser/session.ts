@@ -66,18 +66,18 @@ function isAllowedUrl(raw: string): boolean {
 export class BrowserSession {
   private win: BrowserWindow | null = null
   private pendingScreenshot: string | null = null
-  /** The partition Session is shared/cached across window recreations; only
-   * wire its listeners once so 'will-download' handlers don't accumulate. */
-  private sessionConfigured = false
 
   private ensureWindow(): BrowserWindow {
     if (this.win && !this.win.isDestroyed()) return this.win
     const ses = electronSession.fromPartition(PARTITION)
-    if (!this.sessionConfigured) {
-      // Block downloads and deny all permission requests in the browsing session.
+    // Block downloads and deny all permission requests in the browsing session.
+    // The partition Session is process-global and cached across window (and
+    // BrowserSession) recreations, so guard on the session's own listener state
+    // rather than an instance flag — 'will-download' handlers never accumulate.
+    // setPermissionRequestHandler is a setter and idempotent.
+    if (ses.listenerCount('will-download') === 0) {
       ses.on('will-download', (event) => event.preventDefault())
       ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
-      this.sessionConfigured = true
     }
     const win = new BrowserWindow({
       width: VIEWPORT.width,
@@ -103,17 +103,16 @@ export class BrowserSession {
       const finish = (): void => {
         if (done) return
         done = true
+        clearTimeout(timer)
+        // `once` removes whichever listener fired; drop the sibling too so
+        // neither accumulates across navigations.
+        win.webContents.removeListener('did-finish-load', finish)
+        win.webContents.removeListener('did-fail-load', finish)
         resolve()
       }
       const timer = setTimeout(finish, NAV_TIMEOUT_MS)
-      win.webContents.once('did-finish-load', () => {
-        clearTimeout(timer)
-        finish()
-      })
-      win.webContents.once('did-fail-load', () => {
-        clearTimeout(timer)
-        finish()
-      })
+      win.webContents.once('did-finish-load', finish)
+      win.webContents.once('did-fail-load', finish)
     })
   }
 

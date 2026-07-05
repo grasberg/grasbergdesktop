@@ -6,9 +6,11 @@
 
 import { useEffect, useState, type ReactElement } from 'react'
 import type { PromptTemplate } from '@shared/types'
+import { ConfirmButton } from '@/components/common/controls'
+import { useAsyncAction } from '@/hooks/useAsyncAction'
+import { useEditorState } from '@/hooks/useEditorState'
 import { usePromptsStore } from '@/stores/prompts'
 import { useUiStore } from '@/stores/ui'
-import { ConfirmButton, errorMessage } from './ProvidersTab'
 import './settings.css'
 
 function PromptForm({
@@ -23,26 +25,21 @@ function PromptForm({
   const toast = useUiStore((s) => s.toast)
   const [title, setTitle] = useState(editing?.title ?? '')
   const [body, setBody] = useState(editing?.body ?? '')
-  const [busy, setBusy] = useState(false)
+  const [busy, run] = useAsyncAction()
 
   const submit = async (): Promise<void> => {
     if (title.trim().length === 0) {
       toast('Give the prompt a title.', 'error')
       return
     }
-    setBusy(true)
-    try {
+    await run(async () => {
       if (editing) {
         await update(editing.id, { title, body })
       } else {
         await create({ title, body })
       }
       onDone()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   return (
@@ -85,19 +82,13 @@ export default function PromptsTab(): ReactElement {
   const loaded = usePromptsStore((s) => s.loaded)
   const load = usePromptsStore((s) => s.load)
   const remove = usePromptsStore((s) => s.remove)
-  const toast = useUiStore((s) => s.toast)
+  const [, run] = useAsyncAction()
 
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<PromptTemplate | null>(null)
+  const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<PromptTemplate>()
 
   useEffect(() => {
     void load()
   }, [load])
-
-  const closeForm = (): void => {
-    setFormOpen(false)
-    setEditing(null)
-  }
 
   return (
     <section aria-label="Prompts">
@@ -110,14 +101,7 @@ export default function PromptsTab(): ReactElement {
           </p>
         </div>
         {!formOpen ? (
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              setEditing(null)
-              setFormOpen(true)
-            }}
-          >
+          <button type="button" className="btn" onClick={openAdd}>
             + New prompt
           </button>
         ) : null}
@@ -140,26 +124,13 @@ export default function PromptsTab(): ReactElement {
                 <p className="prompt-item-body">{t.body}</p>
               </div>
               <div className="prompt-item-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => {
-                    setEditing(t)
-                    setFormOpen(true)
-                  }}
-                >
+                <button type="button" className="btn btn-ghost" onClick={() => openEdit(t)}>
                   Edit
                 </button>
                 <ConfirmButton
                   label="Delete"
                   prompt="Delete this prompt?"
-                  onConfirm={async () => {
-                    try {
-                      await remove(t.id)
-                    } catch (e) {
-                      toast(errorMessage(e), 'error')
-                    }
-                  }}
+                  onConfirm={() => run(() => remove(t.id))}
                 />
               </div>
             </li>

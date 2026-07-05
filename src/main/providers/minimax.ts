@@ -25,7 +25,7 @@ const baseRespSchema = z
   })
   .passthrough()
 
-export function mapMiniMaxStatusCode(statusCode: number): ProviderErrorCode {
+function mapMiniMaxStatusCode(statusCode: number): ProviderErrorCode {
   switch (statusCode) {
     case 1004: // invalid api key
     case 2049: // invalid token

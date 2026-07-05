@@ -7,7 +7,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Skill, SkillInput, SkillPatch } from '@shared/types'
-import type { SqliteDriver, SqlValue } from '../driver'
+import type { SqliteDriver } from '../driver'
+import { updateById } from './util'
 
 export interface SkillsRepository {
   /** Ordered by plugin name, then skill name (stable settings listing). */
@@ -111,29 +112,18 @@ export function createSkillsRepository(driver: SqliteDriver): SkillsRepository {
     create,
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.name !== undefined) {
-        sets.push('name = ?')
-        params.push(patch.name)
-      }
-      if (patch.description !== undefined) {
-        sets.push('description = ?')
-        params.push(patch.description)
-      }
-      if (patch.content !== undefined) {
-        sets.push('content = ?')
-        params.push(patch.content)
-      }
-      if (patch.enabled !== undefined) {
-        sets.push('enabled = ?')
-        params.push(patch.enabled ? 1 : 0)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE skills SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'skills',
+        id,
+        {
+          name: patch.name,
+          description: patch.description,
+          content: patch.content,
+          enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+        },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

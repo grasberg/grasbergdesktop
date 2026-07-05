@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, type ReactElement } from 'react'
 import type { ToolRiskLevel } from '@shared/types'
+import { prettyJson } from '@/lib/format'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
 
@@ -18,16 +19,6 @@ const RISK_LABEL: Record<ToolRiskLevel, string> = {
 
 export function RiskBadge({ risk }: { risk: ToolRiskLevel }): ReactElement {
   return <span className={`badge tool-risk tool-risk-${risk}`}>{RISK_LABEL[risk]}</span>
-}
-
-/** Pretty-prints the model-produced argument JSON; falls back to the raw string. */
-export function prettyJson(raw: string): string {
-  if (!raw.trim()) return '{}'
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2)
-  } catch {
-    return raw
-  }
 }
 
 export default function ToolApprovalDialog(): ReactElement | null {

@@ -3,7 +3,7 @@ import type { KeyboardEvent } from 'react'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useConversationsStore } from '@/stores/conversations'
-import { errorMessage } from './settings/ProvidersTab'
+import { errorMessage } from '@/api/uld'
 import './settings/settings.css'
 
 interface PaletteItem {

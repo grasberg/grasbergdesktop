@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { ChatParams } from '@shared/types'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
-import { useUiStore } from '@/stores/ui'
-import { errorMessage } from './ProvidersTab'
 
 const CUSTOM = '__custom__'
 
@@ -14,11 +13,10 @@ function clamp(n: number, min: number, max: number): number {
 
 export default function DefaultsTab() {
   const settings = useSettingsStore((s) => s.settings)
-  const update = useSettingsStore((s) => s.update)
   const providers = useProvidersStore((s) => s.providers)
   const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
   const loadModels = useProvidersStore((s) => s.loadModels)
-  const toast = useUiStore((s) => s.toast)
+  const persist = usePersistSettings()
 
   const providerId = settings?.defaultProviderId ?? ''
   const provider = providers.find((p) => p.id === providerId) ?? null
@@ -64,14 +62,6 @@ export default function DefaultsTab() {
   const models = provider ? modelsByProvider[provider.id] ?? [] : []
   const inList = models.some((m) => m.id === settings.defaultModelId)
   const showCustom = customMode || (!!settings.defaultModelId && !inList) || models.length === 0
-
-  async function persist(patch: Parameters<typeof update>[0]) {
-    try {
-      await update(patch)
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    }
-  }
 
   async function onProviderChange(id: string) {
     const p = providers.find((x) => x.id === id)

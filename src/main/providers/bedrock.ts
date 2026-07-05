@@ -31,7 +31,9 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError, normalizeHttpError, toNormalizedError, toProviderError } from './errors'
+import { ProviderError } from './errors'
+import { checkedFetch, joinUrl } from './http'
+import { parseDataUrl, parseToolArguments, probeConnection } from './native'
 import { withRetry } from './retry'
 
 type FinishReason = AdapterChatResult['finishReason']
@@ -42,10 +44,12 @@ type Block = Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 function imageBlock(url: string): Block | null {
-  const m = /^data:image\/([^;]+);base64,(.*)$/s.exec(url)
-  if (!m) return null
-  const format = m[1] === 'jpg' ? 'jpeg' : m[1]
-  return { image: { format, source: { bytes: m[2] } } }
+  const parsed = parseDataUrl(url)
+  if (!parsed || !parsed.mediaType.startsWith('image/')) return null
+  const subtype = parsed.mediaType.slice('image/'.length)
+  if (!subtype) return null
+  const format = subtype === 'jpg' ? 'jpeg' : subtype
+  return { image: { format, source: { bytes: parsed.data } } }
 }
 
 function userContent(content: string | ContentPart[]): Block[] {
@@ -91,13 +95,7 @@ export function toConverseMessages(messages: AdapterMessage[]): {
       const text = typeof m.content === 'string' ? m.content : ''
       if (text) blocks.push({ text })
       for (const tc of m.toolCalls ?? []) {
-        let input: unknown = {}
-        try {
-          input = tc.arguments ? JSON.parse(tc.arguments) : {}
-        } catch {
-          input = {}
-        }
-        blocks.push({ toolUse: { toolUseId: tc.id, name: tc.name, input } })
+        blocks.push({ toolUse: { toolUseId: tc.id, name: tc.name, input: parseToolArguments(tc.arguments) } })
       }
       if (blocks.length > 0) push('assistant', blocks)
     } else {
@@ -182,29 +180,16 @@ export class BedrockAdapter implements ProviderAdapter {
   readonly type: ProviderType = 'bedrock'
 
   private async converse(req: AdapterChatRequest, ctx: AdapterContext): Promise<ConverseResult> {
-    const fetchImpl = ctx.fetchImpl ?? globalThis.fetch
-    const base = ctx.baseUrl.trim().replace(/\/+$/, '')
-    const url = `${base}/model/${encodeURIComponent(req.modelId)}/converse`
-    let res: Response
-    try {
-      res = await fetchImpl(url, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${ctx.apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify(buildConverseBody(req)),
-        signal: ctx.signal,
-      })
-    } catch (e) {
-      throw toProviderError(e, this.type, [ctx.apiKey])
-    }
-    if (!res.ok) {
-      let bodyText = ''
-      try {
-        bodyText = await res.text()
-      } catch {
-        // normalize from status alone
-      }
-      throw normalizeHttpError(res.status, bodyText, this.type, undefined, [ctx.apiKey])
-    }
+    const url = joinUrl(ctx.baseUrl, `/model/${encodeURIComponent(req.modelId)}/converse`)
+    const res = await checkedFetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ctx.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(buildConverseBody(req)),
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      fetchImpl: ctx.fetchImpl,
+    })
     let json: unknown
     try {
       json = JSON.parse(await res.text())
@@ -241,20 +226,11 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
-    const started = Date.now()
-    try {
-      await this.chat(
-        {
-          modelId: PROVIDER_TYPES.bedrock.defaultModelId,
-          messages: [{ role: 'user', content: 'ping' }],
-          params: { maxTokens: 1 },
-          stream: false,
-        },
-        ctx
-      )
-      return { ok: true, message: 'Connected.', latencyMs: Date.now() - started }
-    } catch (e) {
-      return { ok: false, message: toNormalizedError(e, this.type, [ctx.apiKey]).message }
-    }
+    return probeConnection((req) => this.chat(req, ctx), {
+      modelId: PROVIDER_TYPES.bedrock.defaultModelId,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      successMessage: 'Connected.',
+    })
   }
 }

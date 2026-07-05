@@ -35,7 +35,6 @@ export interface CodeStoreState {
   openFile: OpenFilePreview | null
   changes: CodeChange[]
   loadingTree: boolean
-  loadingFile: boolean
   loadingChanges: boolean
   /** Change id currently being applied/rejected (disables its buttons). */
   busyChangeId: string | null
@@ -82,7 +81,6 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
   openFile: null,
   changes: [],
   loadingTree: false,
-  loadingFile: false,
   loadingChanges: false,
   busyChangeId: null,
 
@@ -162,7 +160,6 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
   async openFilePreview(relPath) {
     const { project } = get()
     if (!project) return
-    set({ loadingFile: true })
     try {
       const file = await unwrap(window.uld.code.readFile({ projectId: project.id, relPath }))
       set({
@@ -172,10 +169,8 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
           truncated: file.truncated,
           sizeBytes: file.sizeBytes,
         },
-        loadingFile: false,
       })
     } catch (e) {
-      set({ loadingFile: false })
       toastError(e, `Reading ${relPath}`)
     }
   },
@@ -262,7 +257,6 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       openFile: null,
       changes: [],
       loadingTree: false,
-      loadingFile: false,
       loadingChanges: false,
       busyChangeId: null,
     })

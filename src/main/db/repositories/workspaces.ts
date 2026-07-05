@@ -4,7 +4,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Workspace, WorkspaceItem, WorkspaceItemKind } from '@shared/types'
-import type { SqliteDriver, SqlValue } from '../driver'
+import type { SqliteDriver } from '../driver'
+import { updateById } from './util'
 
 export interface WorkspaceCreateInput {
   name: string
@@ -153,33 +154,19 @@ export function createWorkspacesRepository(driver: SqliteDriver): WorkspacesRepo
   }
 
   const itemUpdate = (id: string, patch: WorkspaceItemPatch): WorkspaceItem | null => {
-    const sets: string[] = []
-    const params: SqlValue[] = []
-    if (patch.title !== undefined) {
-      sets.push('title = ?')
-      params.push(patch.title)
-    }
-    if (patch.content !== undefined) {
-      sets.push('content = ?')
-      params.push(patch.content)
-    }
-    if (patch.status !== undefined) {
-      sets.push('status = ?')
-      params.push(patch.status)
-    }
-    if (patch.sort !== undefined) {
-      sets.push('sort = ?')
-      params.push(patch.sort)
-    }
-    if (patch.kind !== undefined) {
-      sets.push('kind = ?')
-      params.push(patch.kind)
-    }
-    if (sets.length > 0) {
-      sets.push('updated_at = ?')
-      params.push(Date.now(), id)
-      driver.run(`UPDATE workspace_items SET ${sets.join(', ')} WHERE id = ?`, params)
-    }
+    updateById(
+      driver,
+      'workspace_items',
+      id,
+      {
+        title: patch.title,
+        content: patch.content,
+        status: patch.status,
+        sort: patch.sort,
+        kind: patch.kind,
+      },
+      { touchUpdatedAt: true }
+    )
     return itemGetById(id)
   }
 
@@ -212,25 +199,13 @@ export function createWorkspacesRepository(driver: SqliteDriver): WorkspacesRepo
     getById,
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: SqlValue[] = []
-      if (patch.name !== undefined) {
-        sets.push('name = ?')
-        params.push(patch.name)
-      }
-      if (patch.goal !== undefined) {
-        sets.push('goal = ?')
-        params.push(patch.goal)
-      }
-      if (patch.status !== undefined) {
-        sets.push('status = ?')
-        params.push(patch.status)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE workspaces SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'workspaces',
+        id,
+        { name: patch.name, goal: patch.goal, status: patch.status },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConversationMode, ConversationSummary } from '@shared/types'
-import { toNormalized } from '@/api/uld'
+import { newConversation, newTaskInActiveMode } from '@/lib/new-conversation'
+import { modKeyLabel } from '@/lib/platform'
 import { useConversationsStore } from '@/stores/conversations'
-import { useUiStore } from '@/stores/ui'
+import { toastError, useUiStore } from '@/stores/ui'
 import appIcon from '@/assets/icon.png'
 
 const MODE_TABS: ReadonlyArray<{ key: ConversationMode | 'all'; label: string }> = [
@@ -41,10 +42,6 @@ function relativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString()
 }
 
-function modKey(): string {
-  return navigator.platform.toLowerCase().includes('mac') ? 'Cmd' : 'Ctrl'
-}
-
 interface RowProps {
   summary: ConversationSummary
   active: boolean
@@ -72,7 +69,7 @@ function ConversationRow({ summary, active }: RowProps): React.JSX.Element {
       .rename(summary.id, next)
       .catch((e: unknown) => {
         setTitle(summary.title)
-        useUiStore.getState().toast(`Rename failed: ${toNormalized(e).message}`, 'error')
+        toastError('Rename failed', e)
       })
   }
 
@@ -82,7 +79,7 @@ function ConversationRow({ summary, active }: RowProps): React.JSX.Element {
       .getState()
       .remove(summary.id)
       .catch((e: unknown) => {
-        useUiStore.getState().toast(`Delete failed: ${toNormalized(e).message}`, 'error')
+        toastError('Delete failed', e)
       })
   }
 
@@ -231,24 +228,15 @@ export default function Sidebar(): React.JSX.Element {
     }
   }, [newMenuOpen])
 
-  const newConversation = (mode: ConversationMode): void => {
+  const startConversation = (mode: ConversationMode): void => {
     setNewMenuOpen(false)
-    // Leave the Workflows/Projects surface so the new conversation shows.
-    useUiStore.getState().openWorkflows(false)
-    useUiStore.getState().openProjects(false)
-    useConversationsStore
-      .getState()
-      .create(mode)
-      .catch((e: unknown) => {
-        useUiStore
-          .getState()
-          .toast(`Could not create conversation: ${toNormalized(e).message}`, 'error')
-      })
+    newConversation(mode)
   }
 
   /** New conversation in the active mode tab ('All' falls back to chat). */
   const newTask = (): void => {
-    newConversation(modeFilter === 'all' ? 'chat' : modeFilter)
+    setNewMenuOpen(false)
+    newTaskInActiveMode()
   }
 
   const searching = query.trim().length > 0
@@ -266,7 +254,7 @@ export default function Sidebar(): React.JSX.Element {
             type="button"
             className="btn btn-primary sidebar-new"
             title="New chat"
-            onClick={() => newConversation('chat')}
+            onClick={() => startConversation('chat')}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -298,7 +286,7 @@ export default function Sidebar(): React.JSX.Element {
                 type="button"
                 role="menuitem"
                 className="sidebar-new-item"
-                onClick={() => newConversation('chat')}
+                onClick={() => startConversation('chat')}
               >
                 New chat
               </button>
@@ -306,7 +294,7 @@ export default function Sidebar(): React.JSX.Element {
                 type="button"
                 role="menuitem"
                 className="sidebar-new-item"
-                onClick={() => newConversation('cowork')}
+                onClick={() => startConversation('cowork')}
               >
                 New cowork workspace
               </button>
@@ -314,7 +302,7 @@ export default function Sidebar(): React.JSX.Element {
                 type="button"
                 role="menuitem"
                 className="sidebar-new-item"
-                onClick={() => newConversation('code')}
+                onClick={() => startConversation('code')}
               >
                 New code session
               </button>
@@ -322,7 +310,7 @@ export default function Sidebar(): React.JSX.Element {
                 type="button"
                 role="menuitem"
                 className="sidebar-new-item"
-                onClick={() => newConversation('write')}
+                onClick={() => startConversation('write')}
               >
                 New document (Write)
               </button>
@@ -330,7 +318,7 @@ export default function Sidebar(): React.JSX.Element {
                 type="button"
                 role="menuitem"
                 className="sidebar-new-item"
-                onClick={() => newConversation('design')}
+                onClick={() => startConversation('design')}
               >
                 New design
               </button>
@@ -363,14 +351,14 @@ export default function Sidebar(): React.JSX.Element {
           <button
             type="button"
             className="sidebar-link"
-            title={`New task in the current mode (${modKey()}+N)`}
+            title={`New task in the current mode (${modKeyLabel}+N)`}
             onClick={newTask}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
             New task
-            <span className="kbd">{modKey()}+N</span>
+            <span className="kbd">{modKeyLabel}+N</span>
           </button>
           <button
             type="button"
@@ -426,7 +414,7 @@ export default function Sidebar(): React.JSX.Element {
           type="button"
           className="btn-icon"
           aria-label="Open settings"
-          title={`Settings (${modKey()}+,)`}
+          title={`Settings (${modKeyLabel}+,)`}
           onClick={() => useUiStore.getState().openSettings(true)}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -446,7 +434,7 @@ export default function Sidebar(): React.JSX.Element {
           </svg>
         </button>
         <span className="sidebar-hint">
-          <span className="kbd">{modKey()}</span>
+          <span className="kbd">{modKeyLabel}</span>
           <span className="kbd">K</span> commands
         </span>
       </div>

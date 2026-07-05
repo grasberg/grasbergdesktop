@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
-import type { ConvUpdateRequest } from '@shared/ipc'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import type { Attachment, ChatParams } from '@shared/types'
+import { parseTaskList, type ParsedTaskLine } from '@shared/tasklist'
 import ChatView from '@/components/chat/ChatView'
 import { toNormalized, unwrap } from '@/api/uld'
+import { useOnGenerationSettled } from '@/hooks/useOnGenerationSettled'
 import { useChatStore } from '@/stores/chat'
 import { useCodeStore } from '@/stores/code'
 import { useSettingsStore } from '@/stores/settings'
@@ -11,9 +12,6 @@ import ChangesPanel from './ChangesPanel'
 import FilePreview from './FilePreview'
 import FileTree from './FileTree'
 import './code.css'
-
-/** convUpdate patch extended with projectId (accepted by newer main builds). */
-type PatchWithProject = ConvUpdateRequest['patch'] & { projectId?: string | null }
 
 function ShieldIcon(): ReactElement {
   return (
@@ -37,8 +35,7 @@ function ShieldIcon(): ReactElement {
 
 /**
  * Picks a folder, registers it as a project and links it to the open
- * conversation. Defensive: older main builds may not support projectOpen or
- * a projectId patch — both paths degrade to a toast.
+ * conversation.
  */
 async function grantFolderAccess(): Promise<void> {
   const conversation = useChatStore.getState().conversation
@@ -46,8 +43,9 @@ async function grantFolderAccess(): Promise<void> {
   const project = await useCodeStore.getState().openProjectViaPicker()
   if (!project) return
   try {
-    const patch: PatchWithProject = { projectId: project.id }
-    await unwrap(window.uld.conversations.update({ id: conversation.id, patch }))
+    await unwrap(
+      window.uld.conversations.update({ id: conversation.id, patch: { projectId: project.id } })
+    )
     // Refresh the chat store's copy of the conversation (projectId changed).
     await useChatStore.getState().openConversation(conversation.id)
     if (useChatStore.getState().conversation?.projectId !== project.id) {
@@ -289,20 +287,13 @@ function PlanModeToggle(): ReactElement | null {
   )
 }
 
-interface TaskLine {
-  text: string
-  done: boolean
-  inProgress: boolean
-}
-
 /**
  * Read-only view of the assistant's update_task_list checklist (stored as the
  * 'Task list' workspace item). Refreshes when a generation finishes.
  */
 function TaskListStrip(): ReactElement | null {
   const conversationId = useChatStore((s) => s.conversation?.id ?? null)
-  const streaming = useChatStore((s) => s.streaming)
-  const [tasks, setTasks] = useState<TaskLine[]>([])
+  const [tasks, setTasks] = useState<ParsedTaskLine[]>([])
   const [open, setOpen] = useState(true)
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -324,18 +315,7 @@ function TaskListStrip(): ReactElement | null {
         setTasks([])
         return
       }
-      const parsed: TaskLine[] = []
-      for (const line of item.content.split('\n')) {
-        const match = /^- \[( |x)\] (.*)$/.exec(line.trim())
-        if (!match) continue
-        const inProgress = match[2].endsWith('⟵ in progress')
-        parsed.push({
-          text: inProgress ? match[2].slice(0, -'⟵ in progress'.length).trim() : match[2],
-          done: match[1] === 'x',
-          inProgress,
-        })
-      }
-      setTasks(parsed)
+      setTasks(parseTaskList(item.content))
     } catch {
       // The strip is cosmetic — never toast for it.
     }
@@ -345,12 +325,7 @@ function TaskListStrip(): ReactElement | null {
     void refresh()
   }, [refresh])
 
-  const prevStreaming = useRef(streaming)
-  useEffect(() => {
-    const finished = prevStreaming.current !== null && streaming === null
-    prevStreaming.current = streaming
-    if (finished) void refresh()
-  }, [streaming, refresh])
+  useOnGenerationSettled(() => void refresh())
 
   if (tasks.length === 0) return null
   const doneCount = tasks.filter((t) => t.done).length
@@ -393,7 +368,6 @@ function TaskListStrip(): ReactElement | null {
  */
 export default function CodeView(): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
-  const streaming = useChatStore((s) => s.streaming)
   const project = useCodeStore((s) => s.project)
   const proposedCount = useCodeStore(
     (s) => s.changes.filter((c) => c.status === 'proposed').length
@@ -416,14 +390,9 @@ export default function CodeView(): ReactElement {
     }
   }, [conversationId, projectId])
 
-  // Refresh proposed changes each time a generation finishes (streaming
-  // transitions non-null -> null): the assistant may have proposed new diffs.
-  const prevStreaming = useRef(streaming)
-  useEffect(() => {
-    const finished = prevStreaming.current !== null && streaming === null
-    prevStreaming.current = streaming
-    if (finished) void useCodeStore.getState().loadChanges()
-  }, [streaming])
+  // Refresh proposed changes each time a generation finishes: the assistant
+  // may have proposed new diffs.
+  useOnGenerationSettled(() => void useCodeStore.getState().loadChanges())
 
   return (
     <div className={`code-view ${changesOpen ? '' : 'code-view-collapsed'}`}>

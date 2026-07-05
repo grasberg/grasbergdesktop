@@ -29,22 +29,18 @@ import type {
   AdapterStreamEvent,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError, normalizeHttpError, toNormalizedError, toProviderError } from './errors'
+import { ProviderError, toNormalizedError, toProviderError } from './errors'
+import { checkedFetch, joinUrl, requireStreamBody } from './http'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
-export type OaiToolCall = z.infer<typeof oaiToolCallSchema>
+type OaiToolCall = z.infer<typeof oaiToolCallSchema>
 
 type FinishReason = AdapterChatResult['finishReason']
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
-
-/** baseUrl arrives with no trailing-slash guarantee — normalize before joining. */
-export function joinUrl(baseUrl: string, path: string): string {
-  return baseUrl.trim().replace(/\/+$/, '') + path
-}
 
 /** Maps our normalized message to the OpenAI wire format. */
 export function toWireMessage(m: AdapterMessage): Record<string, unknown> {
@@ -92,7 +88,7 @@ export function buildChatBody(
   return body
 }
 
-export function mapFinishReason(reason: string | null | undefined): FinishReason | undefined {
+function mapFinishReason(reason: string | null | undefined): FinishReason | undefined {
   switch (reason) {
     case null:
     case undefined:
@@ -110,7 +106,7 @@ export function mapFinishReason(reason: string | null | undefined): FinishReason
   }
 }
 
-export function mapUsage(u: {
+function mapUsage(u: {
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
@@ -125,17 +121,7 @@ export function mapUsage(u: {
   }
 }
 
-/** Retry-After is either delta-seconds or an HTTP date. */
-export function parseRetryAfterSeconds(headerValue: string | null): number | undefined {
-  if (!headerValue) return undefined
-  const secs = Number(headerValue)
-  if (Number.isFinite(secs) && secs >= 0) return Math.ceil(secs)
-  const date = Date.parse(headerValue)
-  if (!Number.isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000))
-  return undefined
-}
-
-export interface ToolCallAccum {
+interface ToolCallAccum {
   id?: string
   name: string
   args: string
@@ -146,7 +132,7 @@ export interface ToolCallAccum {
  * when a provider omits it we fall back to the id (new entry per new id) or to
  * the last-seen index for continuation fragments. Returns the index used.
  */
-export function accumulateToolCall(
+function accumulateToolCall(
   accum: Map<number, ToolCallAccum>,
   tc: OaiToolCall,
   lastIndex: number
@@ -155,8 +141,13 @@ export function accumulateToolCall(
   if (tc.index !== undefined) {
     index = tc.index
   } else if (tc.id) {
-    const existing = [...accum.entries()].find(([, a]) => a.id === tc.id)
-    index = existing ? existing[0] : accum.size
+    index = accum.size
+    for (const [i, a] of accum) {
+      if (a.id === tc.id) {
+        index = i
+        break
+      }
+    }
   } else {
     index = lastIndex
   }
@@ -222,39 +213,21 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
   // -- HTTP plumbing ----------------------------------------------------------
 
-  protected async doRequest(
+  protected doRequest(
     ctx: AdapterContext,
     path: string,
     init: { method: 'GET' | 'POST'; body?: string }
   ): Promise<Response> {
-    const fetchImpl = ctx.fetchImpl ?? globalThis.fetch
-    let res: Response
-    try {
-      res = await fetchImpl(joinUrl(ctx.baseUrl, path), {
-        method: init.method,
-        headers: this.buildHeaders(ctx, init.body !== undefined),
-        body: init.body,
-        signal: ctx.signal,
-      })
-    } catch (e) {
-      throw toProviderError(e, this.type, [ctx.apiKey])
-    }
-    if (!res.ok) {
-      let bodyText = ''
-      try {
-        bodyText = await res.text()
-      } catch {
-        // Body unavailable — normalize from status alone.
-      }
-      throw normalizeHttpError(
-        res.status,
-        bodyText,
-        this.type,
-        parseRetryAfterSeconds(res.headers.get('retry-after')),
-        [ctx.apiKey]
-      )
-    }
-    return res
+    return checkedFetch(joinUrl(ctx.baseUrl, path), {
+      method: init.method,
+      headers: this.buildHeaders(ctx, init.body !== undefined),
+      body: init.body,
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      fetchImpl: ctx.fetchImpl,
+      honorRetryAfter: true,
+    })
   }
 
   protected postChat(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
@@ -330,12 +303,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   ): AsyncGenerator<AdapterStreamEvent> {
     // Retry only applies to establishing the stream — never mid-stream.
     const res = await withRetry(() => this.postChat(req, ctx, true), { signal: ctx.signal })
-    if (!res.body) {
-      throw new ProviderError('server', 'The provider returned an empty streaming response.', {
-        retryable: false,
-        providerType: this.type,
-      })
-    }
+    const body = requireStreamBody(res, 'The provider', this.type)
 
     const accum = new Map<number, ToolCallAccum>()
     const emitted = new Set<number>()
@@ -352,7 +320,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       return events
     }
 
-    for await (const payload of parseSSE(res.body, ctx.signal)) {
+    for await (const payload of parseSSE(body, ctx.signal)) {
       let json: unknown
       try {
         json = JSON.parse(payload)

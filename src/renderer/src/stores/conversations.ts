@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import type { ConversationSummary } from '@shared/types'
-import { toNormalized, unwrap } from '@/api/uld'
+import { unwrap } from '@/api/uld'
 import type { ConversationsStoreState } from './contracts'
 import { useChatStore } from './chat'
-import { useUiStore } from './ui'
+import { toastError } from './ui'
 
 export const useConversationsStore = create<ConversationsStoreState>()((set, get) => ({
   summaries: [],
@@ -24,7 +24,7 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
       set({ summaries, loaded: true })
     } catch (e) {
       set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load conversations: ${toNormalized(e).message}`, 'error')
+      toastError('Failed to load conversations', e)
     }
   },
 

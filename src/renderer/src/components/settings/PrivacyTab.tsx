@@ -1,11 +1,11 @@
 import { useState } from 'react'
-import type { AppSettings } from '@shared/types'
+import { Switch } from '@/components/common/controls'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useMemoriesStore } from '@/stores/memories'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
 import { toNormalized, unwrap } from '@/api/uld'
-import { errorMessage, Switch } from './ProvidersTab'
 
 function BackupSection() {
   const toast = useUiStore((s) => s.toast)
@@ -74,15 +74,10 @@ function BackupSection() {
 
 export default function PrivacyTab() {
   const settings = useSettingsStore((s) => s.settings)
-  const update = useSettingsStore((s) => s.update)
-  const toast = useUiStore((s) => s.toast)
+  const persist = usePersistSettings()
 
   if (!settings) {
     return <p className="field-hint">Loading settings…</p>
-  }
-
-  function persist(patch: Partial<AppSettings>) {
-    void update(patch).catch((e: unknown) => toast(errorMessage(e), 'error'))
   }
 
   return (
@@ -109,7 +104,7 @@ export default function PrivacyTab() {
         </div>
         <Switch
           checked={settings.telemetryEnabled}
-          onChange={(v) => persist({ telemetryEnabled: v })}
+          onChange={(v) => void persist({ telemetryEnabled: v })}
           label="Anonymous usage statistics"
         />
       </div>
@@ -123,7 +118,7 @@ export default function PrivacyTab() {
         </div>
         <Switch
           checked={settings.warnBeforeSendingFiles}
-          onChange={(v) => persist({ warnBeforeSendingFiles: v })}
+          onChange={(v) => void persist({ warnBeforeSendingFiles: v })}
           label="Warn before sending files"
         />
       </div>

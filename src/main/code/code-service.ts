@@ -159,31 +159,15 @@ export class CodeService {
       } catch {
         continue // path escapes the root (or is malformed) — never propose it
       }
-      const rel = normalizeRel(change.path)
-
-      // Capture the current file content as the staleness baseline. '' for
-      // create; null when we cannot read it (binary/oversized/unreadable), in
-      // which case staleness cannot be verified at apply time.
-      const oldContent: string | null =
-        change.type === 'create' ? '' : this.readCurrentText(abs)
-
-      const newContent = change.type === 'delete' ? null : change.newContent
-      const diff = diffLines(
-        oldContent ?? '',
-        newContent ?? '',
-        change.type === 'create' ? '/dev/null' : `a/${rel}`,
-        change.type === 'delete' ? '/dev/null' : `b/${rel}`
-      )
       created.push(
-        this.db.code.changeCreate({
-          projectId: project.id,
+        this.createProposedChange(
+          project.id,
           conversationId,
-          filePath: rel,
-          changeType: change.type,
-          diff,
-          newContent,
-          oldContent,
-        })
+          abs,
+          normalizeRel(change.path),
+          change.type,
+          change.newContent
+        )
       )
     }
     return created
@@ -209,23 +193,14 @@ export class CodeService {
     if (!project) throw invalid('Project not found.')
 
     const abs = this.resolveInsideRoot(project.path, relPath)
-    const rel = normalizeRel(relPath)
-    const oldContent: string | null = changeType === 'create' ? '' : this.readCurrentText(abs)
-    const diff = diffLines(
-      oldContent ?? '',
-      newContent,
-      changeType === 'create' ? '/dev/null' : `a/${rel}`,
-      `b/${rel}`
-    )
-    return this.db.code.changeCreate({
-      projectId: project.id,
+    return this.createProposedChange(
+      project.id,
       conversationId,
-      filePath: rel,
+      abs,
+      normalizeRel(relPath),
       changeType,
-      diff,
-      newContent,
-      oldContent,
-    })
+      newContent
+    )
   }
 
   /**
@@ -306,6 +281,41 @@ export class CodeService {
     const change = this.db.code.changeGet(changeId)
     if (!change) throw invalid('Change not found.')
     return change
+  }
+
+  /**
+   * Builds and stores one 'proposed' CodeChange row. Captures the current file
+   * content as the staleness baseline ('' for create; null when we cannot read
+   * it — binary/oversized/unreadable — in which case staleness cannot be
+   * verified at apply time) and computes the display diff. `abs` must already
+   * be validated inside the project root by the caller, which also owns the
+   * error policy (skip vs throw) for invalid paths.
+   */
+  private createProposedChange(
+    projectId: string,
+    conversationId: string,
+    abs: string,
+    rel: string,
+    changeType: CodeChange['changeType'],
+    proposedContent: string
+  ): CodeChange {
+    const oldContent: string | null = changeType === 'create' ? '' : this.readCurrentText(abs)
+    const newContent = changeType === 'delete' ? null : proposedContent
+    const diff = diffLines(
+      oldContent ?? '',
+      newContent ?? '',
+      changeType === 'create' ? '/dev/null' : `a/${rel}`,
+      changeType === 'delete' ? '/dev/null' : `b/${rel}`
+    )
+    return this.db.code.changeCreate({
+      projectId,
+      conversationId,
+      filePath: rel,
+      changeType,
+      diff,
+      newContent,
+      oldContent,
+    })
   }
 
   /**

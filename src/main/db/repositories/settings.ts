@@ -6,6 +6,7 @@
 
 import { DEFAULT_SETTINGS, type AppSettings } from '@shared/types'
 import type { SqliteDriver } from '../driver'
+import { parseJson } from './util'
 
 export interface SettingsRepository {
   get(): AppSettings
@@ -17,6 +18,9 @@ interface SettingsRow {
   value_json: string
 }
 
+/** Sentinel distinguishing a corrupt stored value from any parsed JSON value. */
+const CORRUPT = Symbol('corrupt')
+
 export function createSettingsRepository(driver: SqliteDriver): SettingsRepository {
   const get = (): AppSettings => {
     const settings: AppSettings = {
@@ -26,11 +30,10 @@ export function createSettingsRepository(driver: SqliteDriver): SettingsReposito
     const rows = driver.all<SettingsRow>('SELECT key, value_json FROM settings')
     for (const row of rows) {
       if (!Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS, row.key)) continue
-      try {
-        ;(settings as unknown as Record<string, unknown>)[row.key] = JSON.parse(row.value_json)
-      } catch {
-        // corrupt value — keep the default
-      }
+      const value = parseJson<unknown>(row.value_json, CORRUPT)
+      // corrupt value — keep the default
+      if (value === CORRUPT) continue
+      ;(settings as unknown as Record<string, unknown>)[row.key] = value
     }
     return settings
   }

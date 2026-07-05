@@ -1,7 +1,9 @@
-import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { Attachment, Message } from '@shared/types'
 import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
+import { useCopied } from '@/hooks/useCopied'
+import { formatBytes } from '@/lib/format'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
 import Markdown from './Markdown'
@@ -11,26 +13,6 @@ import './chat.css'
 interface MessageItemProps {
   message: Message
   isLast: boolean
-}
-
-function useCopied(): [boolean, (text: string) => void] {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<number | undefined>(undefined)
-  useEffect(() => () => window.clearTimeout(timer.current), [])
-  const copy = (text: string): void => {
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      window.clearTimeout(timer.current)
-      timer.current = window.setTimeout(() => setCopied(false), 1500)
-    })
-  }
-  return [copied, copy]
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** Attachment chip with a lazily-loaded thumbnail for stored images. */
@@ -167,17 +149,20 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   const usage = message.usage
 
   // Rough cost estimate from the model's list price (approximate; see tooltip).
+  // Memoized: MessageItem re-renders per streaming delta for the live message.
   const providers = useProvidersStore((s) => s.providers)
-  const provider = message.providerId
-    ? providers.find((p) => p.id === message.providerId)
-    : undefined
-  const pricing =
-    provider && message.modelId
-      ? provider.presetId
-        ? presetPricing(provider.presetId, message.modelId)
-        : findPricing(provider.type, message.modelId)
+  const cost = useMemo(() => {
+    const provider = message.providerId
+      ? providers.find((p) => p.id === message.providerId)
       : undefined
-  const cost = usage && pricing ? estimateCost(usage, pricing) : undefined
+    const pricing =
+      provider && message.modelId
+        ? provider.presetId
+          ? presetPricing(provider.presetId, message.modelId)
+          : findPricing(provider.type, message.modelId)
+        : undefined
+    return usage && pricing ? estimateCost(usage, pricing) : undefined
+  }, [providers, message.providerId, message.modelId, usage])
 
   return (
     <div className="msg-row msg-row-assistant">

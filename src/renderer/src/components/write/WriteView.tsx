@@ -4,8 +4,9 @@
  * completion hook); the user can also edit it directly and export it.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import type { Document } from '@shared/types'
+import { useOnGenerationSettled } from '@/hooks/useOnGenerationSettled'
 import { useChatStore } from '@/stores/chat'
 import { useUiStore } from '@/stores/ui'
 import ChatView from '@/components/chat/ChatView'
@@ -14,7 +15,6 @@ import './write.css'
 
 export default function WriteView(): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
-  const streaming = useChatStore((s) => s.streaming)
   const toast = useUiStore((s) => s.toast)
   const conversationId = conversation?.id ?? null
 
@@ -23,7 +23,6 @@ export default function WriteView(): ReactElement {
   const [dirty, setDirty] = useState(false)
   const [preview, setPreview] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
-  const prevStreaming = useRef(streaming)
 
   const loadDoc = useCallback(async (): Promise<void> => {
     if (!conversationId) return
@@ -42,10 +41,7 @@ export default function WriteView(): ReactElement {
   }, [conversationId])
 
   // Reload after a generation finishes (the assistant may have written the doc).
-  useEffect(() => {
-    if (prevStreaming.current && !streaming) void loadDoc()
-    prevStreaming.current = streaming
-  }, [streaming, loadDoc])
+  useOnGenerationSettled(() => void loadDoc())
 
   const save = async (): Promise<void> => {
     if (!conversationId) return

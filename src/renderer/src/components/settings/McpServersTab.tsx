@@ -12,27 +12,19 @@ import type {
   McpServerPatch,
   McpTransport,
 } from '@shared/types'
+import { ConfirmButton, Switch } from '@/components/common/controls'
+import { useAsyncAction } from '@/hooks/useAsyncAction'
+import { useEditorState } from '@/hooks/useEditorState'
 import { useMcpStore } from '@/stores/mcp'
-import { useUiStore } from '@/stores/ui'
-import { ConfirmButton, Switch, errorMessage } from './ProvidersTab'
+import { rowsFromExisting, SecretRowsEditor, splitRows, type SecretRow } from './SecretRows'
 import './settings.css'
 
-interface Row {
-  name: string
-  value: string
-  secret: boolean
-  existing: boolean
-}
-
-function initialRows(server: McpServerConfig | null): Row[] {
+function initialRows(server: McpServerConfig | null): SecretRow[] {
   if (!server) return []
-  const rows: Row[] = []
-  const map = server.transport === 'stdio' ? server.env : server.headers
-  for (const [name, value] of Object.entries(map)) {
-    rows.push({ name, value, secret: false, existing: false })
-  }
-  for (const name of server.secretNames) rows.push({ name, value: '', secret: true, existing: true })
-  return rows
+  return rowsFromExisting(
+    server.transport === 'stdio' ? server.env : server.headers,
+    server.secretNames
+  )
 }
 
 function McpForm({
@@ -44,40 +36,22 @@ function McpForm({
 }): ReactElement {
   const create = useMcpStore((s) => s.create)
   const update = useMcpStore((s) => s.update)
-  const toast = useUiStore((s) => s.toast)
 
   const [name, setName] = useState(editing?.name ?? '')
   const [transport, setTransport] = useState<McpTransport>(editing?.transport ?? 'stdio')
   const [command, setCommand] = useState(editing?.command ?? '')
   const [args, setArgs] = useState((editing?.args ?? []).join(' '))
   const [url, setUrl] = useState(editing?.url ?? '')
-  const [rows, setRows] = useState<Row[]>(initialRows(editing))
-  const [busy, setBusy] = useState(false)
-
-  const setRow = (i: number, patch: Partial<Row>): void =>
-    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const addRow = (): void =>
-    setRows((rs) => [...rs, { name: '', value: '', secret: false, existing: false }])
-  const removeRow = (i: number): void => setRows((rs) => rs.filter((_, idx) => idx !== i))
+  const [rows, setRows] = useState<SecretRow[]>(initialRows(editing))
+  const [busy, run] = useAsyncAction()
 
   const submit = async (): Promise<void> => {
-    const publicMap: Record<string, string> = {}
-    const setSecrets: Record<string, string> = {}
-    for (const r of rows) {
-      const key = r.name.trim()
-      if (!key) continue
-      if (r.secret) {
-        if (r.value.length > 0) setSecrets[key] = r.value
-      } else {
-        publicMap[key] = r.value
-      }
-    }
-    setBusy(true)
-    try {
+    const { publicValues: publicMap, setSecrets, deleteSecrets } = splitRows(
+      rows,
+      editing?.secretNames ?? []
+    )
+    await run(async () => {
       if (editing) {
-        const originalSecrets = new Set(editing.secretNames)
-        const keptSecrets = new Set(rows.filter((r) => r.secret).map((r) => r.name.trim()))
-        const deleteSecrets = [...originalSecrets].filter((n) => !keptSecrets.has(n))
         const patch: McpServerPatch = {
           name,
           setSecrets,
@@ -99,11 +73,7 @@ function McpForm({
         await create(input)
       }
       onDone()
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   return (
@@ -165,44 +135,15 @@ function McpForm({
 
       <div className="field">
         <span className="field-label">{transport === 'stdio' ? 'Environment' : 'Headers'}</span>
-        {rows.map((r, i) => (
-          <div className="custom-tool-header-row" key={i}>
-            <input
-              className="input"
-              value={r.name}
-              placeholder={transport === 'stdio' ? 'VAR_NAME' : 'Header-Name'}
-              aria-label="Name"
-              onChange={(e) => setRow(i, { name: e.target.value })}
-            />
-            <input
-              className="input"
-              type={r.secret ? 'password' : 'text'}
-              value={r.value}
-              placeholder={r.secret && r.existing ? '•••••• (unchanged)' : 'value'}
-              aria-label="Value"
-              onChange={(e) => setRow(i, { value: e.target.value })}
-            />
-            <label className="custom-tool-secret-toggle" title="Store this value encrypted">
-              <input
-                type="checkbox"
-                checked={r.secret}
-                onChange={(e) => setRow(i, { secret: e.target.checked })}
-              />
-              secret
-            </label>
-            <button
-              type="button"
-              className="btn btn-ghost btn-icon"
-              aria-label="Remove row"
-              onClick={() => removeRow(i)}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-        <button type="button" className="btn btn-ghost" onClick={addRow}>
-          + Add {transport === 'stdio' ? 'variable' : 'header'}
-        </button>
+        <SecretRowsEditor
+          rows={rows}
+          setRows={setRows}
+          namePlaceholder={transport === 'stdio' ? 'VAR_NAME' : 'Header-Name'}
+          nameAriaLabel="Name"
+          valueAriaLabel="Value"
+          removeAriaLabel="Remove row"
+          addLabel={`+ Add ${transport === 'stdio' ? 'variable' : 'header'}`}
+        />
       </div>
 
       <div className="custom-tool-form-actions">
@@ -235,7 +176,7 @@ function ServerRow({
   const setEnabled = useMcpStore((s) => s.setEnabled)
   const reconnect = useMcpStore((s) => s.reconnect)
   const remove = useMcpStore((s) => s.remove)
-  const toast = useUiStore((s) => s.toast)
+  const [, run] = useAsyncAction()
   const status = runtime?.status ?? (server.enabled ? 'connecting' : 'disconnected')
 
   return (
@@ -268,13 +209,7 @@ function ServerRow({
           <ConfirmButton
             label="Delete"
             prompt="Delete this server?"
-            onConfirm={async () => {
-              try {
-                await remove(server.id)
-              } catch (e) {
-                toast(errorMessage(e), 'error')
-              }
-            }}
+            onConfirm={() => run(() => remove(server.id))}
           />
         </div>
       </div>
@@ -292,17 +227,11 @@ export default function McpServersTab(): ReactElement {
   const servers = useMcpStore((s) => s.servers)
   const loaded = useMcpStore((s) => s.loaded)
   const load = useMcpStore((s) => s.load)
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<McpServerConfig | null>(null)
+  const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<McpServerConfig>()
 
   useEffect(() => {
     void load()
   }, [load])
-
-  const closeForm = (): void => {
-    setFormOpen(false)
-    setEditing(null)
-  }
 
   return (
     <section aria-label="MCP servers">
@@ -316,14 +245,7 @@ export default function McpServersTab(): ReactElement {
           </p>
         </div>
         {!formOpen ? (
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              setEditing(null)
-              setFormOpen(true)
-            }}
-          >
+          <button type="button" className="btn" onClick={openAdd}>
             + Add server
           </button>
         ) : null}
@@ -340,14 +262,7 @@ export default function McpServersTab(): ReactElement {
       ) : (
         <ul className="mcp-list">
           {servers.map((s) => (
-            <ServerRow
-              key={s.id}
-              server={s}
-              onEdit={() => {
-                setEditing(s)
-                setFormOpen(true)
-              }}
-            />
+            <ServerRow key={s.id} server={s} onEdit={() => openEdit(s)} />
           ))}
         </ul>
       )}

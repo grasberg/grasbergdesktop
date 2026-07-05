@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import { toNormalized, unwrap } from '@/api/uld'
+import { unwrap } from '@/api/uld'
 import type { SettingsStoreState } from './contracts'
-import { useUiStore } from './ui'
+import { toastError } from './ui'
 
 export const useSettingsStore = create<SettingsStoreState>()((set, get) => ({
   settings: null,
@@ -13,7 +13,7 @@ export const useSettingsStore = create<SettingsStoreState>()((set, get) => ({
       set({ settings, loaded: true })
     } catch (e) {
       set({ loaded: true })
-      useUiStore.getState().toast(`Failed to load settings: ${toNormalized(e).message}`, 'error')
+      toastError('Failed to load settings', e)
     }
   },
 
@@ -26,7 +26,7 @@ export const useSettingsStore = create<SettingsStoreState>()((set, get) => ({
       set({ settings })
     } catch (e) {
       if (prev) set({ settings: prev })
-      useUiStore.getState().toast(`Failed to save settings: ${toNormalized(e).message}`, 'error')
+      toastError('Failed to save settings', e)
     }
   },
 }))

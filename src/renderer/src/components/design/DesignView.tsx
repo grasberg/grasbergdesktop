@@ -4,8 +4,9 @@
  * hook). Prototypes render in an iframe with `sandbox` and no network access.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import type { Document } from '@shared/types'
+import { useOnGenerationSettled } from '@/hooks/useOnGenerationSettled'
 import { useChatStore } from '@/stores/chat'
 import { useUiStore } from '@/stores/ui'
 import ChatView from '@/components/chat/ChatView'
@@ -13,23 +14,28 @@ import './design.css'
 
 export default function DesignView(): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
-  const streaming = useChatStore((s) => s.streaming)
   const toast = useUiStore((s) => s.toast)
   const conversationId = conversation?.id ?? null
 
   const [artifacts, setArtifacts] = useState<Document[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
-  const prevStreaming = useRef(streaming)
 
-  const load = useCallback(async (): Promise<void> => {
-    if (!conversationId) return
-    const res = await window.uld.documents.listHtml(conversationId)
-    if (res.ok) {
-      setArtifacts(res.data)
-      setSelectedId((cur) => cur ?? res.data[0]?.id ?? null)
-    }
-  }, [conversationId])
+  const load = useCallback(
+    async (selectNewest = false): Promise<void> => {
+      if (!conversationId) return
+      const res = await window.uld.documents.listHtml(conversationId)
+      if (res.ok) {
+        setArtifacts(res.data)
+        if (selectNewest) {
+          if (res.data[0]) setSelectedId(res.data[0].id)
+        } else {
+          setSelectedId((cur) => cur ?? res.data[0]?.id ?? null)
+        }
+      }
+    },
+    [conversationId]
+  )
 
   useEffect(() => {
     setSelectedId(null)
@@ -39,17 +45,7 @@ export default function DesignView(): ReactElement {
 
   // After a generation, a new prototype may have been produced — reload and
   // select the newest.
-  useEffect(() => {
-    if (prevStreaming.current && !streaming) {
-      void window.uld.documents.listHtml(conversationId ?? '').then((res) => {
-        if (res.ok) {
-          setArtifacts(res.data)
-          if (res.data[0]) setSelectedId(res.data[0].id)
-        }
-      })
-    }
-    prevStreaming.current = streaming
-  }, [streaming, conversationId])
+  useOnGenerationSettled(() => void load(true))
 
   const selected = artifacts.find((a) => a.id === selectedId) ?? null
 

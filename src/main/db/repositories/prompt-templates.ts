@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import type { PromptTemplate, PromptTemplateInput, PromptTemplatePatch } from '@shared/types'
 import type { SqliteDriver } from '../driver'
+import { parseStringArray, updateById } from './util'
 
 export interface PromptTemplatesRepository {
   /** Ordered by updated_at DESC (most recently edited first). */
@@ -27,13 +28,7 @@ interface PromptTemplateRow {
 }
 
 function parseVariables(text: string | null): string[] | null {
-  if (!text) return null
-  try {
-    const parsed: unknown = JSON.parse(text)
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : null
-  } catch {
-    return null
-  }
+  return parseStringArray(text, null)
 }
 
 function toTemplate(row: PromptTemplateRow): PromptTemplate {
@@ -82,21 +77,13 @@ export function createPromptTemplatesRepository(driver: SqliteDriver): PromptTem
     },
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: (string | number)[] = []
-      if (patch.title !== undefined) {
-        sets.push('title = ?')
-        params.push(patch.title)
-      }
-      if (patch.body !== undefined) {
-        sets.push('body = ?')
-        params.push(patch.body)
-      }
-      if (sets.length > 0) {
-        sets.push('updated_at = ?')
-        params.push(Date.now(), id)
-        driver.run(`UPDATE prompt_templates SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      updateById(
+        driver,
+        'prompt_templates',
+        id,
+        { title: patch.title, body: patch.body },
+        { touchUpdatedAt: true }
+      )
       return getById(id)
     },
 

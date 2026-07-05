@@ -29,9 +29,11 @@ import type { CustomToolRecord } from '../db/repositories/custom-tools'
 import { BUILTIN_TOOL_DEFINITIONS, DEFAULT_PERMISSION_BY_RISK } from './definitions'
 import {
   customToolDbId,
+  customToolDefinitionId,
   customToolHeaders,
   customToolToDefinition,
   isCustomToolId,
+  parseParamsSchema,
   toCustomToolCreateInput,
   toCustomToolUpdateInput,
 } from './custom-tools'
@@ -70,7 +72,7 @@ export class ToolRegistry {
     }))
     const customs = this.db.customTools
       .list()
-      .map((record) => customToolToDefinition(record, isEnabled(`custom:${record.id}`)))
+      .map((record) => customToolToDefinition(record, isEnabled(customToolDefinitionId(record.id))))
     const mcp = this.mcpSource?.listToolDefinitions(isEnabled) ?? []
     return [...builtins, ...customs, ...mcp]
   }
@@ -174,16 +176,7 @@ export class ToolRegistry {
   listCustomToolInfos(): CustomToolInfo[] {
     const enabledMap = this.db.tools.enabledMap()
     return this.db.customTools.list().map((record) => {
-      const definitionId = `custom:${record.id}`
-      let paramsSchema: Record<string, unknown> = { type: 'object', properties: {} }
-      try {
-        const parsed: unknown = JSON.parse(record.paramsSchemaJson)
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          paramsSchema = parsed as Record<string, unknown>
-        }
-      } catch {
-        // corrupt schema — fall back to "no arguments"
-      }
+      const definitionId = customToolDefinitionId(record.id)
       return {
         id: definitionId,
         name: record.name,
@@ -194,7 +187,7 @@ export class ToolRegistry {
         secretHeaders: this.db.secrets
           .listNames('custom_tool', record.id)
           .map((s) => ({ name: s.name, preview: s.preview })),
-        paramsSchema,
+        paramsSchema: parseParamsSchema(record.paramsSchemaJson),
         enabled: enabledMap[definitionId] ?? true,
       }
     })

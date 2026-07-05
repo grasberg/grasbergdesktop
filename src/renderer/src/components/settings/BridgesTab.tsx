@@ -6,9 +6,9 @@
 
 import { useEffect, useState, type ReactElement } from 'react'
 import type { ImBridgeStatus } from '@shared/types'
+import { errorMessage } from '@/api/uld'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
-import { errorMessage } from './ProvidersTab'
 
 export default function BridgesTab(): ReactElement {
   const summaries = useConversationsStore((s) => s.summaries)

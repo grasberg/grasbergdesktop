@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { SqliteDriver } from '../driver'
+import { updateById } from './util'
 
 /** Stored custom tool. `id` is the bare UUID (no 'custom:' prefix). */
 export interface CustomToolRecord {
@@ -112,22 +113,15 @@ export function createCustomToolsRepository(driver: SqliteDriver): CustomToolsRe
     },
 
     update(id, patch) {
-      const sets: string[] = []
-      const params: (string | number)[] = []
-      const push = (column: string, value: string): void => {
-        sets.push(`${column} = ?`)
-        params.push(value)
-      }
-      if (patch.name !== undefined) push('name', patch.name)
-      if (patch.description !== undefined) push('description', patch.description)
-      if (patch.baseUrl !== undefined) push('base_url', patch.baseUrl)
-      if (patch.method !== undefined) push('method', patch.method)
-      if (patch.headersJson !== undefined) push('headers_json', patch.headersJson)
-      if (patch.paramsSchemaJson !== undefined) push('params_schema_json', patch.paramsSchemaJson)
-      if (sets.length > 0) {
-        params.push(id)
-        driver.run(`UPDATE custom_tools SET ${sets.join(', ')} WHERE id = ?`, params)
-      }
+      // custom_tools has no updated_at column, so no touch.
+      updateById(driver, 'custom_tools', id, {
+        name: patch.name,
+        description: patch.description,
+        base_url: patch.baseUrl,
+        method: patch.method,
+        headers_json: patch.headersJson,
+        params_schema_json: patch.paramsSchemaJson,
+      })
       const row = driver.get<CustomToolRow>('SELECT * FROM custom_tools WHERE id = ?', [id])
       return row ? toCustomTool(row) : null
     },

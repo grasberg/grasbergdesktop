@@ -5,8 +5,21 @@
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import { CHANNELS, type UldApi } from '@shared/ipc'
+import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
 import type { McpServerRuntime, StreamEventEnvelope, ToolApprovalRequest, UserQuestionRequest } from '@shared/types'
+
+/** Subscribe wrapper for a push channel: `cb` gets the payload, returns unsubscribe. */
+const subscribe =
+  <T>(channel: ChannelName) =>
+  (cb: (payload: T) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: T): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(channel, listener)
+    return () => {
+      ipcRenderer.removeListener(channel, listener)
+    }
+  }
 
 const api: UldApi = {
   app: {
@@ -47,15 +60,7 @@ const api: UldApi = {
     stop: (streamId) => ipcRenderer.invoke(CHANNELS.chatStop, streamId),
     regenerate: (req) => ipcRenderer.invoke(CHANNELS.chatRegenerate, req),
     editAndRerun: (req) => ipcRenderer.invoke(CHANNELS.chatEditAndRerun, req),
-    onStreamEvent: (cb) => {
-      const listener = (_event: IpcRendererEvent, envelope: StreamEventEnvelope): void => {
-        cb(envelope)
-      }
-      ipcRenderer.on(CHANNELS.streamEvent, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.streamEvent, listener)
-      }
-    },
+    onStreamEvent: subscribe<StreamEventEnvelope>(CHANNELS.streamEvent),
   },
   workspaces: {
     list: () => ipcRenderer.invoke(CHANNELS.workspaceList),
@@ -90,44 +95,12 @@ const api: UldApi = {
     customCreate: (input) => ipcRenderer.invoke(CHANNELS.toolsCustomCreate, input),
     customUpdate: (toolId, patch) => ipcRenderer.invoke(CHANNELS.toolsCustomUpdate, toolId, patch),
     customDelete: (toolId) => ipcRenderer.invoke(CHANNELS.toolsCustomDelete, toolId),
-    onApprovalRequest: (cb) => {
-      const listener = (_event: IpcRendererEvent, req: ToolApprovalRequest): void => {
-        cb(req)
-      }
-      ipcRenderer.on(CHANNELS.toolApprovalRequest, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.toolApprovalRequest, listener)
-      }
-    },
-    onApprovalSettled: (cb) => {
-      const listener = (_event: IpcRendererEvent, requestId: string): void => {
-        cb(requestId)
-      }
-      ipcRenderer.on(CHANNELS.toolApprovalSettled, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.toolApprovalSettled, listener)
-      }
-    },
+    onApprovalRequest: subscribe<ToolApprovalRequest>(CHANNELS.toolApprovalRequest),
+    onApprovalSettled: subscribe<string>(CHANNELS.toolApprovalSettled),
     questionRespond: (requestId, answer) =>
       ipcRenderer.invoke(CHANNELS.toolsQuestionRespond, requestId, answer),
-    onQuestionRequest: (cb) => {
-      const listener = (_event: IpcRendererEvent, req: UserQuestionRequest): void => {
-        cb(req)
-      }
-      ipcRenderer.on(CHANNELS.userQuestionRequest, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.userQuestionRequest, listener)
-      }
-    },
-    onQuestionSettled: (cb) => {
-      const listener = (_event: IpcRendererEvent, requestId: string): void => {
-        cb(requestId)
-      }
-      ipcRenderer.on(CHANNELS.userQuestionSettled, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.userQuestionSettled, listener)
-      }
-    },
+    onQuestionRequest: subscribe<UserQuestionRequest>(CHANNELS.userQuestionRequest),
+    onQuestionSettled: subscribe<string>(CHANNELS.userQuestionSettled),
   },
   prompts: {
     list: () => ipcRenderer.invoke(CHANNELS.promptsList),
@@ -160,15 +133,7 @@ const api: UldApi = {
     setEnabled: (id, enabled) => ipcRenderer.invoke(CHANNELS.mcpSetEnabled, id, enabled),
     reconnect: (id) => ipcRenderer.invoke(CHANNELS.mcpReconnect, id),
     status: () => ipcRenderer.invoke(CHANNELS.mcpStatus),
-    onServersChanged: (cb) => {
-      const listener = (_event: IpcRendererEvent, runtime: McpServerRuntime[]): void => {
-        cb(runtime)
-      }
-      ipcRenderer.on(CHANNELS.mcpServersChanged, listener)
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.mcpServersChanged, listener)
-      }
-    },
+    onServersChanged: subscribe<McpServerRuntime[]>(CHANNELS.mcpServersChanged),
   },
   im: {
     status: () => ipcRenderer.invoke(CHANNELS.imStatus),
