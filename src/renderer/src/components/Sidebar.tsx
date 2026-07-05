@@ -399,38 +399,23 @@ export default function Sidebar(): React.JSX.Element {
         <button
           type="button"
           className="btn-icon"
-          aria-label="Open workflows"
-          title="Workflows"
-          onClick={() => useUiStore.getState().openWorkflows(true)}
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-            <rect x="1.5" y="2.5" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <rect x="10" y="2.5" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <rect x="5.75" y="10.3" width="4.5" height="3.2" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <path d="M3.75 5.7v2.1h8.5V5.7M8 7.8v2.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="btn-icon"
           aria-label="Open settings"
           title={`Settings (${modKeyLabel}+,)`}
           onClick={() => useUiStore.getState().openSettings(true)}
         >
-          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-            <path
-              d="M8 5.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2Z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.3"
-            />
-            <path
-              d="M8 1.2l1 1.7a5.7 5.7 0 0 1 1.6.66l1.9-.5.9 1.56-1.35 1.4a5.7 5.7 0 0 1 0 1.86l1.35 1.4-.9 1.56-1.9-.5a5.7 5.7 0 0 1-1.6.66l-1 1.7h-1.8l-1-1.7a5.7 5.7 0 0 1-1.6-.66l-1.9.5-.9-1.56 1.35-1.4a5.7 5.7 0 0 1 0-1.86L1.6 4.62l.9-1.56 1.9.5A5.7 5.7 0 0 1 6 2.9l1-1.7Z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.3"
-              strokeLinejoin="round"
-            />
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
         </button>
         <span className="sidebar-hint">

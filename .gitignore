@@ -7,9 +7,11 @@ dist/
 .vite/
 *.tsbuildinfo
 
-# Packaged installers
+# Packaged installers (electron-builder output — never commit build artifacts)
 release/
 release-new/
+release-build/
+release-*/
 
 # Tests
 coverage/

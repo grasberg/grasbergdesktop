@@ -390,9 +390,14 @@ export default function CodeView(): ReactElement {
     }
   }, [conversationId, projectId])
 
-  // Refresh proposed changes each time a generation finishes: the assistant
-  // may have proposed new diffs.
-  useOnGenerationSettled(() => void useCodeStore.getState().loadChanges())
+  // Refresh proposed changes AND the file tree each time a generation finishes:
+  // the assistant may have proposed new diffs, and approved edit_file/write_file
+  // calls have already written to disk, so the tree would otherwise stay stale
+  // (e.g. still showing "This folder is empty" after files were created).
+  useOnGenerationSettled(() => {
+    void useCodeStore.getState().loadChanges()
+    void useCodeStore.getState().loadTree()
+  })
 
   return (
     <div className={`code-view ${changesOpen ? '' : 'code-view-collapsed'}`}>

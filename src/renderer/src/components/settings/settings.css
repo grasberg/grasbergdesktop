@@ -37,8 +37,8 @@
 /* ------------------------------------------------------------ modal shell */
 
 .settings-modal {
-  width: min(840px, calc(100vw - 48px));
-  max-height: min(640px, calc(100vh - 48px));
+  width: min(960px, calc(100vw - 48px));
+  max-height: min(760px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
   overflow: hidden;

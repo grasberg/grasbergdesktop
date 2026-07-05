@@ -203,6 +203,9 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
         changes: s.changes.map((c) => (c.id === id ? updated : c)),
         busyChangeId: null,
       }))
+      // A create/delete changes the tree structure; refresh so the new (or
+      // removed) file shows without re-opening the project.
+      void get().loadTree()
       const verb = updated.changeType === 'delete' ? 'Deleted' : 'Wrote'
       useUiStore.getState().toast(`${verb} ${updated.filePath}`, 'success')
     } catch (e) {
