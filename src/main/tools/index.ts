@@ -79,6 +79,8 @@ export interface CreateToolSystemOptions {
   browserEnabled?: () => boolean
   /** Embedded browser backing the browser/computer tools. */
   browser?: ToolBrowser
+  /** Knowledge-base retrieval for the 'knowledge_search' tool. */
+  knowledgeSearch?: ToolExecutorDeps['knowledgeSearch']
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: ToolExecutorDeps['delegate']
   /** Background sub-agent tasks (delegate background=true, task_output, task_stop). */
@@ -116,6 +118,7 @@ export function createToolSystem(
     shellBackground: options.shellBackground ?? null,
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
+    knowledgeSearch: options.knowledgeSearch,
     delegate: options.delegate,
     delegateBackground: options.delegateBackground ?? null,
     codeChanges: options.codeChanges ?? null,

@@ -717,6 +717,29 @@ export default function Sidebar(): React.JSX.Element {
         <button
           type="button"
           className="btn-icon"
+          aria-label="Open workflows"
+          title="Workflows"
+          onClick={() => useUiStore.getState().openWorkflows(true)}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="6" height="6" rx="1" />
+            <rect x="15" y="15" width="6" height="6" rx="1" />
+            <path d="M9 6h5a2 2 0 0 1 2 2v4M15 18h-5a2 2 0 0 1-2-2v-4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="btn-icon"
           aria-label="Open settings"
           title={`Settings (${modKeyLabel}+,)`}
           onClick={() => useUiStore.getState().openSettings(true)}

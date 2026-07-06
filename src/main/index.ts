@@ -7,7 +7,7 @@
 import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserWindow, app, session, shell } from 'electron'
+import { BrowserWindow, Menu, Tray, app, globalShortcut, session, shell } from 'electron'
 import { CHANNELS } from '@shared/ipc'
 import { openDatabase, type AppDatabase } from './db/database'
 import { keystore } from './keys/keystore'
@@ -22,6 +22,9 @@ import { CodeService } from './code/code-service'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
 import { ImBridgeManager } from './im/manager'
+import { KnowledgeService } from './services/knowledge'
+import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
+import { WorkflowScheduler } from './workflows/scheduler'
 import { BrowserSession } from './browser/session'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
@@ -37,6 +40,14 @@ let approvalBroker: ApprovalBroker | null = null
 let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
+let workflowScheduler: WorkflowScheduler | null = null
+let workflowRunnerRef: WorkflowRunner | null = null
+/**
+ * The app's main window. getAllWindows() must NOT be used to find it — the
+ * hidden browser-tool window (BrowserSession) also lives there, and summoning
+ * that one would reveal the sandboxed page the model drives.
+ */
+let mainWindow: BrowserWindow | null = null
 let browserSession: BrowserSession | null = null
 let oauthManager: OpenAiOAuthManager | null = null
 let cleanedUp = false
@@ -68,7 +79,16 @@ async function cleanup(): Promise<void> {
   approvalBroker?.stopAll()
   questionBroker?.stopAll()
   imBridgeManager?.stopAll()
+  workflowScheduler?.stop()
+  workflowRunnerRef?.stopAll()
   oauthManager?.stopAll()
+  try {
+    globalShortcut.unregisterAll()
+    tray?.destroy()
+    tray = null
+  } catch {
+    // Teardown conveniences only.
+  }
   browserSession?.close()
   // Close MCP connections (kills any stdio child processes) before the db.
   try {
@@ -114,11 +134,56 @@ function isAllowedNavigation(url: string): boolean {
   }
 }
 
+/** Restores + focuses the main window (creating one if none exists). */
+function summonWindow(): void {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow()
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+/** Dev + packaged icon path; absent in packaged builds (exe icon applies). */
+function appIconPath(): string {
+  return join(__dirname, '../../build/icon.png')
+}
+
+/**
+ * Tray icon + global summon shortcut: the assistant stays one keystroke away.
+ * Skipped under SMOKE_TEST (no UI interaction there). The Tray instance must
+ * be retained or it is garbage-collected away.
+ */
+let tray: Tray | null = null
+function installQuickAccess(): void {
+  if (process.env.SMOKE_TEST === '1') return
+  try {
+    const iconPath = appIconPath()
+    if (existsSync(iconPath)) {
+      tray = new Tray(iconPath)
+      tray.setToolTip('Grasberg Desktop')
+      tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: 'Open Grasberg', click: () => summonWindow() },
+          { type: 'separator' },
+          { label: 'Quit', click: () => app.quit() },
+        ])
+      )
+      tray.on('click', () => summonWindow())
+    }
+  } catch {
+    // A tray is a convenience — never block startup on it.
+  }
+  try {
+    globalShortcut.register('CommandOrControl+Shift+G', () => summonWindow())
+  } catch {
+    // The shortcut may be taken by another app; the tray still works.
+  }
+}
+
 function createWindow(): BrowserWindow {
   // In dev, __dirname is out/main, so ../../build resolves to the repo's build
   // dir. In a packaged app the window inherits the exe icon stamped by
   // electron-builder, so the file is absent here and we simply skip it.
-  const iconPath = join(__dirname, '../../build/icon.png')
+  const iconPath = appIconPath()
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -133,6 +198,11 @@ function createWindow(): BrowserWindow {
       sandbox: true,
       nodeIntegration: false,
     },
+  })
+
+  mainWindow = win
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
   })
 
   win.once('ready-to-show', () => {
@@ -217,8 +287,19 @@ function bootstrap(): void {
   // Secret custom-tool headers are decrypted here (main only) at call time.
   const browser = new BrowserSession()
   browserSession = browser
+  // Knowledge bases (RAG): embeddings go through chatService (set below) so
+  // keys never leave main; the tool executor searches via this service.
+  const knowledgeService = new KnowledgeService({
+    db: database,
+    embed: (providerId, modelId, texts) =>
+      chatService
+        ? chatService.embedTexts(providerId, modelId, texts)
+        : Promise.reject(new Error('Embeddings unavailable during startup.')),
+  })
+
   const toolSystem = createToolSystem(database, codeService, {
     mcp,
+    knowledgeSearch: (kbId, query) => knowledgeService.search(kbId, query),
     shellEnabled: () => database.settings.get().shellExecutionEnabled,
     shellAllowlist: () => database.settings.get().shellCommandAllowlist,
     shellBackground: {
@@ -230,14 +311,14 @@ function bootstrap(): void {
     browserEnabled: () => database.settings.get().browserToolsEnabled,
     browser,
     // Resolved at call time; chatService (below) is set before any generation.
-    delegate: (task, ctx) =>
+    delegate: (task, ctx, agentName) =>
       chatService
-        ? chatService.runDelegate(task, ctx)
+        ? chatService.runDelegate(task, ctx, undefined, agentName)
         : Promise.resolve('Error: delegation unavailable.'),
     delegateBackground: {
-      start: (task, ctx) =>
+      start: (task, ctx, agentName) =>
         chatService
-          ? chatService.startDelegateBackground(task, ctx)
+          ? chatService.startDelegateBackground(task, ctx, agentName)
           : 'Error: background tasks unavailable.',
       output: (taskId) =>
         chatService ? chatService.delegateTaskOutput(taskId) : 'Error: background tasks unavailable.',
@@ -290,6 +371,16 @@ function bootstrap(): void {
   })
   imBridgeManager = imBridge
 
+  // Saved-workflow execution (manual runs + the interval scheduler share it).
+  const workflowRunner = createWorkflowRunner(database, {
+    runAgent: (prompt, providerId, modelId, opts) =>
+      chatService!.generateForWorkflow(prompt, providerId, modelId, opts),
+    notify: (text) => imBridge.notify(text),
+  })
+  const scheduler = new WorkflowScheduler({ db: database, runner: workflowRunner })
+  workflowScheduler = scheduler
+  workflowRunnerRef = workflowRunner
+
   // Mode-independent: persists ```uld-memory directives from every completed
   // assistant message (gated on settings.memoryEnabled inside the hook).
   registerCompletionHook(createMemoryCompletionHook(database))
@@ -309,6 +400,8 @@ function bootstrap(): void {
     mcpManager: mcp,
     imBridgeManager: imBridge,
     oauthManager: oauth,
+    workflowRunner,
+    knowledgeService,
     attachmentsDir,
     getWindows: () => BrowserWindow.getAllWindows(),
   })
@@ -316,8 +409,10 @@ function bootstrap(): void {
   // Connect enabled MCP servers + IM bridge in the background (no-op under SMOKE_TEST).
   void mcp.start()
   imBridge.start()
+  if (process.env.SMOKE_TEST !== '1') scheduler.start()
 
   createWindow()
+  installQuickAccess()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -329,12 +424,7 @@ if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    const win = BrowserWindow.getAllWindows()[0]
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-    }
+    summonWindow()
   })
 
   app.on('window-all-closed', () => {

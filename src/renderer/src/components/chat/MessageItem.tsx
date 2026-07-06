@@ -138,7 +138,13 @@ function UserMessage({ message }: { message: Message }): ReactElement {
  * Mixture of Agents transparency: the advisor (reference) model outputs that fed
  * the aggregator, as a collapsible section of labelled blocks above the answer.
  */
-function MoaReferences({ references }: { references: MoaReferenceOutput[] }): ReactElement {
+function MoaReferences({
+  references,
+  label = 'Advisor models',
+}: {
+  references: MoaReferenceOutput[]
+  label?: string
+}): ReactElement {
   const [open, setOpen] = useState(false)
   const running = references.some((r) => r.status === 'running')
   const failed = references.filter((r) => r.status === 'error').length
@@ -153,7 +159,7 @@ function MoaReferences({ references }: { references: MoaReferenceOutput[] }): Re
         <span className={`msg-moa-chevron${open ? ' open' : ''}`} aria-hidden>
           ▸
         </span>
-        Advisor models ({references.length})
+        {label} ({references.length})
         {running && <span className="msg-moa-live">analyzing…</span>}
         {!running && failed > 0 && (
           <span className="msg-moa-failed">
@@ -191,6 +197,66 @@ function MoaReferences({ references }: { references: MoaReferenceOutput[] }): Re
   )
 }
 
+/**
+ * Compare ("Arena") run: each advisor's answer in its own column with a
+ * "Use this answer" action that promotes it to the message's content and
+ * switches the conversation to that model.
+ */
+function CompareColumns({
+  message,
+  references,
+}: {
+  message: Message
+  references: MoaReferenceOutput[]
+}): ReactElement {
+  const pickWinner = useChatStore((s) => s.pickCompareWinner)
+  const streaming = useChatStore((s) => s.streaming)
+  const picked = message.compare?.pickedIndex ?? null
+  return (
+    <div className="msg-compare" role="group" aria-label="Model comparison">
+      {references.map((ref) => (
+        <div
+          key={ref.index}
+          className={`msg-compare-col${picked === ref.index ? ' picked' : ''}`}
+        >
+          <div className="msg-compare-head">
+            <span className="msg-compare-label">{ref.label}</span>
+            {ref.status === 'running' && <span className="msg-moa-ref-status">answering…</span>}
+            {ref.status === 'error' && <span className="badge msg-error-code">unavailable</span>}
+          </div>
+          <div className="msg-compare-body">
+            {ref.status === 'error' ? (
+              <div className="msg-moa-ref-error">
+                {ref.error?.message ?? 'This model was unavailable.'}
+              </div>
+            ) : ref.text ? (
+              <Markdown content={ref.text} />
+            ) : ref.status === 'running' ? (
+              <span className="chat-cursor" aria-hidden />
+            ) : (
+              <div className="msg-moa-ref-empty">(no output)</div>
+            )}
+          </div>
+          {picked === null &&
+            ref.status === 'done' &&
+            (message.status === 'complete' || message.status === 'stopped') && (
+            <div className="msg-compare-foot">
+              <button
+                type="button"
+                className="btn btn-primary msg-compare-use"
+                disabled={streaming !== null}
+                onClick={() => void pickWinner(message.id, ref.index)}
+              >
+                Use this answer
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   const regenerate = useChatStore((s) => s.regenerate)
   const streaming = useChatStore((s) => s.streaming)
@@ -224,9 +290,17 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   return (
     <div className="msg-row msg-row-assistant">
       <div className={`msg-card msg-card-assistant${isError ? ' msg-card-error' : ''}`}>
-        {message.moaReferences && message.moaReferences.length > 0 && (
-          <MoaReferences references={message.moaReferences} />
-        )}
+        {message.moaReferences &&
+          message.moaReferences.length > 0 &&
+          (message.compare ? (
+            message.compare.pickedIndex === null ? (
+              <CompareColumns message={message} references={message.moaReferences} />
+            ) : (
+              <MoaReferences references={message.moaReferences} label="Compared models" />
+            )
+          ) : (
+            <MoaReferences references={message.moaReferences} />
+          ))}
 
         {message.reasoning && (
           <div className="msg-reasoning">
@@ -244,7 +318,7 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
             </button>
             {showReasoning && (
               <div className="msg-reasoning-body">
-                {message.reasoning}
+                <Markdown content={message.reasoning} />
                 {reasoningLive && <span className="chat-cursor" aria-hidden />}
               </div>
             )}
@@ -262,9 +336,11 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
         {message.content && <Markdown content={message.content} />}
 
         {isStreaming && message.content && <span className="chat-cursor" aria-hidden />}
-        {isStreaming && !message.content && !message.reasoning && !message.toolCalls?.length && (
-          <span className="chat-cursor" aria-hidden />
-        )}
+        {isStreaming &&
+          !message.content &&
+          !message.reasoning &&
+          !message.toolCalls?.length &&
+          !message.compare && <span className="chat-cursor" aria-hidden />}
 
         {isError && (
           <div className="msg-error-detail">

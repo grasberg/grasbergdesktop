@@ -1342,3 +1342,114 @@
     transition: none;
   }
 }
+
+/* --- Mermaid diagrams (```mermaid fences render as SVG) --- */
+
+.chat-mermaid {
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  overflow-x: auto;
+}
+
+.chat-mermaid svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}
+
+/* --- Artifact preview drawer (sandboxed HTML/SVG from code blocks) --- */
+
+.artifact-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(520px, 60vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  z-index: 60;
+}
+
+.artifact-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-drawer-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.artifact-drawer-frame {
+  flex: 1;
+  border: 0;
+  background: #fff;
+}
+
+/* --- Compare ("Arena") runs: advisor answers side by side --- */
+
+.msg-compare {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(240px, 1fr);
+  gap: 10px;
+  overflow-x: auto;
+  margin-bottom: 8px;
+}
+
+.msg-compare-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.msg-compare-col.picked {
+  border-color: var(--accent);
+}
+
+.msg-compare-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.msg-compare-label {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.msg-compare-body {
+  flex: 1;
+  padding: 8px 10px;
+  overflow-y: auto;
+  max-height: 420px;
+}
+
+.msg-compare-foot {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.msg-compare-use {
+  width: 100%;
+}

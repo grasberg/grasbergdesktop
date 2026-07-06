@@ -49,6 +49,7 @@ describe('ToolRegistry.listDefinitions', () => {
       'propose_shell_command',
       'edit_file',
       'write_file',
+      'knowledge_search',
       'delegate',
       'task_output',
       'task_stop',

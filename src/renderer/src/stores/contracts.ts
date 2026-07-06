@@ -105,9 +105,18 @@ export interface ChatStoreState {
   loading: boolean
   error: NormalizedError | null
   openConversation(id: string | null): Promise<void>
-  send(content: string, attachments?: Attachment[]): Promise<void>
+  send(
+    content: string,
+    attachments?: Attachment[],
+    opts?: {
+      /** Run this send as a compare ("Arena") fan-out through the given MoA preset. */
+      comparePresetId?: string
+    }
+  ): Promise<void>
   stop(): Promise<void>
   regenerate(messageId: string): Promise<void>
+  /** Promote one advisor of a compare run to the message's answer. */
+  pickCompareWinner(messageId: string, referenceIndex: number): Promise<void>
   editAndRerun(messageId: string, newContent: string): Promise<void>
   /** Update the open conversation's provider/model/systemPrompt/MoA preset. */
   updateConversation(patch: {
@@ -115,6 +124,7 @@ export interface ChatStoreState {
     modelId?: string | null
     systemPrompt?: string | null
     moaPresetId?: string | null
+    knowledgeBaseId?: string | null
   }): Promise<void>
   /** Wired once at app start to window.uld.chat.onStreamEvent. */
   handleStreamEvent(envelope: StreamEventEnvelope): void
@@ -128,6 +138,12 @@ export interface Toast {
   message: string
 }
 
+/** An HTML/SVG snippet previewed in the sandboxed artifact drawer. */
+export interface ArtifactPreview {
+  title: string
+  html: string
+}
+
 export interface UiStoreState {
   /** Resolved theme actually applied to <html data-theme>. */
   resolvedTheme: 'light' | 'dark'
@@ -136,12 +152,15 @@ export interface UiStoreState {
   shortcutsOpen: boolean
   /** The Workflows builder surface replaces the main area when true. */
   workflowsOpen: boolean
+  /** Non-null shows the sandboxed artifact preview drawer over the chat. */
+  artifactPreview: ArtifactPreview | null
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
   openWorkflows(open: boolean): void
+  openArtifactPreview(preview: ArtifactPreview | null): void
   toast(message: string, kind?: ToastKind): void
   dismissToast(id: string): void
 }

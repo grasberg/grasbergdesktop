@@ -62,6 +62,12 @@ export interface AdapterChatRequest {
      * `thinkingConfig.thinkingBudget`. Omitted from the wire when unset.
      */
     reasoningEffort?: 'low' | 'medium' | 'high'
+    /**
+     * 'json' = force valid-JSON output. Mapped per dialect: OpenAI-compatible
+     * `response_format: json_object`, Gemini `responseMimeType`. Providers
+     * without a JSON mode ignore it.
+     */
+    responseFormat?: 'json'
   }
   tools?: AdapterToolDef[]
   stream: boolean
@@ -103,6 +109,12 @@ export interface AdapterChatResult {
   finishReason: 'stop' | 'length' | 'tool_calls' | 'other'
 }
 
+export interface AdapterEmbedRequest {
+  modelId: string
+  /** Texts to embed (order preserved in the result). */
+  input: string[]
+}
+
 export interface ProviderAdapter {
   readonly type: ProviderType
   /** Live model listing; throw ProviderError('not_supported') when unavailable. */
@@ -113,4 +125,9 @@ export interface ProviderAdapter {
   chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult>
   /** Cheap connectivity + auth check used by Settings "Test". */
   testConnection(ctx: AdapterContext): Promise<TestConnectionResult>
+  /**
+   * Text embeddings (knowledge bases). One vector per input, same order.
+   * Absent = the provider family has no embeddings endpoint.
+   */
+  embed?(req: AdapterEmbedRequest, ctx: AdapterContext): Promise<number[][]>
 }

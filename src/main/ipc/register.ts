@@ -28,6 +28,8 @@ import type {
   WorkspaceItemKind,
 } from '@shared/types'
 import { runWorkflow } from '../workflows/engine'
+import type { WorkflowRunner } from '../workflows/runner'
+import type { KnowledgeService } from '../services/knowledge'
 import {
   CHATGPT_OAUTH_DEFAULT_MODEL,
   PROVIDER_TYPES,
@@ -87,6 +89,10 @@ export interface RegisterIpcDeps {
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
   oauthManager: OpenAiOAuthManager
+  /** Runs saved workflows and records their run history. */
+  workflowRunner: WorkflowRunner
+  /** Knowledge-base chunking/embedding/retrieval. */
+  knowledgeService: KnowledgeService
   /** Directory where image attachments are stored on disk. */
   attachmentsDir: string
   getWindows: () => BrowserWindow[]
@@ -204,6 +210,7 @@ const convUpdateSchema = z.object({
     projectId: z.string().min(1).nullable().optional(),
     projectRef: z.string().min(1).nullable().optional(),
     moaPresetId: z.string().min(1).nullable().optional(),
+    knowledgeBaseId: z.string().min(1).nullable().optional(),
   }),
 })
 
@@ -250,8 +257,15 @@ const chatSendSchema = z.object({
       modelId: z.string().optional(),
       params: chatParamsSchema.optional(),
       moaPresetId: z.string().min(1).nullable().optional(),
+      compare: z.boolean().optional(),
     })
     .optional(),
+})
+
+const chatPickCompareWinnerSchema = z.object({
+  conversationId: z.string().min(1),
+  messageId: z.string().min(1),
+  referenceIndex: z.number().int().min(0).max(7),
 })
 
 const chatRegenerateSchema = z.object({
@@ -721,6 +735,11 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return chatService.editAndRerun({ ...parsed, newContent })
   })
 
+  // Promote one advisor of a compare ("Arena") run to the message's answer.
+  register(CHANNELS.chatPickCompareWinner, (req) =>
+    chatService.pickCompareWinner(parseInput(chatPickCompareWinnerSchema, req))
+  )
+
   // -- cowork workspaces --------------------------------------------------------------
 
   register(CHANNELS.workspaceList, () => db.workspaces.list())
@@ -1106,10 +1125,33 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return value as WorkflowGraph
   }
   const asWorkflowInput = (value: unknown): WorkflowInput => {
-    const o = value as { name?: unknown; graph?: unknown }
+    const o = value as {
+      name?: unknown
+      graph?: unknown
+      schedule?: unknown
+      scheduleEnabled?: unknown
+    }
     const name = typeof o?.name === 'string' ? o.name.trim() : ''
     if (name.length === 0) throw invalid('Workflow name is required.')
-    return { name, graph: asGraph(o?.graph) }
+    // Interval clamped to [1 minute, 7 days]; anything else = no schedule.
+    let schedule: WorkflowInput['schedule'] = null
+    if (o?.schedule && typeof o.schedule === 'object') {
+      const every = (o.schedule as { everyMinutes?: unknown }).everyMinutes
+      if (typeof every === 'number' && Number.isFinite(every) && every >= 1) {
+        schedule = { everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
+      }
+    }
+    // Enabling the schedule with an invalid interval must fail loudly, not
+    // save a workflow that silently never fires.
+    if (o?.scheduleEnabled === true && schedule === null) {
+      throw invalid('Schedule interval must be at least 1 minute.')
+    }
+    return {
+      name,
+      graph: asGraph(o?.graph),
+      schedule,
+      scheduleEnabled: o?.scheduleEnabled === true,
+    }
   }
 
   register(CHANNELS.workflowsList, () => db.workflows.list())
@@ -1124,8 +1166,107 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
   register(CHANNELS.workflowsRun, (graph) =>
     runWorkflow(asGraph(graph), {
-      runAgent: (prompt, providerId, modelId) =>
-        chatService.generateForWorkflow(prompt, providerId, modelId),
+      runAgent: (prompt, providerId, modelId, opts) =>
+        chatService.generateForWorkflow(prompt, providerId, modelId, opts),
+      notify: (text) => deps.imBridgeManager.notify(text),
     })
   )
+
+  // Saved-workflow execution (persisted to the run history) + that history.
+  register(CHANNELS.workflowsRunById, (id) =>
+    deps.workflowRunner.runById(requireString(id, 'Workflow id'), 'manual')
+  )
+  register(CHANNELS.workflowsRuns, (id) =>
+    db.workflows.listRuns(requireString(id, 'Workflow id'))
+  )
+
+  // -- agent profiles ----------------------------------------------------------
+
+  const agentInputSchema = z.object({
+    name: z.string().trim().min(1).max(100),
+    description: z.string().max(1024).optional(),
+    systemPrompt: z.string().min(1).max(100_000),
+    providerId: z.string().max(100).nullable().optional(),
+    modelId: z.string().max(200).nullable().optional(),
+    toolIds: z.array(z.string().max(200)).max(200).nullable().optional(),
+    maxRounds: z.number().int().min(1).max(40).nullable().optional(),
+    enabled: z.boolean().optional(),
+  })
+
+  register(CHANNELS.agentsList, () => db.agents.list())
+  register(CHANNELS.agentsCreate, (input) => {
+    const parsed = parseInput(agentInputSchema, input)
+    if (db.agents.getByName(parsed.name)) {
+      throw invalid(`An agent named '${parsed.name}' already exists.`)
+    }
+    return db.agents.create(parsed)
+  })
+  register(CHANNELS.agentsUpdate, (id, patch) => {
+    const agentId = requireString(id, 'Agent id')
+    const parsed = parseInput(agentInputSchema.partial(), patch)
+    if (parsed.name) {
+      const existing = db.agents.getByName(parsed.name)
+      if (existing && existing.id !== agentId) {
+        throw invalid(`An agent named '${parsed.name}' already exists.`)
+      }
+    }
+    return found(db.agents.update(agentId, parsed), 'Agent')
+  })
+  register(CHANNELS.agentsDelete, (id) => {
+    db.agents.remove(requireString(id, 'Agent id'))
+    return undefined
+  })
+
+  // -- knowledge bases (RAG) ----------------------------------------------------
+
+  const kbInputSchema = z.object({
+    name: z.string().trim().min(1).max(200),
+    providerId: z.string().min(1).max(100),
+    modelId: z.string().trim().min(1).max(200),
+  })
+
+  register(CHANNELS.kbList, () => db.knowledge.list())
+  register(CHANNELS.kbCreate, (input) => db.knowledge.create(parseInput(kbInputSchema, input)))
+  register(CHANNELS.kbDelete, (id) => {
+    const kbId = requireString(id, 'Knowledge base id')
+    db.knowledge.remove(kbId) // chunks cascade
+    db.conversations.clearKnowledgeBase(kbId)
+    return undefined
+  })
+  register(CHANNELS.kbSources, (id) =>
+    db.knowledge.listSources(requireString(id, 'Knowledge base id'))
+  )
+  register(CHANNELS.kbRemoveSource, (id, source) => {
+    db.knowledge.removeSource(
+      requireString(id, 'Knowledge base id'),
+      requireString(source, 'Source name')
+    )
+    return undefined
+  })
+
+  // Import: pick files, extract their text (same pipeline as attachments),
+  // chunk + embed + store. Images and unreadable files are counted as skipped.
+  register(CHANNELS.kbImportFiles, async (id) => {
+    const kbId = requireString(id, 'Knowledge base id')
+    const result = await showOpen({ properties: ['openFile', 'multiSelections'] })
+    if (result.canceled) return { canceled: true, imported: 0, chunks: 0, skipped: 0 }
+    let imported = 0
+    let chunks = 0
+    let skipped = 0
+    for (const filePath of result.filePaths) {
+      // No imageDir: KB import must not copy picked images into the
+      // attachments store as a side effect. textContent presence is the
+      // "this is readable text" signal (images/binaries never set it).
+      const attachment = await readAttachment(filePath)
+      const text = attachment?.textContent ?? ''
+      if (!attachment || !text.trim()) {
+        skipped += 1
+        continue
+      }
+      const added = await deps.knowledgeService.addDocument(kbId, attachment.name, text)
+      imported += 1
+      chunks += added.chunks
+    }
+    return { canceled: false, imported, chunks, skipped }
+  })
 }

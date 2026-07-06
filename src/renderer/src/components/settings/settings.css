@@ -1079,3 +1079,17 @@
 .btn-danger-text {
   color: var(--danger);
 }
+
+/* Agents tab: tool restriction checkboxes */
+.agent-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px 12px;
+}
+.agent-tool-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+
+/* Knowledge tab: per-base source list */
+.kb-source-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.kb-source { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.kb-source-name { overflow-wrap: anywhere; }
+.kb-source-chunks { color: var(--text-muted); margin-left: auto; }

@@ -26,6 +26,11 @@ export interface MessagePatch {
   toolCalls?: ToolCallRecord[] | null
   /** null clears the column. */
   moaReferences?: MoaReferenceOutput[] | null
+  /** Compare-run marker/winner; null clears the column. */
+  compare?: Message['compare'] | null
+  /** Re-attribute the message (compare winner pick). */
+  providerId?: string
+  modelId?: string
 }
 
 export interface MessagesRepository {
@@ -60,6 +65,7 @@ interface MessageRow {
   model_id: string | null
   usage_json: string | null
   moa_references_json: string | null
+  compare_json: string | null
   seq: number
   created_at: number
 }
@@ -83,6 +89,7 @@ function toMessage(row: MessageRow): Message {
     modelId: row.model_id ?? undefined,
     usage: parseJsonColumn<TokenUsage>(row.usage_json),
     moaReferences: parseJsonColumn<MoaReferenceOutput[]>(row.moa_references_json),
+    compare: parseJsonColumn<Message['compare']>(row.compare_json),
     seq: row.seq,
     createdAt: row.created_at,
   }
@@ -108,8 +115,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         `INSERT INTO messages
            (id, conversation_id, role, content, reasoning, attachments_json,
             tool_calls_json, status, error_json, provider_id, model_id,
-            usage_json, moa_references_json, seq, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            usage_json, moa_references_json, compare_json, seq, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           message.id,
           message.conversationId,
@@ -124,6 +131,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           message.modelId ?? null,
           message.usage ? JSON.stringify(message.usage) : null,
           message.moaReferences ? JSON.stringify(message.moaReferences) : null,
+          message.compare ? JSON.stringify(message.compare) : null,
           message.seq,
           message.createdAt,
         ]
@@ -141,6 +149,9 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         tool_calls_json: patch.toolCalls == null ? patch.toolCalls : JSON.stringify(patch.toolCalls),
         moa_references_json:
           patch.moaReferences == null ? patch.moaReferences : JSON.stringify(patch.moaReferences),
+        compare_json: patch.compare == null ? patch.compare : JSON.stringify(patch.compare),
+        provider_id: patch.providerId,
+        model_id: patch.modelId,
       })
       return getById(id)
     },

@@ -17,3 +17,19 @@
   max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 0.8em;
 }
 @media (max-width: 1100px) { .workflows-body { grid-template-columns: 150px 1fr 240px; } }
+
+/* Run history (right panel when nothing is selected) */
+.workflows-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.workflows-run {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 8px; font-size: 12px; background: var(--bg);
+}
+.workflows-run-error { color: var(--danger); }
+.workflows-run-head { display: flex; gap: 8px; align-items: center; color: var(--text-muted); }
+.workflows-run-ok .workflows-run-head span:first-child { color: var(--accent); }
+.workflows-run-error .workflows-run-head span:first-child { color: var(--danger); }
+.workflows-run-trigger { margin-left: auto; font-style: italic; }
+.workflows-run-output {
+  margin-top: 4px; white-space: pre-wrap; word-break: break-word;
+  max-height: 96px; overflow: hidden; color: var(--text);
+}

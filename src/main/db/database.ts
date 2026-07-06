@@ -31,6 +31,8 @@ import { createDocumentsRepository, type DocumentsRepository } from './repositor
 import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
 import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
+import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
+import { createKnowledgeRepository, type KnowledgeRepository } from './repositories/knowledge'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -50,6 +52,8 @@ export interface AppDatabase {
   workflows: WorkflowsRepository
   memories: MemoriesRepository
   skills: SkillsRepository
+  agents: AgentsRepository
+  knowledge: KnowledgeRepository
   close(): void
 }
 
@@ -122,6 +126,8 @@ export function openDatabase(filePath: string): AppDatabase {
     workflows: createWorkflowsRepository(driver),
     memories: createMemoriesRepository(driver),
     skills: createSkillsRepository(driver),
+    agents: createAgentsRepository(driver),
+    knowledge: createKnowledgeRepository(driver),
     close() {
       driver.close()
     },

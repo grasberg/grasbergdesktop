@@ -96,6 +96,7 @@ export function buildGeminiBody(req: AdapterChatRequest): Record<string, unknown
       includeThoughts: true,
     }
   }
+  if (req.params.responseFormat === 'json') gen.responseMimeType = 'application/json'
   if (Object.keys(gen).length > 0) body.generationConfig = gen
   return body
 }

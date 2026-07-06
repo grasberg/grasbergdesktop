@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
-import type { ProviderErrorCode } from '@shared/types'
+import type { KnowledgeBase, ProviderErrorCode } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
 import { usePromptsStore } from '@/stores/prompts'
 import MessageItem from './MessageItem'
@@ -31,12 +31,16 @@ function ConversationSettingsButton(): ReactElement {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
 
   const toggle = (): void => {
     if (!open) {
       setDraft(conversation?.systemPrompt ?? '')
       void loadPrompts()
+      void window.uld.knowledge.list().then((res) => {
+        if (res.ok) setKnowledgeBases(res.data)
+      })
     }
     setOpen(!open)
   }
@@ -111,6 +115,28 @@ function ConversationSettingsButton(): ReactElement {
             placeholder="Leave empty to use the global default"
             onChange={(e) => setDraft(e.target.value)}
           />
+          {knowledgeBases.length > 0 && (
+            <>
+              <label className="conv-settings-label" htmlFor="conv-knowledge-base">
+                Knowledge base
+              </label>
+              <select
+                id="conv-knowledge-base"
+                className="select conv-settings-template"
+                value={conversation?.knowledgeBaseId ?? ''}
+                onChange={(e) =>
+                  void updateConversation({ knowledgeBaseId: e.target.value || null })
+                }
+              >
+                <option value="">None</option>
+                {knowledgeBases.map((kb) => (
+                  <option key={kb.id} value={kb.id}>
+                    {kb.name} ({kb.chunkCount} chunks)
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <div className="conv-settings-actions">
             <button
               type="button"

@@ -25,6 +25,12 @@ export interface ConversationCreateInput {
   projectId?: string | null
   projectRef?: string | null
   moaPresetId?: string | null
+  /**
+   * Preserve this id instead of generating one — backup import only, so a
+   * re-imported conversation is recognized (and skipped) by its original id.
+   * Never accepted over IPC (the convCreate schema has no id field).
+   */
+  id?: string
 }
 
 export type ConversationPatch = ConvUpdateRequest['patch']
@@ -42,6 +48,8 @@ export interface ConversationsRepository {
   touch(id: string, updatedAtMs: number): void
   /** Null out provider_id/model_id on every conversation that referenced a deleted provider. */
   clearProvider(providerId: string): void
+  /** Detach a deleted knowledge base from every conversation that used it. */
+  clearKnowledgeBase(knowledgeBaseId: string): void
   /** Persist the context-compaction summary (internal; not exposed via convUpdate). */
   setSummary(id: string, summaryText: string, throughSeq: number): void
 }
@@ -58,6 +66,7 @@ interface ConversationRow {
   project_id: string | null
   project_ref: string | null
   moa_preset_id: string | null
+  knowledge_base_id: string | null
   summary_text: string | null
   summary_through_seq: number | null
   created_at: number
@@ -94,6 +103,7 @@ function toConversation(row: ConversationRow): Conversation {
     projectId: row.project_id,
     projectRef: row.project_ref,
     moaPresetId: row.moa_preset_id,
+    knowledgeBaseId: row.knowledge_base_id,
     summaryText: row.summary_text,
     summaryThroughSeq: row.summary_through_seq,
     createdAt: row.created_at,
@@ -173,7 +183,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
     create(input) {
       const now = Date.now()
       const conversation: Conversation = {
-        id: randomUUID(),
+        id: input.id ?? randomUUID(),
         mode: input.mode,
         title: input.title ?? 'New chat',
         providerId: input.providerId ?? null,
@@ -228,6 +238,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           project_id: patch.projectId,
           project_ref: patch.projectRef,
           moa_preset_id: patch.moaPresetId,
+          knowledge_base_id: patch.knowledgeBaseId,
         },
         { touchUpdatedAt: true }
       )
@@ -252,6 +263,13 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
       driver.run(
         'UPDATE conversations SET provider_id = NULL, model_id = NULL WHERE provider_id = ?',
         [providerId]
+      )
+    },
+
+    clearKnowledgeBase(knowledgeBaseId) {
+      driver.run(
+        'UPDATE conversations SET knowledge_base_id = NULL WHERE knowledge_base_id = ?',
+        [knowledgeBaseId]
       )
     },
 

@@ -81,6 +81,7 @@ export function buildChatBody(
   // Only on the wire when the user explicitly picked an effort; reasoning
   // models honor it, non-reasoning OpenAI-compatible servers ignore it.
   if (p.reasoningEffort !== undefined) body.reasoning_effort = p.reasoningEffort
+  if (p.responseFormat === 'json') body.response_format = { type: 'json_object' }
   if (req.tools && req.tools.length > 0) {
     body.tools = req.tools.map((t) => ({
       type: 'function',
@@ -280,6 +281,61 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   // -- ProviderAdapter ---------------------------------------------------------
+
+  /**
+   * Text embeddings via POST /embeddings (OpenAI wire format — also served by
+   * local runtimes like Ollama and LM Studio). One vector per input, in order.
+   */
+  async embed(req: { modelId: string; input: string[] }, ctx: AdapterContext): Promise<number[][]> {
+    if (req.input.length === 0) return []
+    const res = await withRetry(
+      () =>
+        this.doRequest(ctx, '/embeddings', {
+          method: 'POST',
+          body: JSON.stringify({ model: req.modelId, input: req.input }),
+        }),
+      { signal: ctx.signal }
+    )
+    const json = (await this.readJson(res, ctx)) as {
+      data?: Array<{ index?: number; embedding?: unknown }>
+    }
+    const data = json?.data
+    if (!Array.isArray(data) || data.length !== req.input.length) {
+      throw new ProviderError('unknown', 'The provider returned an unexpected embeddings format.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    // Order by index when present (the API may reorder batches).
+    const out: number[][] = new Array<number[]>(req.input.length)
+    for (let i = 0; i < data.length; i++) {
+      const item = data[i]
+      const embedding: unknown = item.embedding
+      if (!Array.isArray(embedding) || embedding.some((v) => typeof v !== 'number')) {
+        throw new ProviderError('unknown', 'The provider returned an invalid embedding vector.', {
+          retryable: false,
+          providerType: this.type,
+        })
+      }
+      const index = typeof item.index === 'number' ? item.index : i
+      if (index < 0 || index >= req.input.length) {
+        throw new ProviderError('unknown', 'The provider returned an unexpected embeddings format.', {
+          retryable: false,
+          providerType: this.type,
+        })
+      }
+      out[index] = embedding as number[]
+    }
+    // Duplicate/missing indices from a buggy server must not become silent
+    // zero-vector holes downstream.
+    if (out.some((v) => v === undefined)) {
+      throw new ProviderError('unknown', 'The provider returned an unexpected embeddings format.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    return out
+  }
 
   async chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult> {
     const completion = await withRetry(() => this.fetchChatCompletion(req, ctx), {

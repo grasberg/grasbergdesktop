@@ -46,7 +46,9 @@ describe('runWorkflow', () => {
     expect(res.ok).toBe(true)
     expect(res.nodeOutputs.m).toBe('world')
     expect(res.nodeOutputs.t).toBe('Hello world')
-    expect(runAgent).toHaveBeenCalledWith('Say: Hello world', undefined, undefined)
+    expect(runAgent).toHaveBeenCalledWith('Say: Hello world', undefined, undefined, {
+      useTools: false,
+    })
     expect(res.nodeOutputs.a).toBe('AI(Say: Hello world)')
     expect(res.nodeOutputs.o).toBe('AI(Say: Hello world)')
   })
@@ -93,5 +95,74 @@ describe('runWorkflow', () => {
     const res = await runWorkflow(graph, { runAgent: async () => '' })
     expect(res.ok).toBe(false)
     expect(res.failedNodeId).toBe('h')
+  })
+
+  it('condition routes the true branch and skips the false branch (and downstream)', async () => {
+    const graph: WorkflowGraph = {
+      nodes: [
+        node('m', 'manual', { text: 'URGENT: server down' }),
+        node('c', 'condition', { needle: 'urgent' }),
+        node('yes', 'template', { template: 'alert: {{input}}' }),
+        node('no', 'template', { template: 'calm: {{input}}' }),
+        node('after-no', 'template', { template: 'x{{input}}' }),
+      ],
+      edges: [
+        { id: 'e1', source: 'm', target: 'c' },
+        { id: 'e2', source: 'c', target: 'yes', sourceHandle: 'true' },
+        { id: 'e3', source: 'c', target: 'no', sourceHandle: 'false' },
+        { id: 'e4', source: 'no', target: 'after-no' },
+      ],
+    }
+    const res = await runWorkflow(graph, { runAgent: async () => '' })
+    expect(res.ok).toBe(true)
+    expect(res.nodeOutputs.yes).toBe('alert: URGENT: server down')
+    expect(res.nodeOutputs.no).toBeUndefined()
+    // Skips propagate through the dead branch.
+    expect(res.skipped).toEqual(expect.arrayContaining(['no', 'after-no']))
+  })
+
+  it('a condition edge without a handle counts as the true branch', async () => {
+    const graph: WorkflowGraph = {
+      nodes: [
+        node('m', 'manual', { text: 'nothing here' }),
+        node('c', 'condition', { needle: 'urgent' }),
+        node('t', 'template', { template: 'got {{input}}' }),
+      ],
+      edges: [
+        { id: 'e1', source: 'm', target: 'c' },
+        { id: 'e2', source: 'c', target: 't' },
+      ],
+    }
+    const res = await runWorkflow(graph, { runAgent: async () => '' })
+    expect(res.ok).toBe(true)
+    // Condition is false -> the (implicit true) edge doesn't fire.
+    expect(res.nodeOutputs.t).toBeUndefined()
+    expect(res.skipped).toEqual(['t'])
+  })
+
+  it('notify delivers its input and errors without a channel', async () => {
+    const graph: WorkflowGraph = {
+      nodes: [node('m', 'manual', { text: 'hello' }), node('n', 'notify', {})],
+      edges: [{ id: 'e1', source: 'm', target: 'n' }],
+    }
+    const notify = vi.fn(async () => undefined)
+    const ok = await runWorkflow(graph, { runAgent: async () => '', notify })
+    expect(ok.ok).toBe(true)
+    expect(notify).toHaveBeenCalledWith('hello')
+    expect(ok.nodeOutputs.n).toBe('hello')
+
+    const noChannel = await runWorkflow(graph, { runAgent: async () => '' })
+    expect(noChannel.ok).toBe(false)
+    expect(noChannel.failedNodeId).toBe('n')
+  })
+
+  it('passes useTools through to runAgent', async () => {
+    const graph: WorkflowGraph = {
+      nodes: [node('a', 'ai_agent', { prompt: 'go', useTools: true })],
+      edges: [],
+    }
+    const runAgent = vi.fn(async () => 'done')
+    await runWorkflow(graph, { runAgent })
+    expect(runAgent).toHaveBeenCalledWith('go', undefined, undefined, { useTools: true })
   })
 })

@@ -31,8 +31,11 @@ function BackupSection() {
       const result = await unwrap(window.uld.backup.import())
       if (result.canceled) return
       const parts = [
+        `${result.conversationsImported} conversations`,
         `${result.memoriesImported} memories`,
         `${result.skillsImported} skills`,
+        `${result.promptsImported} prompts`,
+        `${result.workflowsImported} workflows`,
         `${result.settingsApplied} settings`,
       ]
       const skipped = result.skippedItems > 0 ? ` (${result.skippedItems} entries skipped)` : ''
@@ -42,6 +45,7 @@ function BackupSection() {
         useSettingsStore.getState().load(),
         useMemoriesStore.getState().load(),
         useSkillsStore.getState().load(),
+        useConversationsStore.getState().load(),
       ])
     } catch (e) {
       toast(toNormalized(e).message, 'error')

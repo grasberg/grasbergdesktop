@@ -241,6 +241,12 @@ export interface Message {
    * message was generated via a MoA preset.
    */
   moaReferences?: MoaReferenceOutput[]
+  /**
+   * Compare run ("Arena"): the `moaReferences` outputs are shown side by side
+   * and ARE the result — no aggregator ran. `pickedIndex` is the advisor whose
+   * text the user promoted into `content` (null until picked).
+   */
+  compare?: { pickedIndex: number | null }
   /** Monotonic order within the conversation. */
   seq: number
   createdAt: number
@@ -270,6 +276,12 @@ export interface ChatParams {
   autoAcceptEdits?: boolean
   /** Reasoning/thinking effort; unset = provider default. */
   reasoningEffort?: ReasoningEffort
+  /**
+   * 'json' forces valid-JSON output where the provider supports it
+   * (OpenAI-compatible response_format json_object; Gemini responseMimeType).
+   * Providers without a JSON mode ignore it.
+   */
+  responseFormat?: 'json'
 }
 
 export interface Conversation {
@@ -298,6 +310,8 @@ export interface Conversation {
    * the aggregator model of the preset acts as the assistant.
    */
   moaPresetId: string | null
+  /** Knowledge base attached for retrieval (knowledge_search), or null. */
+  knowledgeBaseId?: string | null
   /** Running summary of older messages (context compaction), or null. */
   summaryText?: string | null
   /** Highest message seq the summary covers; messages at/below it are pruned. */
@@ -863,10 +877,90 @@ export interface Document {
 export type DocumentExportFormat = 'markdown' | 'html'
 
 // ---------------------------------------------------------------------------
+// Knowledge bases (RAG)
+// ---------------------------------------------------------------------------
+
+/** A knowledge base: embedded text chunks searched by the knowledge_search tool. */
+export interface KnowledgeBase {
+  id: string
+  name: string
+  /** Provider whose /embeddings endpoint embeds the chunks and queries. */
+  providerId: string
+  /** Embedding model id (e.g. text-embedding-3-small, nomic-embed-text). */
+  modelId: string
+  /** Number of stored chunks (filled in by list/get). */
+  chunkCount: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface KnowledgeBaseInput {
+  name: string
+  providerId: string
+  modelId: string
+}
+
+/** One retrieval hit. */
+export interface KnowledgeSearchHit {
+  source: string
+  content: string
+  /** Cosine similarity in [-1, 1]. */
+  score: number
+}
+
+// ---------------------------------------------------------------------------
+// Agent profiles (user-defined sub-agents)
+// ---------------------------------------------------------------------------
+
+/**
+ * A user-defined agent: its own persona, an optional dedicated (often cheaper)
+ * model, and an optional restricted toolset. Runnable as a `delegate` target
+ * (`delegate(agent="research")`) and as the acting agent of a workflow
+ * ai_agent node.
+ */
+export interface AgentProfile {
+  id: string
+  /** Unique (case-insensitive) — how the model addresses the agent. */
+  name: string
+  description: string
+  systemPrompt: string
+  /** null = the parent conversation's / default provider. */
+  providerId: string | null
+  modelId: string | null
+  /** Tool ids the agent may call; null = the delegate default set. */
+  toolIds: string[] | null
+  /** Max reasoning/tool rounds; null = the delegate default. */
+  maxRounds: number | null
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AgentProfileInput {
+  name: string
+  description?: string
+  systemPrompt: string
+  providerId?: string | null
+  modelId?: string | null
+  toolIds?: string[] | null
+  maxRounds?: number | null
+  enabled?: boolean
+}
+
+export type AgentProfilePatch = Partial<AgentProfileInput>
+
+// ---------------------------------------------------------------------------
 // Workflows (visual node graph)
 // ---------------------------------------------------------------------------
 
-export type WorkflowNodeKind = 'manual' | 'ai_agent' | 'http_request' | 'template' | 'output'
+export type WorkflowNodeKind =
+  | 'manual'
+  | 'ai_agent'
+  | 'http_request'
+  | 'template'
+  | 'condition'
+  | 'notify'
+  | 'output'
 
 export interface WorkflowNode {
   id: string
@@ -881,6 +975,12 @@ export interface WorkflowEdge {
   id: string
   source: string
   target: string
+  /**
+   * Branch handle on the source node. Condition nodes emit on 'true'/'false';
+   * an edge without a handle counts as the 'true' branch. Other node kinds
+   * ignore it.
+   */
+  sourceHandle?: string | null
 }
 
 export interface WorkflowGraph {
@@ -888,10 +988,21 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[]
 }
 
+/** Recurring trigger for a workflow (interval-based). */
+export interface WorkflowSchedule {
+  everyMinutes: number
+}
+
 export interface Workflow {
   id: string
   name: string
   graph: WorkflowGraph
+  /** Recurring trigger; null = manual only. */
+  schedule: WorkflowSchedule | null
+  /** The schedule fires only while this is on. */
+  scheduleEnabled: boolean
+  /** Last time a run started (any trigger), for the scheduler's due check. */
+  lastRunAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -899,6 +1010,21 @@ export interface Workflow {
 export interface WorkflowInput {
   name: string
   graph: WorkflowGraph
+  schedule?: WorkflowSchedule | null
+  scheduleEnabled?: boolean
+}
+
+/** A persisted execution of a saved workflow. */
+export interface WorkflowRun {
+  id: string
+  workflowId: string
+  trigger: 'manual' | 'schedule'
+  status: 'ok' | 'error'
+  /** The output node's text (or the last executed node's output). */
+  output: string
+  error: string | null
+  startedAt: number
+  finishedAt: number
 }
 
 export interface WorkflowRunResult {
@@ -907,6 +1033,8 @@ export interface WorkflowRunResult {
   nodeOutputs: Record<string, string>
   /** Execution order (node ids). */
   order: string[]
+  /** Nodes skipped by a condition branch that didn't fire. */
+  skipped?: string[]
   /** Present when the run failed. */
   error?: string
   /** nodeId where it failed, when applicable. */
@@ -1031,7 +1159,11 @@ export interface BackupSummary {
   settingsApplied: number
   memoriesImported: number
   skillsImported: number
-  /** Malformed memory/skill entries that were skipped. */
+  /** Conversations inserted (existing ids are skipped, never overwritten). */
+  conversationsImported: number
+  promptsImported: number
+  workflowsImported: number
+  /** Malformed or already-present entries that were skipped. */
   skippedItems: number
 }
 

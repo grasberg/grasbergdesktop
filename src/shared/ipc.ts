@@ -12,6 +12,9 @@
  */
 
 import type {
+  AgentProfile,
+  AgentProfileInput,
+  AgentProfilePatch,
   AppInfo,
   AppSettings,
   Attachment,
@@ -30,6 +33,8 @@ import type {
   DocumentExportFormat,
   FileTreeNode,
   ImBridgeStatus,
+  KnowledgeBase,
+  KnowledgeBaseInput,
   McpServerConfig,
   McpServerInput,
   McpServerPatch,
@@ -45,6 +50,7 @@ import type {
   Workflow,
   WorkflowGraph,
   WorkflowInput,
+  WorkflowRun,
   WorkflowRunResult,
   Message,
   ModelInfo,
@@ -136,6 +142,7 @@ export const CHANNELS = {
   chatStop: 'chat:stop',
   chatRegenerate: 'chat:regenerate',
   chatEditAndRerun: 'chat:editAndRerun',
+  chatPickCompareWinner: 'chat:pickCompareWinner',
   /** Manual context compaction (the /compact command). */
   chatCompact: 'chat:compact',
 
@@ -225,6 +232,22 @@ export const CHANNELS = {
   workflowsUpdate: 'workflows:update',
   workflowsDelete: 'workflows:delete',
   workflowsRun: 'workflows:run',
+  workflowsRunById: 'workflows:runById',
+  workflowsRuns: 'workflows:runs',
+
+  // agent profiles
+  agentsList: 'agents:list',
+  agentsCreate: 'agents:create',
+  agentsUpdate: 'agents:update',
+  agentsDelete: 'agents:delete',
+
+  // knowledge bases (RAG)
+  kbList: 'kb:list',
+  kbCreate: 'kb:create',
+  kbDelete: 'kb:delete',
+  kbImportFiles: 'kb:importFiles',
+  kbSources: 'kb:sources',
+  kbRemoveSource: 'kb:removeSource',
 
   // push channels (main -> renderer, via webContents.send)
   streamEvent: 'push:streamEvent',
@@ -298,6 +321,8 @@ export interface ConvUpdateRequest {
     projectRef: string | null
     /** Select/clear the Mixture-of-Agents preset this conversation runs through. */
     moaPresetId: string | null
+    /** Attach/detach a knowledge base (retrieval via knowledge_search). */
+    knowledgeBaseId: string | null
   }>
 }
 
@@ -331,6 +356,12 @@ export interface ChatSendRequest {
     params?: ChatParams
     /** One-shot Mixture-of-Agents run (the `/moa` command) without changing the model. */
     moaPresetId?: string | null
+    /**
+     * Compare run: fan the preset's advisor models out in parallel and show
+     * them side by side instead of aggregating. Requires a resolvable MoA
+     * preset (via `moaPresetId` or the conversation's stored preset).
+     */
+    compare?: boolean
   }
 }
 
@@ -364,6 +395,21 @@ export interface CodeSuggestFilesRequest {
 export interface ChatCompactResult {
   /** False when there was nothing (or too little) to summarize. */
   compacted: boolean
+}
+
+/** Promote one advisor of a compare run to the message's answer. */
+export interface ChatPickCompareWinnerRequest {
+  conversationId: string
+  messageId: string
+  /** Index into the message's moaReferences. */
+  referenceIndex: number
+}
+
+export interface ChatPickCompareWinnerResult {
+  /** The message with the winner's text as its content. */
+  message: Message
+  /** The conversation, now switched to the winning provider/model. */
+  conversation: Conversation
 }
 
 export interface CodeReadFileResult {
@@ -448,6 +494,10 @@ export interface UldApi {
     editAndRerun(req: ChatEditAndRerunRequest): Promise<IpcResult<StartStreamResult>>
     /** Summarize older messages now (the /compact command). */
     compact(conversationId: string): Promise<IpcResult<ChatCompactResult>>
+    /** Promote one advisor of a compare run to the message's answer. */
+    pickCompareWinner(
+      req: ChatPickCompareWinnerRequest
+    ): Promise<IpcResult<ChatPickCompareWinnerResult>>
     /** Subscribe to stream events; returns unsubscribe. */
     onStreamEvent(cb: (envelope: StreamEventEnvelope) => void): () => void
   }
@@ -578,6 +628,27 @@ export interface UldApi {
     delete(id: string): Promise<IpcResult<void>>
     /** Runs the given graph (the live editor state) and returns per-node output. */
     run(graph: WorkflowGraph): Promise<IpcResult<WorkflowRunResult>>
+    /** Runs a SAVED workflow and records the execution in its run history. */
+    runById(id: string): Promise<IpcResult<WorkflowRunResult>>
+    /** Recent persisted executions, newest first. */
+    runs(id: string): Promise<IpcResult<WorkflowRun[]>>
+  }
+  agents: {
+    list(): Promise<IpcResult<AgentProfile[]>>
+    create(input: AgentProfileInput): Promise<IpcResult<AgentProfile>>
+    update(id: string, patch: AgentProfilePatch): Promise<IpcResult<AgentProfile>>
+    delete(id: string): Promise<IpcResult<void>>
+  }
+  knowledge: {
+    list(): Promise<IpcResult<KnowledgeBase[]>>
+    create(input: KnowledgeBaseInput): Promise<IpcResult<KnowledgeBase>>
+    delete(id: string): Promise<IpcResult<void>>
+    /** Opens a file picker and imports the chosen files' text into the base. */
+    importFiles(
+      id: string
+    ): Promise<IpcResult<{ canceled: boolean; imported: number; chunks: number; skipped: number }>>
+    sources(id: string): Promise<IpcResult<Array<{ source: string; chunks: number }>>>
+    removeSource(id: string, source: string): Promise<IpcResult<void>>
   }
 }
 

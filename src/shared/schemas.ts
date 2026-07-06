@@ -19,6 +19,7 @@ export const chatParamsSchema = z
     planMode: z.boolean().optional(),
     autoAcceptEdits: z.boolean().optional(),
     reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
+    responseFormat: z.enum(['json']).optional(),
   })
   .strict()
 

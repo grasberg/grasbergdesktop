@@ -452,6 +452,28 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'knowledge_search',
+    name: 'knowledge_search',
+    description:
+      "Search the conversation's attached knowledge base (the user's own documents, embedded " +
+      'for semantic retrieval) and return the most relevant passages. Use it BEFORE answering ' +
+      'questions the attached documents may cover, and ground your answer in the passages. ' +
+      'Errors if no knowledge base is attached.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'What to look for — a question or key phrases.',
+        },
+      },
+      required: ['query'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
     id: 'delegate',
     name: 'delegate',
     description:
@@ -471,6 +493,12 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         context: {
           type: 'string',
           description: 'Optional background the sub-agent needs (it has no other context).',
+        },
+        agent: {
+          type: 'string',
+          description:
+            'Optional named agent profile to run as (the user defines these in Settings → ' +
+            'Agents, each with its own persona, model and toolset). Omit for the general sub-agent.',
         },
         background: {
           type: 'boolean',

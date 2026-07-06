@@ -40,7 +40,7 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v18, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v22, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
 - `src/renderer/src/stores/contracts.ts` — renderer store contracts
 

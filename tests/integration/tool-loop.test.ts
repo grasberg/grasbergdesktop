@@ -347,4 +347,34 @@ describe('ChatService tool loop (real db, scripted adapter)', () => {
       toolCallId: 'call-1',
     })
   })
+
+  it('replays earlier turns’ tool rounds in the next turn (tool memory)', async () => {
+    const conversation = seedProviderAndConversation()
+    const first = makeHarness()
+    await first.service.send({ conversationId: conversation.id, content: 'find the needle' })
+    await first.done
+
+    // Turn 2 (fresh service over the same db): the history handed to the
+    // adapter must replay turn 1's tool round — tool_use turn, its result,
+    // then the final answer as its own assistant turn.
+    const second = makeHarness()
+    await second.service.send({ conversationId: conversation.id, content: 'where exactly?' })
+    await second.done
+
+    const messages = second.adapter.invocations[0].messages
+    const i = messages.findIndex((m) => m.role === 'assistant' && (m.toolCalls?.length ?? 0) > 0)
+    expect(i).toBeGreaterThan(0)
+    expect(messages[i].content).toBe('')
+    expect(messages[i].toolCalls?.[0]).toMatchObject({ id: 'call-1', name: 'file_search' })
+    expect(messages[i + 1]).toEqual({ role: 'tool', content: TOOL_RESULT, toolCallId: 'call-1' })
+    expect(messages[i + 2]).toMatchObject({
+      role: 'assistant',
+      content: 'Let me check.\n\nFound it in alpha.txt.',
+    })
+    // The new user turn follows the replayed round.
+    expect(messages[messages.length - 1]).toMatchObject({
+      role: 'user',
+      content: 'where exactly?',
+    })
+  })
 })

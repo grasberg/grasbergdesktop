@@ -14,6 +14,7 @@ import EmptyState from '@/components/EmptyState'
 import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
 import UserQuestionDialog from '@/components/UserQuestionDialog'
+import ArtifactPanel from '@/components/chat/ArtifactPanel'
 import Toasts from '@/components/Toasts'
 import { GLOBAL_SHORTCUT_KEYS, useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useChatStore } from '@/stores/chat'
@@ -161,6 +162,7 @@ export default function App(): React.JSX.Element {
       <ShortcutsHelp />
       <ToolApprovalDialog />
       <UserQuestionDialog />
+      <ArtifactPanel />
       <Toasts />
     </>
   )

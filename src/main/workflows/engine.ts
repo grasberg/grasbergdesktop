@@ -1,14 +1,29 @@
 /**
  * Workflow execution engine: runs a node graph in topological order, feeding
  * each node the concatenated outputs of its predecessors as `{{input}}`.
- * Pure and dependency-injected (AI + fetch), so it is fully unit-testable.
+ * Pure and dependency-injected (AI + fetch + notify), so it is fully
+ * unit-testable.
  *
  * Node kinds:
  *  - manual       : emits its configured text (a starting input).
  *  - template     : interpolates {{input}} / {{<nodeId>}} into a template.
  *  - http_request : method + url (+ body), returns the response text.
- *  - ai_agent     : runs a one-shot generation over the interpolated prompt.
+ *  - ai_agent     : runs a generation over the interpolated prompt; with
+ *                   config.useTools the generation may call enabled tools
+ *                   (only ones whose permission is 'always allow' — headless
+ *                   runs can never pop an approval dialog).
+ *  - condition    : passes input through; edges labelled 'true'/'false'
+ *                   (sourceHandle) gate the branches. The test is a
+ *                   case-insensitive substring match of config.needle against
+ *                   the input (empty needle = "input is non-empty").
+ *  - notify       : passes input through and delivers it via the injected
+ *                   notifier (Telegram bridge / outbound webhook).
  *  - output       : passes its input through (the workflow's result).
+ *
+ * Branching: an edge is inactive when its source was skipped, or when its
+ * source is a condition node and the edge's handle doesn't match the result
+ * (edges without a handle count as 'true'). A node with incoming edges, all
+ * of them inactive, is skipped.
  */
 
 import type { WorkflowGraph, WorkflowNode, WorkflowRunResult } from '@shared/types'
@@ -17,9 +32,27 @@ const MAX_NODES = 100
 const HTTP_TIMEOUT_MS = 15_000
 const HTTP_MAX_BYTES = 256 * 1024
 
+export interface RunAgentOptions {
+  /** Allow the generation to call enabled always-allow tools. */
+  useTools?: boolean
+  /** Run as this agent profile (persona/model/toolset from Settings → Agents). */
+  agentId?: string
+  /** Force valid-JSON output (providers with a JSON mode). */
+  json?: boolean
+  /** Aborts in-flight provider calls when the run is cancelled/timed out. */
+  signal?: AbortSignal
+}
+
 export interface WorkflowEngineDeps {
-  /** One-shot generation for ai_agent nodes. */
-  runAgent: (prompt: string, providerId?: string, modelId?: string) => Promise<string>
+  /** Generation for ai_agent nodes. */
+  runAgent: (
+    prompt: string,
+    providerId?: string,
+    modelId?: string,
+    opts?: RunAgentOptions
+  ) => Promise<string>
+  /** Delivery for notify nodes (Telegram/webhook); absent = node errors. */
+  notify?: (text: string) => Promise<void>
   fetchImpl?: typeof fetch
   signal?: AbortSignal
 }
@@ -98,6 +131,13 @@ async function runHttp(
   }
 }
 
+/** The condition test: case-insensitive substring; empty needle = non-empty input. */
+function evaluateCondition(node: WorkflowNode, input: string): boolean {
+  const needle = str(node.config, 'needle').trim()
+  if (needle.length === 0) return input.trim().length > 0
+  return input.toLowerCase().includes(needle.toLowerCase())
+}
+
 export async function runWorkflow(
   graph: WorkflowGraph,
   deps: WorkflowEngineDeps
@@ -113,17 +153,35 @@ export async function runWorkflow(
   }
 
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
-  const incoming = new Map<string, string[]>()
-  for (const n of graph.nodes) incoming.set(n.id, [])
-  for (const e of graph.edges) incoming.get(e.target)?.push(e.source)
+  const skipped = new Set<string>()
+  /** Condition results by node id (set when the condition executes). */
+  const conditionResults = new Map<string, boolean>()
+
+  /** An edge fires only if its source ran and (for conditions) the branch matches. */
+  const edgeActive = (edge: WorkflowGraph['edges'][number]): boolean => {
+    if (skipped.has(edge.source)) return false
+    const source = byId.get(edge.source)
+    if (source?.kind === 'condition') {
+      const result = conditionResults.get(edge.source) ?? false
+      const branch = edge.sourceHandle === 'false' ? false : true
+      return branch === result
+    }
+    return true
+  }
 
   for (const id of order) {
     if (deps.signal?.aborted) {
       return { ok: false, nodeOutputs: outputs, order, error: 'Aborted.', failedNodeId: id }
     }
     const node = byId.get(id)!
-    const input = (incoming.get(id) ?? [])
-      .map((src) => outputs[src] ?? '')
+    const incomingEdges = graph.edges.filter((e) => e.target === id && byId.has(e.source))
+    const activeEdges = incomingEdges.filter(edgeActive)
+    if (incomingEdges.length > 0 && activeEdges.length === 0) {
+      skipped.add(id)
+      continue
+    }
+    const input = activeEdges
+      .map((e) => outputs[e.source] ?? '')
       .filter((s) => s.length > 0)
       .join('\n')
     try {
@@ -141,12 +199,31 @@ export async function runWorkflow(
         case 'http_request':
           output = await runHttp(node, input, outputs, deps)
           break
+        case 'condition':
+          conditionResults.set(id, evaluateCondition(node, input))
+          output = input
+          break
+        case 'notify': {
+          if (!deps.notify) {
+            throw new Error('No delivery channel is configured (Telegram bridge or webhook).')
+          }
+          await deps.notify(input)
+          output = input
+          break
+        }
         case 'ai_agent': {
           const prompt = interpolate(str(node.config, 'prompt'), input, outputs)
+          const agentId = str(node.config, 'agentId')
           output = await deps.runAgent(
             prompt,
             str(node.config, 'providerId') || undefined,
-            str(node.config, 'modelId') || undefined
+            str(node.config, 'modelId') || undefined,
+            {
+              useTools: node.config.useTools === true,
+              ...(agentId ? { agentId } : {}),
+              ...(node.config.jsonOutput === true ? { json: true } : {}),
+              ...(deps.signal ? { signal: deps.signal } : {}),
+            }
           )
           break
         }
@@ -159,10 +236,16 @@ export async function runWorkflow(
         ok: false,
         nodeOutputs: outputs,
         order,
+        skipped: skipped.size > 0 ? [...skipped] : undefined,
         error: e instanceof Error ? e.message : String(e),
         failedNodeId: id,
       }
     }
   }
-  return { ok: true, nodeOutputs: outputs, order }
+  return {
+    ok: true,
+    nodeOutputs: outputs,
+    order,
+    skipped: skipped.size > 0 ? [...skipped] : undefined,
+  }
 }

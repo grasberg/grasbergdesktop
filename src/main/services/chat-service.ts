@@ -35,6 +35,8 @@ import type {
 import {
   CHANNELS,
   type ChatEditAndRerunRequest,
+  type ChatPickCompareWinnerRequest,
+  type ChatPickCompareWinnerResult,
   type ChatRegenerateRequest,
   type ChatSendRequest,
 } from '@shared/ipc'
@@ -84,6 +86,17 @@ const TOOL_LIMIT_NOTE =
 
 /** Placeholder held in activeByConversation between reservation and start(). */
 const PENDING_STREAM = '__pending__'
+
+/**
+ * Cap on each tool result replayed from an earlier turn, so old tool output
+ * can't crowd the fresh turn out of the context window.
+ */
+const REPLAY_TOOL_RESULT_MAX_CHARS = 4000
+
+function truncateToolResultForReplay(result: string): string {
+  if (result.length <= REPLAY_TOOL_RESULT_MAX_CHARS) return result
+  return `${result.slice(0, REPLAY_TOOL_RESULT_MAX_CHARS)}\n…[truncated for replay]`
+}
 
 /** Repo-root instruction files injected into code-mode prompts (first found wins). */
 const PROJECT_INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const
@@ -369,6 +382,9 @@ function estimateTokens(text: string): number {
 // -- sub-agent delegation -----------------------------------------------------
 
 const DELEGATE_MAX_ROUNDS = 12
+
+/** Tool rounds for a workflow ai_agent node with useTools (headless, bounded). */
+const WORKFLOW_AGENT_MAX_ROUNDS = 8
 /**
  * Builtin tools a delegated sub-agent may use. Mostly read-only plus the
  * approval-gated file editors: every edit_file/write_file call still goes
@@ -460,13 +476,21 @@ export class ChatService {
     return this.withReservation(req.conversationId, async (conversation) => {
       const settings = this.db.settings.get()
       const moa = this.resolveMoaPreset(conversation, settings, req.overrides)
-      const resolved = await this.resolveTarget(
-        conversation,
-        settings,
-        moa ? this.aggregatorOverrides(moa, req.overrides) : req.overrides
-      )
+      // Compare needs a preset to fan out; without one it degrades to a
+      // normal single-model send. Its acting target is the first RESOLVABLE
+      // advisor (no aggregator runs), so no single-model default is required
+      // and one broken advisor doesn't block the whole comparison.
+      const compare = !!moa && req.overrides?.compare === true
+      const resolved =
+        compare && moa
+          ? await this.resolveFirstAdvisor(conversation, settings, moa)
+          : await this.resolveTarget(
+              conversation,
+              settings,
+              moa ? this.aggregatorOverrides(moa, req.overrides) : req.overrides
+            )
       const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
-      return this.start(conversation, settings, resolved, userMessage, moa)
+      return this.start(conversation, settings, resolved, userMessage, moa, compare)
     })
   }
 
@@ -763,6 +787,43 @@ export class ChatService {
     return `${provider?.label ?? ref.providerId} · ${ref.modelId}`
   }
 
+  /**
+   * The acting target for a compare run: the first advisor whose provider
+   * resolves (enabled, keyed). runAdvisors tolerates per-advisor failures, so
+   * the send should too — only when EVERY advisor is unresolvable does the
+   * last error propagate.
+   */
+  private async resolveFirstAdvisor(
+    conversation: Conversation,
+    settings: AppSettings,
+    preset: MoaPreset
+  ): Promise<ResolvedTarget> {
+    let lastError: unknown
+    for (const ref of preset.referenceModels) {
+      try {
+        return await this.resolveTarget(conversation, settings, {
+          providerId: ref.providerId,
+          modelId: ref.modelId,
+        })
+      } catch (e) {
+        lastError = e
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new ProviderError('invalid_request', 'No advisor model in this preset is usable.')
+  }
+
+  /**
+   * See buildHistory's `replayToolCalls`: every provider replays earlier tool
+   * rounds except Anthropic with extended thinking requested, where replayed
+   * tool_use turns would force thinking off (anthropic.ts skips thinking when
+   * the transcript carries tool_use without its original thinking blocks).
+   */
+  private shouldReplayToolCalls(resolved: ResolvedTarget): boolean {
+    return !(resolved.provider.type === 'anthropic' && resolved.params.reasoningEffort)
+  }
+
   /** Adapter for the resolved provider (test seam first, then the registry). */
   private adapterFor(resolved: ResolvedTarget): ProviderAdapter {
     return (this.options.resolveAdapter ?? resolveAdapterForProvider)(
@@ -811,7 +872,8 @@ export class ChatService {
     settings: AppSettings,
     resolved: ResolvedTarget,
     userMessage: Message | null,
-    moa?: MoaPreset | null
+    moa?: MoaPreset | null,
+    compare = false
   ): StartStreamResult {
     const assistantMessage: Message = {
       id: randomUUID(),
@@ -821,6 +883,9 @@ export class ChatService {
       status: 'streaming',
       providerId: resolved.provider.id,
       modelId: resolved.modelId,
+      // Marked at insert so the renderer lays the advisors out side by side
+      // from the first 'moa-reference' event.
+      ...(compare && moa ? { compare: { pickedIndex: null } } : {}),
       seq: this.db.messages.nextSeq(conversation.id),
       createdAt: Date.now(),
     }
@@ -840,27 +905,31 @@ export class ChatService {
 
     // Track the detached loop so stopAll() can await its persistence on quit.
     // A MoA preset first fans out its advisor models, then delegates to the same
-    // streaming core with the aggregator as the acting model.
-    active.done = moa
-      ? this.runMoaStream(
-          streamId,
-          conversation,
-          resolved,
-          moa,
-          buildOpts,
-          assistantMessage,
-          controller,
-          toolPlan.adapterTools
-        )
-      : this.runStream(
-          streamId,
-          conversation,
-          resolved,
-          buildOpts,
-          assistantMessage,
-          controller,
-          toolPlan.adapterTools
-        )
+    // streaming core with the aggregator as the acting model. A compare run is
+    // the fan-out alone — the advisors ARE the result, no aggregator.
+    active.done =
+      compare && moa
+        ? this.runCompareStream(streamId, conversation, moa, buildOpts, assistantMessage, controller)
+        : moa
+          ? this.runMoaStream(
+              streamId,
+              conversation,
+              resolved,
+              moa,
+              buildOpts,
+              assistantMessage,
+              controller,
+              toolPlan.adapterTools
+            )
+          : this.runStream(
+              streamId,
+              conversation,
+              resolved,
+              buildOpts,
+              assistantMessage,
+              controller,
+              toolPlan.adapterTools
+            )
 
     return { streamId, userMessage, assistantMessage }
   }
@@ -892,7 +961,15 @@ export class ChatService {
     conversation: Conversation,
     settings: AppSettings,
     promptOpts: ModePromptOptions,
-    visionEnabled: boolean
+    visionEnabled: boolean,
+    /**
+     * Replay earlier turns' tool rounds (assistant tool_use + role-'tool'
+     * results) so the model remembers what it already did. Off for advisor
+     * fan-outs (cheap, tool-free) and for Anthropic with extended thinking
+     * requested — replayed tool_use turns would force thinking off there
+     * (see anthropic.ts), which is the worse trade.
+     */
+    replayToolCalls = false
   ): AdapterMessage[] {
     const history: AdapterMessage[] = []
     // Effective system prompt = mode base prompt + the user's extras (the
@@ -943,6 +1020,26 @@ export class ChatService {
       const instructions = this.readProjectInstructions(conversation.projectId)
       if (instructions) history.push({ role: 'system', content: instructions })
     }
+    // Attached knowledge base: steer the model to retrieve before answering.
+    // Skipped when the knowledge_search tool itself is disabled — never
+    // instruct the model to call a tool it isn't offered.
+    const knowledgeToolAvailable =
+      this.options.tools?.registry
+        .listEnabledDefinitions()
+        .some((d) => d.id === 'knowledge_search') ?? false
+    if (conversation.knowledgeBaseId && knowledgeToolAvailable) {
+      const kb = this.db.knowledge.getById(conversation.knowledgeBaseId)
+      if (kb && kb.chunkCount > 0) {
+        history.push({
+          role: 'system',
+          content:
+            `A knowledge base named "${kb.name}" is attached to this conversation. ` +
+            `Before answering questions that its documents may cover, call the ` +
+            `knowledge_search tool to retrieve relevant passages, and ground your ` +
+            `answer in what it returns.`,
+        })
+      }
+    }
     // Condensed older turns (context compaction) go in as a system note; the
     // messages they cover (seq <= summaryThroughSeq) are then skipped below.
     const throughSeq = conversation.summaryThroughSeq ?? 0
@@ -964,9 +1061,24 @@ export class ChatService {
             ? expandSlashCommand(message.content, conversation.mode)
             : composeUserContent(message, visionEnabled, this.options.imageDir)
           : message.content
+      const calls =
+        replayToolCalls && message.role === 'assistant' ? (message.toolCalls ?? []) : []
+      if (calls.length > 0) {
+        // Replay the turn's tool round(s): tool_use turn first, one result per
+        // call (every call MUST have a result or providers reject the
+        // transcript), then the final answer as its own assistant turn.
+        history.push({ role: 'assistant', content: '', toolCalls: calls })
+        for (const call of calls) {
+          history.push({
+            role: 'tool',
+            content: truncateToolResultForReplay(call.result ?? '[not executed]'),
+            toolCallId: call.id,
+          })
+        }
+        if (!contentIsEmpty(content)) history.push({ role: 'assistant', content })
+        continue
+      }
       if (contentIsEmpty(content)) continue
-      // Tool calls are intentionally omitted from history in the MVP: without
-      // matching role-'tool' result messages, providers reject the transcript.
       history.push({ role: message.role, content })
     }
     return history
@@ -1123,7 +1235,13 @@ export class ChatService {
 
     const toolPlan = this.planTools(resolved)
     const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
-    const history = this.buildHistory(conversation, settings, toolPlan.promptOpts, visionEnabled)
+    const history = this.buildHistory(
+      conversation,
+      settings,
+      toolPlan.promptOpts,
+      visionEnabled,
+      this.shouldReplayToolCalls(resolved)
+    )
     const adapter = this.adapterFor(resolved)
     const result = await adapter.chat(
       {
@@ -1160,7 +1278,12 @@ export class ChatService {
    * Resolves the provider/model from the given ids or the global defaults.
    * Throws on config errors (no provider/key/model).
    */
-  async generateForWorkflow(prompt: string, providerId?: string, modelId?: string): Promise<string> {
+  async generateForWorkflow(
+    prompt: string,
+    providerId?: string,
+    modelId?: string,
+    opts?: { useTools?: boolean; agentId?: string; json?: boolean; signal?: AbortSignal }
+  ): Promise<string> {
     const settings = this.db.settings.get()
     const stub: Conversation = {
       id: 'workflow',
@@ -1177,18 +1300,107 @@ export class ChatService {
       createdAt: 0,
       updatedAt: 0,
     }
+    // An agent profile supplies persona + default model + toolset; explicit
+    // node provider/model config still wins over the profile's. A broken
+    // reference fails the run — a scheduled workflow must not quietly degrade
+    // to a persona-less generation.
+    const profile = opts?.agentId ? this.db.agents.getById(opts.agentId) : null
+    const agent = profile?.enabled ? profile : null
+    if (opts?.agentId && !agent) {
+      throw new ProviderError(
+        'invalid_request',
+        'The agent profile selected for this node is missing or disabled.'
+      )
+    }
+    const resolved = await this.resolveTarget(stub, settings, {
+      providerId: providerId ?? agent?.providerId ?? undefined,
+      modelId: modelId ?? agent?.modelId ?? undefined,
+    })
+    const adapter = this.adapterFor(resolved)
+
+    // Tool-enabled node: a bounded, non-streaming loop over the enabled tools.
+    // Headless runs can never pop an approval dialog, so the approval callback
+    // auto-declines — only tools whose permission is 'always allow' actually
+    // run (web_search/fetch_url by default; users can grant more in Settings).
+    const tools = this.options.tools
+    const toolDefs: AdapterToolDef[] =
+      opts?.useTools && tools
+        ? tools.registry
+            .listEnabledDefinitions()
+            .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
+            .map(toAdapterToolDef)
+        : []
+    const params: ChatParams = {
+      ...resolved.params,
+      ...(opts?.json ? { responseFormat: 'json' as const } : {}),
+    }
+    const messages: AdapterMessage[] = [
+      ...(agent ? [{ role: 'system', content: agent.systemPrompt } as AdapterMessage] : []),
+      { role: 'user', content: prompt },
+    ]
+    const maxRounds =
+      agent?.maxRounds && agent.maxRounds >= 1
+        ? Math.min(agent.maxRounds, MAX_TOOL_ROUNDS)
+        : WORKFLOW_AGENT_MAX_ROUNDS
+    let final = ''
+    for (let round = 0; round < maxRounds; round++) {
+      if (opts?.signal?.aborted) {
+        throw new ProviderError('aborted', 'The workflow run was cancelled.')
+      }
+      const result = await adapter.chat(
+        {
+          modelId: resolved.modelId,
+          messages,
+          params,
+          tools: toolDefs.length > 0 ? toolDefs : undefined,
+          stream: false,
+        },
+        this.adapterCtx(resolved, opts?.signal)
+      )
+      if (result.text.trim()) final = result.text
+      if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
+      messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
+      for (const call of result.toolCalls) {
+        const out = await tools.executor.execute(call, {
+          conversation: stub,
+          approval: async () => ({ approved: false, scope: 'once' as const }),
+        })
+        messages.push({ role: 'tool', content: out, toolCallId: call.id })
+      }
+    }
+    return final
+  }
+
+  /**
+   * Text embeddings for the knowledge-base service: resolves the provider,
+   * decrypts its key (never leaves main) and calls the adapter's /embeddings.
+   */
+  async embedTexts(providerId: string, modelId: string, texts: string[]): Promise<number[][]> {
+    const settings = this.db.settings.get()
+    const stub: Conversation = {
+      id: 'knowledge',
+      mode: 'chat',
+      title: '',
+      providerId: null,
+      modelId: null,
+      systemPrompt: null,
+      params: {},
+      workspaceId: null,
+      projectId: null,
+      projectRef: null,
+      moaPresetId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    }
     const resolved = await this.resolveTarget(stub, settings, { providerId, modelId })
     const adapter = this.adapterFor(resolved)
-    const result = await adapter.chat(
-      {
-        modelId: resolved.modelId,
-        messages: [{ role: 'user', content: prompt }],
-        params: resolved.params,
-        stream: false,
-      },
-      this.adapterCtx(resolved)
-    )
-    return result.text
+    if (!adapter.embed) {
+      throw new ProviderError(
+        'not_supported',
+        `${resolved.provider.label} has no embeddings endpoint — pick an OpenAI-compatible provider for knowledge bases.`
+      )
+    }
+    return adapter.embed({ modelId: resolved.modelId, input: texts }, this.adapterCtx(resolved))
   }
 
   /**
@@ -1226,7 +1438,7 @@ export class ChatService {
    * task-id note for the model. The task runs the same bounded delegate loop
    * with its own AbortController; task_stop / app teardown abort it.
    */
-  startDelegateBackground(task: string, ctx: ToolExecuteContext): string {
+  startDelegateBackground(task: string, ctx: ToolExecuteContext, agentName?: string): string {
     const running = [...this.backgroundTasks.values()].filter(
       (t) => t.status === 'running'
     ).length
@@ -1238,7 +1450,7 @@ export class ChatService {
     const controller = new AbortController()
     const record: BackgroundTask = { status: 'running', result: '', controller }
     this.backgroundTasks.set(taskId, record)
-    void this.runDelegate(task, ctx, controller.signal)
+    void this.runDelegate(task, ctx, controller.signal, agentName)
       .then((result) => {
         if (record.status === 'running') {
           record.status = 'done'
@@ -1345,30 +1557,67 @@ export class ChatService {
   /**
    * Runs a sub-agent for the 'delegate' tool: a bounded, non-streaming
    * reasoning loop over the same provider/model with read-only project tools.
-   * Nested tool calls reuse the parent's approval callback (so the user still
-   * approves anything sensitive). Never throws — returns a string result.
+   * With `agentName` a user-defined agent profile supplies the persona, an
+   * optional dedicated (often cheaper) model, a restricted toolset, and the
+   * round budget instead. Nested tool calls reuse the parent's approval
+   * callback (so the user still approves anything sensitive). Never throws —
+   * returns a string result.
    */
-  async runDelegate(task: string, ctx: ToolExecuteContext, signal?: AbortSignal): Promise<string> {
+  async runDelegate(
+    task: string,
+    ctx: ToolExecuteContext,
+    signal?: AbortSignal,
+    agentName?: string
+  ): Promise<string> {
     try {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
-      const resolved = await this.resolveTarget(parent, settings, undefined)
+
+      let persona = DELEGATE_PERSONA
+      let allowedToolIds: ReadonlySet<string> = DELEGATE_TOOL_IDS
+      let maxRounds = DELEGATE_MAX_ROUNDS
+      let overrides: ChatSendRequest['overrides']
+      if (agentName) {
+        const profile = this.db.agents.getByName(agentName)
+        if (!profile || !profile.enabled) {
+          const names = this.db.agents.listEnabled().map((a) => a.name)
+          return names.length > 0
+            ? `Error: no enabled agent named '${agentName}'. Available agents: ${names.join(', ')}.`
+            : `Error: no agent profiles are defined. Omit the 'agent' parameter to use the general sub-agent.`
+        }
+        persona = profile.systemPrompt
+        if (profile.providerId || profile.modelId) {
+          overrides = {
+            ...(profile.providerId ? { providerId: profile.providerId } : {}),
+            ...(profile.modelId ? { modelId: profile.modelId } : {}),
+          }
+        }
+        // No nesting regardless of the profile's tool list.
+        if (profile.toolIds) {
+          allowedToolIds = new Set(profile.toolIds.filter((id) => id !== 'delegate'))
+        }
+        if (profile.maxRounds && profile.maxRounds >= 1) {
+          maxRounds = Math.min(profile.maxRounds, MAX_TOOL_ROUNDS)
+        }
+      }
+
+      const resolved = await this.resolveTarget(parent, settings, overrides)
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
 
       const toolDefs: AdapterToolDef[] = tools
         ? tools.registry
             .listEnabledDefinitions()
-            .filter((d) => DELEGATE_TOOL_IDS.has(d.id))
+            .filter((d) => allowedToolIds.has(d.id))
             .map(toAdapterToolDef)
         : []
 
       const messages: AdapterMessage[] = [
-        { role: 'system', content: DELEGATE_PERSONA },
+        { role: 'system', content: persona },
         { role: 'user', content: task },
       ]
       let final = ''
-      for (let round = 0; round < DELEGATE_MAX_ROUNDS; round++) {
+      for (let round = 0; round < maxRounds; round++) {
         if (signal?.aborted) return 'The task was stopped.'
         const result = await adapter.chat(
           {
@@ -1384,7 +1633,7 @@ export class ChatService {
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
         messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
         for (const call of result.toolCalls) {
-          const out = DELEGATE_TOOL_IDS.has(call.name)
+          const out = allowedToolIds.has(call.name)
             ? await tools.executor.execute(call, {
                 conversation: parent,
                 streamId: ctx.streamId,
@@ -1407,32 +1656,21 @@ export class ChatService {
   }
 
   /**
-   * Mixture of Agents: fan the advisor (reference) models out in parallel over
-   * the conversation text (no tools, no system prompt — cheap and provider-safe),
-   * stream each result to the renderer as a labelled block, persist the blocks on
-   * the placeholder, then delegate to runStream with the aggregator as the acting
-   * model and the advisor analyses injected as private context. Advisor failures
-   * are captured, never fatal — the aggregator still runs. Abort during fan-out
-   * flows through: runStream sees the aborted signal and finalizes 'stopped'.
+   * Fans the preset's advisor (reference) models out in parallel over the
+   * conversation text (no tools, no system prompt — cheap and provider-safe),
+   * emitting a 'moa-reference' event as each starts/settles and persisting the
+   * blocks on the placeholder. Shared by MoA (which aggregates afterwards) and
+   * Compare (where the fan-out IS the result). Never throws; on an unexpected
+   * failure the returned refs may still be 'running'.
    */
-  private async runMoaStream(
-    streamId: string,
+  private async runAdvisors(
     conversation: Conversation,
-    aggregator: ResolvedTarget,
     preset: MoaPreset,
     buildOpts: HistoryBuildOptions,
     placeholder: Message,
     controller: AbortController,
-    adapterTools?: AdapterToolDef[]
-  ): Promise<void> {
-    const conversationId = conversation.id
-    const emit = (event: StreamEvent): void => {
-      try {
-        this.broadcast(CHANNELS.streamEvent, { streamId, conversationId, event })
-      } catch {
-        // A window can be torn down mid-broadcast; persistence still happens.
-      }
-    }
+    emit: (event: StreamEvent) => void
+  ): Promise<MoaReferenceOutput[]> {
     const settings = buildOpts.settings
     const references: MoaReferenceOutput[] = preset.referenceModels.map((ref, index) => ({
       index,
@@ -1494,16 +1732,45 @@ export class ChatService {
       )
 
       // Persist the advisor blocks now so a reload mid-aggregation still shows
-      // them (finalize re-persists the same array at the end).
+      // them (the caller's finalize re-persists the same array at the end).
       try {
         this.db.messages.update(placeholder.id, { moaReferences: references })
       } catch {
-        // Best-effort; runStream.finalize persists them again regardless.
+        // Best-effort; the caller persists them again regardless.
       }
     } catch {
-      // Unexpected reference-phase failure (e.g. a DB read): fall through and run
-      // the aggregator alone rather than wedging the stream as 'streaming'.
+      // Unexpected reference-phase failure (e.g. a DB read): return what we
+      // have rather than wedging the stream as 'streaming'.
     }
+    return references
+  }
+
+  private async runMoaStream(
+    streamId: string,
+    conversation: Conversation,
+    aggregator: ResolvedTarget,
+    preset: MoaPreset,
+    buildOpts: HistoryBuildOptions,
+    placeholder: Message,
+    controller: AbortController,
+    adapterTools?: AdapterToolDef[]
+  ): Promise<void> {
+    const conversationId = conversation.id
+    const emit = (event: StreamEvent): void => {
+      try {
+        this.broadcast(CHANNELS.streamEvent, { streamId, conversationId, event })
+      } catch {
+        // A window can be torn down mid-broadcast; persistence still happens.
+      }
+    }
+    const references = await this.runAdvisors(
+      conversation,
+      preset,
+      buildOpts,
+      placeholder,
+      controller,
+      emit
+    )
 
     const anyReferences = references.some((r) => r.status !== 'running')
     return this.runStream(
@@ -1518,6 +1785,130 @@ export class ChatService {
         ? { injectedContext: formatMoaContext(references, preset), moaReferences: references }
         : undefined
     )
+  }
+
+  /**
+   * Compare ("Arena") run: the advisor fan-out IS the whole generation — no
+   * aggregator. The placeholder finalizes with empty content plus the advisor
+   * blocks; the user promotes one to the answer via pickCompareWinner.
+   * Completion hooks are skipped: there is no answer text to parse yet.
+   */
+  private async runCompareStream(
+    streamId: string,
+    conversation: Conversation,
+    preset: MoaPreset,
+    buildOpts: HistoryBuildOptions,
+    placeholder: Message,
+    controller: AbortController
+  ): Promise<void> {
+    const conversationId = conversation.id
+    const emit = (event: StreamEvent): void => {
+      try {
+        this.broadcast(CHANNELS.streamEvent, { streamId, conversationId, event })
+      } catch {
+        // A window can be torn down mid-broadcast; persistence still happens.
+      }
+    }
+    try {
+      const references = await this.runAdvisors(
+        conversation,
+        preset,
+        buildOpts,
+        placeholder,
+        controller,
+        emit
+      )
+      const aborted = controller.signal.aborted
+      const anyDone = references.some((r) => r.status === 'done')
+      const status: MessageStatus = aborted ? 'stopped' : anyDone ? 'complete' : 'error'
+      const error: NormalizedError | null =
+        status === 'error'
+          ? (references.find((r) => r.error)?.error ?? {
+              code: 'unknown',
+              message: 'All compared models failed.',
+              retryable: true,
+            })
+          : null
+      let finalMessage: Message | null
+      try {
+        finalMessage = this.db.messages.update(placeholder.id, {
+          content: '',
+          status,
+          error,
+          moaReferences: references,
+          compare: { pickedIndex: null },
+        })
+        if (finalMessage) this.db.conversations.touch(conversationId, Date.now())
+      } catch {
+        // Writes can fail during shutdown; broadcast the in-memory fallback.
+        finalMessage = { ...placeholder, status, moaReferences: references }
+      }
+      // Row gone = the conversation was deleted mid-run: nothing to broadcast.
+      if (!finalMessage) return
+      this.maybeAutoTitle(conversationId)
+      if (status === 'error' && error) {
+        emit({ type: 'error', error, message: finalMessage })
+      } else {
+        emit({
+          type: 'done',
+          finishReason: aborted ? 'aborted' : 'stop',
+          message: finalMessage,
+        })
+      }
+    } finally {
+      this.releaseStream(streamId, conversationId)
+    }
+  }
+
+  /**
+   * Promotes one advisor of a compare run to the message's answer: its text
+   * becomes the message content, the message is re-attributed to the winning
+   * provider/model, and the conversation switches to that model for the turns
+   * that follow.
+   */
+  pickCompareWinner(req: ChatPickCompareWinnerRequest): ChatPickCompareWinnerResult {
+    const conversation = this.db.conversations.getById(req.conversationId)
+    if (!conversation) {
+      throw new ProviderError('invalid_request', 'Conversation not found.')
+    }
+    if (this.activeByConversation.has(conversation.id)) {
+      throw new ProviderError(
+        'invalid_request',
+        'Wait for the current generation to finish first.'
+      )
+    }
+    const message = this.db.messages
+      .listByConversation(conversation.id)
+      .find((m) => m.id === req.messageId)
+    if (!message || message.role !== 'assistant' || !message.compare) {
+      throw new ProviderError('invalid_request', 'Not a compare message.')
+    }
+    if (message.compare.pickedIndex !== null) {
+      throw new ProviderError(
+        'invalid_request',
+        'A winner was already picked for this comparison.'
+      )
+    }
+    const ref = message.moaReferences?.find((r) => r.index === req.referenceIndex)
+    if (!ref || ref.status !== 'done') {
+      throw new ProviderError('invalid_request', 'That model produced no answer to use.')
+    }
+    const updatedMessage = this.db.messages.update(message.id, {
+      content: ref.text,
+      usage: ref.usage ?? null,
+      providerId: ref.providerId,
+      modelId: ref.modelId,
+      compare: { pickedIndex: ref.index },
+    })
+    if (!updatedMessage) {
+      throw new ProviderError('invalid_request', 'Message not found.')
+    }
+    const updatedConversation =
+      this.db.conversations.update(conversation.id, {
+        providerId: ref.providerId,
+        modelId: ref.modelId,
+      }) ?? conversation
+    return { message: updatedMessage, conversation: updatedConversation }
   }
 
   /**
@@ -1612,7 +2003,8 @@ export class ChatService {
         conversation,
         buildOpts.settings,
         buildOpts.promptOpts,
-        buildOpts.visionEnabled
+        buildOpts.visionEnabled,
+        this.shouldReplayToolCalls(resolved)
       )
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools

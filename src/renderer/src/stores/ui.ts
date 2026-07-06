@@ -10,6 +10,7 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   paletteOpen: false,
   shortcutsOpen: false,
   workflowsOpen: false,
+  artifactPreview: null,
   toasts: [],
 
   setResolvedTheme(t) {
@@ -31,6 +32,10 @@ export const useUiStore = create<UiStoreState>()((set) => ({
 
   openShortcuts(open) {
     set({ shortcutsOpen: open })
+  },
+
+  openArtifactPreview(preview) {
+    set({ artifactPreview: preview })
   },
 
   toast(message, kind = 'info') {

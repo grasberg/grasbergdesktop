@@ -133,42 +133,82 @@ export class ImBridgeManager {
     this.stopBridge()
   }
 
-  /**
-   * Completion-hook target: POST a compact event to the configured outbound
-   * webhook. Best-effort; failures are swallowed.
-   */
-  async onCompletion(conversation: Conversation, message: Message): Promise<void> {
+  /** POSTs a payload to the configured outbound webhook. */
+  private async postWebhook(
+    payload: Record<string, unknown>
+  ): Promise<'unconfigured' | 'sent' | 'failed'> {
     const url = this.deps.db.settings.get().outboundWebhookUrl
-    if (!url || message.role !== 'assistant') return
+    if (!url) return 'unconfigured'
     let parsed: URL
     try {
       parsed = new URL(url)
     } catch {
-      return
+      return 'unconfigured'
     }
     if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-      return
+      return 'unconfigured'
     }
     const fetchImpl = this.deps.fetchImpl ?? fetch
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
     try {
-      await fetchImpl(parsed.toString(), {
+      const res = await fetchImpl(parsed.toString(), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         signal: controller.signal,
-        body: JSON.stringify({
-          type: 'assistant_message',
-          conversationId: conversation.id,
-          conversationTitle: conversation.title,
-          content: redactSecrets(message.content),
-          createdAt: message.createdAt,
-        }),
+        body: JSON.stringify(payload),
       })
+      return res.ok ? 'sent' : 'failed'
     } catch {
-      // best-effort
+      return 'failed'
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Completion-hook target: POST a compact event to the configured outbound
+   * webhook. Best-effort; failures are swallowed.
+   */
+  async onCompletion(conversation: Conversation, message: Message): Promise<void> {
+    if (message.role !== 'assistant') return
+    await this.postWebhook({
+      type: 'assistant_message',
+      conversationId: conversation.id,
+      conversationTitle: conversation.title,
+      content: redactSecrets(message.content),
+      createdAt: message.createdAt,
+    })
+  }
+
+  /**
+   * Delivers a workflow notification through every configured channel: the
+   * Telegram bridge (to the pinned owner chat) and/or the outbound webhook.
+   * Throws unless at least one channel ACTUALLY accepted the message, so a
+   * notify node fails visibly instead of silently dropping its payload.
+   */
+  async notify(text: string): Promise<void> {
+    let configured = false
+    let delivered = false
+    const allowedChat = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    if (this.bridge && allowedChat !== null) {
+      configured = true
+      if (await this.bridge.send(allowedChat, text.slice(0, 4000))) delivered = true
+    }
+    const webhook = await this.postWebhook({
+      type: 'workflow_notification',
+      content: redactSecrets(text),
+      createdAt: Date.now(),
+    })
+    if (webhook !== 'unconfigured') configured = true
+    if (webhook === 'sent') delivered = true
+    if (!configured) {
+      throw new Error(
+        'No delivery channel available — connect the Telegram bridge or configure a webhook.'
+      )
+    }
+    if (!delivered) {
+      throw new Error('Delivery failed on every configured channel (Telegram/webhook).')
     }
   }
 }

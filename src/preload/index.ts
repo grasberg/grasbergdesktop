@@ -71,6 +71,7 @@ const api: UldApi = {
     regenerate: (req) => ipcRenderer.invoke(CHANNELS.chatRegenerate, req),
     editAndRerun: (req) => ipcRenderer.invoke(CHANNELS.chatEditAndRerun, req),
     compact: (conversationId) => ipcRenderer.invoke(CHANNELS.chatCompact, conversationId),
+    pickCompareWinner: (req) => ipcRenderer.invoke(CHANNELS.chatPickCompareWinner, req),
     onStreamEvent: subscribe<StreamEventEnvelope>(CHANNELS.streamEvent),
   },
   workspaces: {
@@ -166,6 +167,22 @@ const api: UldApi = {
     update: (id, input) => ipcRenderer.invoke(CHANNELS.workflowsUpdate, id, input),
     delete: (id) => ipcRenderer.invoke(CHANNELS.workflowsDelete, id),
     run: (graph) => ipcRenderer.invoke(CHANNELS.workflowsRun, graph),
+    runById: (id) => ipcRenderer.invoke(CHANNELS.workflowsRunById, id),
+    runs: (id) => ipcRenderer.invoke(CHANNELS.workflowsRuns, id),
+  },
+  agents: {
+    list: () => ipcRenderer.invoke(CHANNELS.agentsList),
+    create: (input) => ipcRenderer.invoke(CHANNELS.agentsCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(CHANNELS.agentsUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.agentsDelete, id),
+  },
+  knowledge: {
+    list: () => ipcRenderer.invoke(CHANNELS.kbList),
+    create: (input) => ipcRenderer.invoke(CHANNELS.kbCreate, input),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.kbDelete, id),
+    importFiles: (id) => ipcRenderer.invoke(CHANNELS.kbImportFiles, id),
+    sources: (id) => ipcRenderer.invoke(CHANNELS.kbSources, id),
+    removeSource: (id, source) => ipcRenderer.invoke(CHANNELS.kbRemoveSource, id, source),
   },
 }
 

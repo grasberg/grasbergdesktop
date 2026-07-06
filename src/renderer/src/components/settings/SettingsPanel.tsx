@@ -14,12 +14,16 @@ import MemoryTab from './MemoryTab'
 import AppearanceTab from './AppearanceTab'
 import PrivacyTab from './PrivacyTab'
 import AboutTab from './AboutTab'
+import AgentsTab from './AgentsTab'
+import KnowledgeTab from './KnowledgeTab'
 import './settings.css'
 
 const TABS = [
   { id: 'providers', label: 'Providers' },
   { id: 'defaults', label: 'Defaults' },
   { id: 'moa', label: 'Mixture of Agents' },
+  { id: 'agents', label: 'Agents' },
+  { id: 'knowledge', label: 'Knowledge' },
   { id: 'tools', label: 'Tools' },
   { id: 'mcp', label: 'MCP' },
   { id: 'bridges', label: 'Bridges' },
@@ -117,6 +121,8 @@ export default function SettingsPanel() {
             {tab === 'providers' ? <ProvidersTab /> : null}
             {tab === 'defaults' ? <DefaultsTab /> : null}
             {tab === 'moa' ? <MoaTab /> : null}
+            {tab === 'agents' ? <AgentsTab /> : null}
+            {tab === 'knowledge' ? <KnowledgeTab /> : null}
             {tab === 'tools' ? <ToolsTab /> : null}
             {tab === 'mcp' ? <McpServersTab /> : null}
             {tab === 'bridges' ? <BridgesTab /> : null}

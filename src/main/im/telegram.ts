@@ -84,16 +84,19 @@ export class TelegramBridge {
     await this.send(chatId, reply)
   }
 
-  async send(chatId: number, text: string): Promise<void> {
+  /** True only when Telegram accepted the message (2xx). Never throws. */
+  async send(chatId: number, text: string): Promise<boolean> {
     const fetchImpl = this.deps.fetchImpl ?? fetch
     try {
-      await fetchImpl(this.api('sendMessage'), {
+      const res = await fetchImpl(this.api('sendMessage'), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: (text || '(no reply)').slice(0, MAX_REPLY_CHARS) }),
       })
+      return res.ok
     } catch {
       // best-effort; a failed send should not crash the bridge
+      return false
     }
   }
 }

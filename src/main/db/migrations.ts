@@ -510,4 +510,84 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_code_changes ON code_changes(project_id, created_at DESC)`,
     ],
   },
+  {
+    version: 19,
+    name: 'message-compare-run',
+    // Compare ("Arena") runs: NULL for ordinary messages; JSON
+    // {"pickedIndex": number|null} when the message's moaReferences were
+    // generated side-by-side without an aggregator.
+    statements: [`ALTER TABLE messages ADD COLUMN compare_json TEXT`],
+  },
+  {
+    version: 20,
+    name: 'workflow-scheduling-and-runs',
+    // Recurring workflow triggers (schedule_json = {"everyMinutes": n}) and a
+    // persisted history of executions. last_run_at drives the scheduler's
+    // due check across app restarts.
+    statements: [
+      `ALTER TABLE workflows ADD COLUMN schedule_json TEXT`,
+      `ALTER TABLE workflows ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE workflows ADD COLUMN last_run_at INTEGER`,
+      `CREATE TABLE workflow_runs (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK (trigger IN ('manual','schedule')),
+        status TEXT NOT NULL CHECK (status IN ('ok','error')),
+        output TEXT NOT NULL DEFAULT '',
+        error TEXT,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_workflow_runs ON workflow_runs(workflow_id, started_at DESC)`,
+    ],
+  },
+  {
+    version: 21,
+    name: 'agent-profiles',
+    // User-defined sub-agents: persona + optional dedicated model + optional
+    // restricted toolset (tool_ids_json = JSON string array; NULL = default).
+    statements: [
+      `CREATE TABLE agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        system_prompt TEXT NOT NULL,
+        provider_id TEXT,
+        model_id TEXT,
+        tool_ids_json TEXT,
+        max_rounds INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    ],
+  },
+  {
+    version: 22,
+    name: 'knowledge-bases',
+    // RAG: knowledge bases hold embedded text chunks (embedding = raw
+    // Float32Array bytes). A conversation can attach one knowledge base;
+    // retrieval happens through the knowledge_search tool.
+    statements: [
+      `CREATE TABLE knowledge_bases (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE TABLE knowledge_chunks (
+        id TEXT PRIMARY KEY,
+        kb_id TEXT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_knowledge_chunks ON knowledge_chunks(kb_id)`,
+      `ALTER TABLE conversations ADD COLUMN knowledge_base_id TEXT`,
+    ],
+  },
 ]

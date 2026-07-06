@@ -1,7 +1,9 @@
 /**
  * Workflows builder: a React Flow canvas over the workflow engine. Add nodes
- * from the palette, connect them, edit each node's config, then Run — the graph
- * executes in the main process and each node's output is shown.
+ * from the palette, connect them, edit each node's config, then Run — the
+ * workflow is saved and executed in the main process; each node's output and
+ * the persisted run history are shown. Edges leaving a Condition node carry a
+ * true/false branch (click the edge to flip it).
  */
 
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
@@ -21,11 +23,14 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type {
+  AgentProfile,
   Workflow,
   WorkflowGraph,
   WorkflowNodeKind,
+  WorkflowRun,
   WorkflowRunResult,
 } from '@shared/types'
+import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
 import './workflows.css'
 
@@ -42,6 +47,8 @@ const PALETTE: ReadonlyArray<{ kind: WorkflowNodeKind; label: string }> = [
   { kind: 'template', label: 'Template' },
   { kind: 'ai_agent', label: 'AI agent' },
   { kind: 'http_request', label: 'HTTP request' },
+  { kind: 'condition', label: 'Condition' },
+  { kind: 'notify', label: 'Notify' },
   { kind: 'output', label: 'Output' },
 ]
 
@@ -49,6 +56,13 @@ let idSeq = 0
 function nextId(): string {
   idSeq += 1
   return `n${idSeq}_${Math.floor(Math.random() * 1e6)}`
+}
+
+/** Edge label showing the branch of a condition edge. */
+function branchLabel(sourceHandle: string | null | undefined): string | undefined {
+  if (sourceHandle === 'false') return 'false'
+  if (sourceHandle === 'true') return 'true'
+  return undefined
 }
 
 function toFlow(workflow: WorkflowGraph): { nodes: FlowNode[]; edges: Edge[] } {
@@ -59,7 +73,13 @@ function toFlow(workflow: WorkflowGraph): { nodes: FlowNode[]; edges: Edge[] } {
       data: { label: n.label, kind: n.kind, config: n.config },
       type: 'default',
     })),
-    edges: workflow.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+    edges: workflow.edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle ?? null,
+      label: branchLabel(e.sourceHandle),
+    })),
   }
 }
 
@@ -72,8 +92,17 @@ function toGraph(nodes: FlowNode[], edges: Edge[]): WorkflowGraph {
       position: n.position,
       config: n.data.config,
     })),
-    edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+    edges: edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle ?? null,
+    })),
   }
+}
+
+function formatRunTime(ts: number): string {
+  return new Date(ts).toLocaleString()
 }
 
 export default function WorkflowsView(): ReactElement {
@@ -86,16 +115,29 @@ export default function WorkflowsView(): ReactElement {
   const [nodes, setNodes] = useState<FlowNode[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [result, setResult] = useState<WorkflowRunResult | null>(null)
   const [running, setRunning] = useState(false)
+  const [scheduleEnabled, setScheduleEnabled] = useState(false)
+  const [everyMinutes, setEveryMinutes] = useState('60')
+  const [runs, setRuns] = useState<WorkflowRun[]>([])
+  const [agents, setAgents] = useState<AgentProfile[]>([])
 
   const loadList = useCallback(async () => {
     const res = await window.uld.workflows.list()
     if (res.ok) setSaved(res.data)
   }, [])
 
+  const loadRuns = useCallback(async (id: string) => {
+    const res = await window.uld.workflows.runs(id)
+    if (res.ok) setRuns(res.data)
+  }, [])
+
   useEffect(() => {
     void loadList()
+    void window.uld.agents.list().then((res) => {
+      if (res.ok) setAgents(res.data.filter((a) => a.enabled))
+    })
   }, [loadList])
 
   const onNodesChange = useCallback(
@@ -125,6 +167,14 @@ export default function WorkflowsView(): ReactElement {
   }
 
   const selected = useMemo(() => nodes.find((n) => n.id === selectedId) ?? null, [nodes, selectedId])
+  const selectedEdge = useMemo(
+    () => edges.find((e) => e.id === selectedEdgeId) ?? null,
+    [edges, selectedEdgeId]
+  )
+  const selectedEdgeSource = useMemo(
+    () => (selectedEdge ? (nodes.find((n) => n.id === selectedEdge.source) ?? null) : null),
+    [selectedEdge, nodes]
+  )
 
   const patchSelected = (patch: Partial<NodeData> | { config: Record<string, unknown> }): void => {
     if (!selectedId) return
@@ -132,9 +182,18 @@ export default function WorkflowsView(): ReactElement {
       ns.map((n) => (n.id === selectedId ? { ...n, data: { ...n.data, ...patch } } : n))
     )
   }
-  const setConfig = (key: string, value: string): void => {
+  const setConfig = (key: string, value: string | boolean): void => {
     if (!selected) return
     patchSelected({ config: { ...selected.data.config, [key]: value } })
+  }
+
+  const setEdgeBranch = (branch: 'true' | 'false'): void => {
+    if (!selectedEdgeId) return
+    setEdges((es) =>
+      es.map((e) =>
+        e.id === selectedEdgeId ? { ...e, sourceHandle: branch, label: branch } : e
+      )
+    )
   }
 
   const newWorkflow = (): void => {
@@ -143,7 +202,11 @@ export default function WorkflowsView(): ReactElement {
     setNodes([])
     setEdges([])
     setSelectedId(null)
+    setSelectedEdgeId(null)
     setResult(null)
+    setScheduleEnabled(false)
+    setEveryMinutes('60')
+    setRuns([])
   }
 
   const openWorkflow = async (id: string): Promise<void> => {
@@ -155,22 +218,34 @@ export default function WorkflowsView(): ReactElement {
       setNodes(flow.nodes)
       setEdges(flow.edges)
       setSelectedId(null)
+      setSelectedEdgeId(null)
       setResult(null)
+      setScheduleEnabled(res.data.scheduleEnabled)
+      setEveryMinutes(String(res.data.schedule?.everyMinutes ?? 60))
+      await loadRuns(res.data.id)
     }
   }
 
-  const save = async (): Promise<void> => {
-    const input = { name: name.trim() || 'Untitled workflow', graph: toGraph(nodes, edges) }
+  /** Persists the workflow; returns its id (null on failure). */
+  const save = async (silent = false): Promise<string | null> => {
+    const minutes = Math.floor(Number(everyMinutes))
+    const input = {
+      name: name.trim() || 'Untitled workflow',
+      graph: toGraph(nodes, edges),
+      schedule: Number.isFinite(minutes) && minutes >= 1 ? { everyMinutes: minutes } : null,
+      scheduleEnabled,
+    }
     const res = workflowId
       ? await window.uld.workflows.update(workflowId, input)
       : await window.uld.workflows.create(input)
     if (res.ok) {
       setWorkflowId(res.data.id)
       await loadList()
-      toast('Workflow saved.', 'success')
-    } else {
-      toast(res.error.message, 'error')
+      if (!silent) toast('Workflow saved.', 'success')
+      return res.data.id
     }
+    toast(res.error.message, 'error')
+    return null
   }
 
   const remove = async (): Promise<void> => {
@@ -182,13 +257,17 @@ export default function WorkflowsView(): ReactElement {
     }
   }
 
+  /** Save & run: executes the saved workflow so the run lands in the history. */
   const run = async (): Promise<void> => {
     setRunning(true)
     setResult(null)
     try {
-      const res = await window.uld.workflows.run(toGraph(nodes, edges))
+      const id = await save(true)
+      if (!id) return
+      const res = await window.uld.workflows.runById(id)
       if (res.ok) setResult(res.data)
       else toast(res.error.message, 'error')
+      await loadRuns(id)
     } finally {
       setRunning(false)
     }
@@ -217,6 +296,7 @@ export default function WorkflowsView(): ReactElement {
             {saved.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
+                {w.scheduleEnabled && w.schedule ? ` ⏰ ${w.schedule.everyMinutes}m` : ''}
               </option>
             ))}
           </select>
@@ -231,7 +311,7 @@ export default function WorkflowsView(): ReactElement {
             </button>
           ) : null}
           <button type="button" className="btn btn-primary" disabled={running} onClick={() => void run()}>
-            {running ? 'Running…' : 'Run'}
+            {running ? 'Running…' : 'Save & run'}
           </button>
         </div>
       </header>
@@ -261,8 +341,18 @@ export default function WorkflowsView(): ReactElement {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
-            onNodeClick={(_e, n) => setSelectedId(n.id)}
-            onPaneClick={() => setSelectedId(null)}
+            onNodeClick={(_e, n) => {
+              setSelectedId(n.id)
+              setSelectedEdgeId(null)
+            }}
+            onEdgeClick={(_e, edge) => {
+              setSelectedEdgeId(edge.id)
+              setSelectedId(null)
+            }}
+            onPaneClick={() => {
+              setSelectedId(null)
+              setSelectedEdgeId(null)
+            }}
             fitView
           >
             <Background />
@@ -307,16 +397,77 @@ export default function WorkflowsView(): ReactElement {
                 </label>
               )}
               {selected.data.kind === 'ai_agent' && (
+                <>
+                  <label className="field">
+                    <span className="field-label">Prompt</span>
+                    <textarea
+                      className="textarea"
+                      rows={6}
+                      value={String(selected.data.config.prompt ?? '')}
+                      placeholder="Summarize: {{input}}"
+                      onChange={(e) => setConfig('prompt', e.target.value)}
+                    />
+                  </label>
+                  {agents.length > 0 && (
+                    <label className="field">
+                      <span className="field-label">Agent profile</span>
+                      <select
+                        className="select"
+                        value={String(selected.data.config.agentId ?? '')}
+                        onChange={(e) => setConfig('agentId', e.target.value)}
+                      >
+                        <option value="">None (plain generation)</option>
+                        {agents.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <div className="field">
+                    <Switch
+                      checked={selected.data.config.useTools === true}
+                      onChange={(v) => setConfig('useTools', v)}
+                      label="Allow tools"
+                    />
+                    <p className="field-hint">
+                      Lets the agent call enabled tools whose permission is “always allow”
+                      (e.g. web search) — headless runs never show approval dialogs.
+                    </p>
+                  </div>
+                  <div className="field">
+                    <Switch
+                      checked={selected.data.config.jsonOutput === true}
+                      onChange={(v) => setConfig('jsonOutput', v)}
+                      label="JSON output"
+                    />
+                    <p className="field-hint">
+                      Forces valid JSON (providers with a JSON mode) — handy when the next
+                      node parses the result.
+                    </p>
+                  </div>
+                </>
+              )}
+              {selected.data.kind === 'condition' && (
                 <label className="field">
-                  <span className="field-label">Prompt</span>
-                  <textarea
-                    className="textarea"
-                    rows={6}
-                    value={String(selected.data.config.prompt ?? '')}
-                    placeholder="Summarize: {{input}}"
-                    onChange={(e) => setConfig('prompt', e.target.value)}
+                  <span className="field-label">Contains text</span>
+                  <input
+                    className="input"
+                    value={String(selected.data.config.needle ?? '')}
+                    placeholder="e.g. URGENT (empty = input is non-empty)"
+                    onChange={(e) => setConfig('needle', e.target.value)}
                   />
+                  <p className="field-hint">
+                    Case-insensitive. Click an outgoing edge to set its true/false branch.
+                  </p>
                 </label>
+              )}
+              {selected.data.kind === 'notify' && (
+                <p className="field-hint">
+                  Delivers its input via the Telegram bridge and/or the outbound webhook
+                  (Settings → Bridges), then passes it through.
+                </p>
               )}
               {selected.data.kind === 'http_request' && (
                 <>
@@ -358,9 +509,72 @@ export default function WorkflowsView(): ReactElement {
                   <pre className="workflows-output">{result.nodeOutputs[selected.id]}</pre>
                 </div>
               )}
+              {result?.skipped?.includes(selected.id) && (
+                <p className="field-hint">Skipped in the last run (condition branch didn’t fire).</p>
+              )}
+            </>
+          ) : selectedEdge && selectedEdgeSource?.data.kind === 'condition' ? (
+            <>
+              <h4 className="section-subhead">Condition branch</h4>
+              <label className="field">
+                <span className="field-label">This edge fires when the condition is</span>
+                <select
+                  className="select"
+                  value={selectedEdge.sourceHandle === 'false' ? 'false' : 'true'}
+                  onChange={(e) => setEdgeBranch(e.target.value === 'false' ? 'false' : 'true')}
+                >
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
             </>
           ) : (
-            <p className="field-hint">Select a node to edit it, or add one from the palette.</p>
+            <>
+              <h4 className="section-subhead">Schedule</h4>
+              <div className="field">
+                <Switch
+                  checked={scheduleEnabled}
+                  onChange={setScheduleEnabled}
+                  label="Run on a schedule"
+                />
+              </div>
+              <label className="field">
+                <span className="field-label">Every (minutes)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={everyMinutes}
+                  disabled={!scheduleEnabled}
+                  onChange={(e) => setEveryMinutes(e.target.value)}
+                />
+                <p className="field-hint">Save to apply. Add a Notify node to get the result.</p>
+              </label>
+
+              <h4 className="section-subhead">Run history</h4>
+              {runs.length === 0 ? (
+                <p className="field-hint">
+                  {workflowId ? 'No runs recorded yet.' : 'Save the workflow to record runs.'}
+                </p>
+              ) : (
+                <ul className="workflows-runs">
+                  {runs.map((r) => (
+                    <li key={r.id} className={`workflows-run workflows-run-${r.status}`}>
+                      <div className="workflows-run-head">
+                        <span>{r.status === 'ok' ? '✓' : '✗'}</span>
+                        <span>{formatRunTime(r.startedAt)}</span>
+                        <span className="workflows-run-trigger">{r.trigger}</span>
+                      </div>
+                      {r.error ? (
+                        <div className="workflows-run-error">{r.error}</div>
+                      ) : r.output ? (
+                        <div className="workflows-run-output">{r.output.slice(0, 300)}</div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
           {result && !result.ok ? (
             <p className="mcp-item-error">

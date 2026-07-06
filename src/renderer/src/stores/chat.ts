@@ -84,7 +84,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       }
     },
 
-    async send(content, attachments) {
+    async send(content, attachments, opts) {
       const { conversation, streaming } = get()
       if (!conversation || streaming) return
       const settings = useSettingsStore.getState().settings
@@ -110,11 +110,16 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       }
 
       // One-shot Mixture of Agents: "/moa <prompt>" runs a single message through
-      // the default preset without changing the conversation's model.
+      // the default preset without changing the conversation's model. "/compare
+      // <prompt>" fans the same preset out side by side instead of aggregating.
       let outgoing = content
-      let overrides: { moaPresetId: string } | undefined
+      let overrides: { moaPresetId: string; compare?: boolean } | undefined
       const trimmed = content.trimStart()
-      if (trimmed === '/moa' || trimmed.slice(0, 5).toLowerCase() === '/moa ') {
+      const slash = ['/moa', '/compare'].find(
+        (cmd) =>
+          trimmed === cmd || trimmed.slice(0, cmd.length + 1).toLowerCase() === `${cmd} `
+      )
+      if (slash) {
         const presetId = settings?.defaultMoaPresetId ?? null
         if (!presetId) {
           set({
@@ -127,18 +132,20 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
           })
           return
         }
-        outgoing = trimmed.slice(4).trim()
+        outgoing = trimmed.slice(slash.length).trim()
         if (!outgoing) {
           set({
             error: {
               code: 'invalid_request',
-              message: 'Usage: /moa <your prompt> — runs one message through the default MoA preset.',
+              message: `Usage: ${slash} <your prompt> — runs one message through the default MoA preset.`,
               retryable: false,
             },
           })
           return
         }
-        overrides = { moaPresetId: presetId }
+        overrides = { moaPresetId: presetId, ...(slash === '/compare' ? { compare: true } : {}) }
+      } else if (opts?.comparePresetId) {
+        overrides = { moaPresetId: opts.comparePresetId, compare: true }
       }
 
       // A MoA run supplies its own aggregator provider, so it doesn't need a
@@ -183,6 +190,32 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       try {
         await unwrap(window.uld.chat.stop(streaming.streamId))
         // Keep streaming state; the 'done' (aborted) envelope clears it.
+      } catch (e) {
+        set({ error: toNormalized(e) })
+      }
+    },
+
+    async pickCompareWinner(messageId, referenceIndex) {
+      const { conversation, streaming } = get()
+      if (!conversation || streaming) return
+      try {
+        const result = await unwrap(
+          window.uld.chat.pickCompareWinner({
+            conversationId: conversation.id,
+            messageId,
+            referenceIndex,
+          })
+        )
+        // Guard against switching conversations while the IPC was in flight —
+        // replaceOrAppend would otherwise append the message to the new one.
+        set((s) =>
+          s.conversation?.id === result.conversation.id
+            ? {
+                messages: replaceOrAppend(s.messages, result.message.id, result.message),
+                conversation: result.conversation,
+              }
+            : {}
+        )
       } catch (e) {
         set({ error: toNormalized(e) })
       }

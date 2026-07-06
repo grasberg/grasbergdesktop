@@ -170,4 +170,52 @@ describe('applyBackup', () => {
     // The backup's explicit enabled flag wins over the stored one.
     expect(skills[0].enabled).toBe(true)
   })
+
+  it('roundtrips conversations (with messages), prompts and workflows', () => {
+    const conversation = source.conversations.create({ mode: 'chat', title: 'Trip' })
+    source.messages.insert({
+      id: 'm1',
+      conversationId: conversation.id,
+      role: 'user',
+      content: 'hello',
+      status: 'complete',
+      seq: 1,
+      createdAt: 111,
+    })
+    source.messages.insert({
+      id: 'm2',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: 'hi there',
+      status: 'streaming', // exported mid-generation → must import as 'stopped'
+      usage: { totalTokens: 5 },
+      seq: 2,
+      createdAt: 222,
+    })
+    source.prompts.create({ title: 'Greeting', body: 'Say hi' })
+    source.workflows.create({ name: 'Flow', graph: { nodes: [], edges: [] } })
+
+    const backup = JSON.parse(JSON.stringify(buildBackup(source)))
+    const summary = applyBackup(target, backup)
+    expect(summary.conversationsImported).toBe(1)
+    expect(summary.promptsImported).toBe(1)
+    expect(summary.workflowsImported).toBe(1)
+
+    const imported = target.conversations.getById(conversation.id)
+    expect(imported?.title).toBe('Trip')
+    const messages = target.messages.listByConversation(conversation.id)
+    expect(messages.map((m) => m.content)).toEqual(['hello', 'hi there'])
+    expect(messages[1].status).toBe('stopped')
+    expect(messages[1].usage).toEqual({ totalTokens: 5 })
+    expect(target.prompts.list()).toHaveLength(1)
+    expect(target.workflows.list()).toHaveLength(1)
+
+    // Re-importing the same backup duplicates nothing.
+    const second = applyBackup(target, backup)
+    expect(second.conversationsImported).toBe(0)
+    expect(second.promptsImported).toBe(0)
+    expect(second.workflowsImported).toBe(0)
+    expect(target.conversations.list()).toHaveLength(1)
+    expect(target.messages.listByConversation(conversation.id)).toHaveLength(2)
+  })
 })

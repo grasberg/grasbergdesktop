@@ -103,11 +103,16 @@ export interface ToolExecutorDeps {
   browserEnabled?: () => boolean
   /** Embedded browser for the browser/computer tools. */
   browser?: ToolBrowser | null
+  /** Knowledge-base retrieval for the 'knowledge_search' tool. */
+  knowledgeSearch?: (
+    knowledgeBaseId: string,
+    query: string
+  ) => Promise<Array<{ source: string; content: string; score: number }>>
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
-  delegate?: (task: string, ctx: ToolExecuteContext) => Promise<string>
+  delegate?: (task: string, ctx: ToolExecuteContext, agentName?: string) => Promise<string>
   /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
   delegateBackground?: {
-    start(task: string, ctx: ToolExecuteContext): string
+    start(task: string, ctx: ToolExecuteContext, agentName?: string): string
     output(taskId: string): string
     stop(taskId: string): string
   } | null
@@ -711,6 +716,8 @@ export class ToolExecutor {
         return this.runShellCommand(args, ctx, toolCall)
       case 'use_skill':
         return this.runUseSkill(args)
+      case 'knowledge_search':
+        return this.runKnowledgeSearch(args, ctx)
       case 'delegate':
         return this.runDelegate(args, ctx)
       case 'browser':
@@ -1329,6 +1336,31 @@ export class ToolExecutor {
     return `Skill '${skill.name}' instructions:\n\n${skill.content}`
   }
 
+  // -- knowledge-base retrieval -------------------------------------------------
+
+  private async runKnowledgeSearch(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!this.deps.knowledgeSearch) {
+      return 'Error: knowledge search is unavailable in this build.'
+    }
+    const kbId = ctx.conversation.knowledgeBaseId
+    if (!kbId) {
+      return 'Error: no knowledge base is attached to this conversation. The user can attach one in the conversation settings.'
+    }
+    const [query, queryError] = requireStringArg(args, 'query')
+    if (queryError) return queryError
+    const hits = await this.deps.knowledgeSearch(kbId, query)
+    if (hits.length === 0) return 'No relevant passages found in the knowledge base.'
+    return hits
+      .map(
+        (hit, i) =>
+          `[${i + 1}] ${hit.source} (relevance ${hit.score.toFixed(2)})\n${hit.content}`
+      )
+      .join('\n\n---\n\n')
+  }
+
   // -- sub-agent delegation ----------------------------------------------------
 
   private async runDelegate(
@@ -1339,14 +1371,15 @@ export class ToolExecutor {
     const [task, taskError] = requireStringArg(args, 'task')
     if (taskError) return taskError
     const context = (getString(args, 'context') ?? '').trim()
+    const agentName = (getString(args, 'agent') ?? '').trim() || undefined
     const prompt = context ? `${task}\n\nContext:\n${context}` : task
     if (args.background === true) {
       if (!this.deps.delegateBackground) {
         return 'Error: background tasks are unavailable in this build.'
       }
-      return this.deps.delegateBackground.start(prompt, ctx)
+      return this.deps.delegateBackground.start(prompt, ctx, agentName)
     }
-    return this.deps.delegate(prompt, ctx)
+    return this.deps.delegate(prompt, ctx, agentName)
   }
 
   // -- shell execution (opt-in, approval-gated) --------------------------------

@@ -34,6 +34,7 @@ export default function CommandPalette() {
   const openPalette = useUiStore((s) => s.openPalette)
   const openSettings = useUiStore((s) => s.openSettings)
   const openShortcuts = useUiStore((s) => s.openShortcuts)
+  const openWorkflows = useUiStore((s) => s.openWorkflows)
   const resolvedTheme = useUiStore((s) => s.resolvedTheme)
   const toast = useUiStore((s) => s.toast)
   const updateSettings = useSettingsStore((s) => s.update)
@@ -88,6 +89,15 @@ export default function CommandPalette() {
         run: () => {
           close()
           void updateSettings({ theme: nextTheme }).catch(catchToast)
+        },
+      },
+      {
+        id: 'act-workflows',
+        section: 'Actions',
+        label: 'Open workflows',
+        run: () => {
+          close()
+          openWorkflows(true)
         },
       },
       {
@@ -166,6 +176,7 @@ export default function CommandPalette() {
     openPalette,
     openSettings,
     openShortcuts,
+    openWorkflows,
     updateSettings,
     createConversation,
     selectConversation,

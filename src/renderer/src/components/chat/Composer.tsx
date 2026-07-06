@@ -57,6 +57,7 @@ export default function Composer(): ReactElement {
   const skillsLoaded = useSkillsStore((s) => s.loaded)
 
   const [value, setValue] = useState('')
+  const [compareOn, setCompareOn] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<Attachment[] | null>(null)
   const [confirmFlash, setConfirmFlash] = useState(false)
@@ -121,6 +122,19 @@ export default function Composer(): ReactElement {
     : false
   const usable = activePreset ? moaUsable : providerUsable
 
+  // Compare ("Arena"): fan the preset's advisors out side by side instead of
+  // aggregating. Uses the conversation's preset when set, else the default.
+  const comparePreset =
+    activePreset ??
+    enabledPresets.find((p) => p.id === settings?.defaultMoaPresetId) ??
+    enabledPresets[0] ??
+    null
+
+  // The toggle is a per-conversation intent; don't leak it across switches.
+  useEffect(() => {
+    setCompareOn(false)
+  }, [conversation?.id])
+
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
   // Preset-aware: for the 120+ preset-backed 'openai-compatible' providers
   // (empty family knownModels) the preset catalog is consulted, so
@@ -156,6 +170,12 @@ export default function Composer(): ReactElement {
         command: '/moa',
         label: '/moa <prompt>',
         description: 'Run one message through the default MoA preset',
+        takesArgs: true,
+      })
+      items.push({
+        command: '/compare',
+        label: '/compare <prompt>',
+        description: 'Ask the default MoA preset’s models side by side',
         takesArgs: true,
       })
     }
@@ -313,12 +333,14 @@ export default function Composer(): ReactElement {
       return
     }
     const sentAttachments = attachments.length > 0 ? attachments : undefined
+    const sendOpts =
+      compareOn && comparePreset ? { comparePresetId: comparePreset.id } : undefined
     setValue('')
     setAttachments([])
     setMention(null)
     setMentionItems([])
     void (async () => {
-      await send(content, sentAttachments)
+      await send(content, sentAttachments, sendOpts)
       // send() sets `error` (without starting a stream) when the send fails —
       // e.g. a stale provider override. Restore the draft so it isn't lost.
       const st = useChatStore.getState()
@@ -537,6 +559,25 @@ export default function Composer(): ReactElement {
                 ))}
               </select>
             )}
+            <button
+              type="button"
+              className={`btn-icon composer-attach composer-moa-toggle${compareOn ? ' active' : ''}`}
+              aria-pressed={compareOn}
+              aria-label={
+                compareOn
+                  ? `Compare mode on (${comparePreset?.name ?? ''}) — click to turn off`
+                  : 'Turn on compare mode — ask several models side by side'
+              }
+              title={
+                compareOn
+                  ? `Compare: the models of "${comparePreset?.name}" answer side by side`
+                  : 'Compare — ask several models side by side and pick the best answer'
+              }
+              disabled={!conversation || isStreaming || !comparePreset}
+              onClick={() => setCompareOn((v) => !v)}
+            >
+              VS
+            </button>
           </div>
         )}
         {(slashVisible || mentionVisible) && (
