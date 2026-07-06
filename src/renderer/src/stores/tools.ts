@@ -16,6 +16,7 @@ import type {
   CustomToolInput,
   CustomToolPatch,
   ToolApprovalRequest,
+  ToolApprovalScope,
   ToolDefinition,
   ToolPermissionDecision,
   ToolRiskLevel,
@@ -57,8 +58,11 @@ export interface ToolsStoreState {
   customDelete(toolId: string): Promise<void>
   /** Enqueues an approval request pushed from main (deduped by requestId). */
   setPendingApproval(req: ToolApprovalRequest): void
-  /** Answers the head request and dequeues it, revealing the next. */
-  respond(approved: boolean): Promise<void>
+  /**
+   * Answers the head request and dequeues it, revealing the next. Scope
+   * 'conversation' also auto-approves the tool's future calls there.
+   */
+  respond(approved: boolean, scope?: ToolApprovalScope): Promise<void>
   /**
    * Drops a request that main settled on its own (timeout/abort/stopAll) so a
    * stale dialog auto-dismisses without the user having to answer it.
@@ -147,7 +151,7 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
       )
     },
 
-    async respond(approved) {
+    async respond(approved, scope) {
       const pending = get().approvalQueue[0]
       if (!pending) return
       // Dequeue first so the dialog advances to the next request and cannot
@@ -156,7 +160,7 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
         approvalQueue: s.approvalQueue.filter((r) => r.requestId !== pending.requestId),
       }))
       try {
-        await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved))
+        await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved, scope))
       } catch (e) {
         toastError('Could not deliver the approval response', e)
       }

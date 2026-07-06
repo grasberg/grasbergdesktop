@@ -401,46 +401,113 @@ kbd {
   color: var(--text);
 }
 
-/* "New task" / "Projects" links under the mode tabs. */
-.sidebar-links {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.sidebar-link {
+/* Header above the grouped Projects & tasks tree. */
+.sidebar-section-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text);
-  font-size: 0.83rem;
-  text-align: left;
-  cursor: pointer;
+  justify-content: space-between;
+  padding: 8px 10px 4px 14px;
+  border-top: 1px solid var(--border);
 }
 
-.sidebar-link:hover,
-.sidebar-link:focus-visible {
-  background: var(--bg-hover);
+.sidebar-section-title {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
-.sidebar-link.active {
-  background: var(--bg-active);
-}
-
-.sidebar-link .kbd {
-  margin-left: auto;
-}
-
-.conv-list {
+/* The single scrollable Projects/Tasks tree. */
+.tree-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   margin: 0;
   padding: 2px 8px 8px;
   list-style: none;
+}
+
+.task-group {
+  list-style: none;
+}
+
+.task-group + .task-group {
+  margin-top: 2px;
+}
+
+.task-group-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+
+.task-group-head:hover,
+.task-group-head:focus-within {
+  background: var(--bg-hover);
+}
+
+.task-group-toggle-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-group-chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+
+.task-group-chevron.open {
+  transform: rotate(90deg);
+}
+
+.task-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.task-group-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Nested task rows under a group, indented beneath the chevron. */
+.task-group-list {
+  margin: 0 0 2px;
+  padding: 0 0 0 14px;
+  list-style: none;
+}
+
+.task-group-empty {
+  padding: 5px 8px 6px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
 }
 
 .conv-item {
@@ -512,8 +579,56 @@ kbd {
 }
 
 .conv-item:hover .conv-actions,
-.conv-item:focus-within .conv-actions {
+.conv-item:focus-within .conv-actions,
+.task-group-head:hover .conv-actions,
+.task-group-head:focus-within .conv-actions {
   display: flex;
+}
+
+/* Move-to-project popover on a conversation row. */
+.conv-move {
+  position: relative;
+  display: inline-flex;
+}
+
+.conv-move-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+.conv-move-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conv-move-item:hover {
+  background: var(--bg-hover);
+}
+
+.conv-move-item.active {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .conv-confirm {

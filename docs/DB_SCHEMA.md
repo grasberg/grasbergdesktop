@@ -43,6 +43,9 @@ The schema is currently at **version 10**:
 | 8 | `conversation-modes-write-design` | widens `conversations.mode` to include `write`/`design` (FK-safe rebuild, runs outside a transaction with `foreign_keys` off) |
 | 9 | `documents` | `documents` table (Write docs + Design HTML prototypes) |
 | 10 | `workflows` | `workflows` table (visual node-graph workflows) |
+| 16 | `projects` | `projects` table (per-mode task grouping) + `conversations.project_ref` |
+| 17 | `mixture-of-agents` | `conversations.moa_preset_id` + `messages.moa_references_json` (Mixture of Agents; presets live in `settings`) |
+| 18 | `code-change-reverted-status` | widens `code_changes.status` CHECK with `'reverted'` (in-app undo of applied changes; table rebuild — no FK-off dance needed, `code_changes` has no FK children) |
 
 ## Tables
 
@@ -172,20 +175,40 @@ One row per conversation in any mode (maps to `Conversation`).
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `mode` | TEXT | `chat` \| `cowork` \| `code` (CHECK), default `chat` |
+| `mode` | TEXT | `chat` \| `cowork` \| `code` \| `write` \| `design` (CHECK, v8), default `chat` |
 | `title` | TEXT | default `'New chat'` |
 | `provider_id` | TEXT nullable | per-conversation override; NULL = global default |
 | `model_id` | TEXT nullable | per-conversation override |
 | `system_prompt` | TEXT nullable | |
 | `params_json` | TEXT | `ChatParams` JSON, default `'{}'` |
 | `workspace_id` | TEXT nullable | owning Cowork workspace (cowork mode) |
-| `project_id` | TEXT nullable | owning Code project (code mode) |
+| `project_id` | TEXT nullable | owning Code project/folder (code mode) |
+| `project_ref` | TEXT nullable | organizational Project this task is filed under (v16); NULL = unfiled |
+| `moa_preset_id` | TEXT nullable | Mixture-of-Agents preset this conversation runs through (v17); NULL = ordinary single-model. The preset itself lives in `settings.moaPresets` |
 | `summary_text` | TEXT nullable | context-compaction summary of older turns (v6) |
 | `summary_through_seq` | INTEGER nullable | highest message seq the summary covers (v6) |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
 Indexes: `idx_conversations_updated (updated_at DESC)` for the sidebar list,
-`idx_conversations_mode (mode, updated_at DESC)` for per-mode filtering.
+`idx_conversations_mode (mode, updated_at DESC)` for per-mode filtering,
+`idx_conversations_project (project_ref)` for per-project filtering (v16).
+
+### `projects` (v16)
+
+One row per organizational project (maps to `Project`): a per-mode folder that
+groups conversations in the sidebar. Orthogonal to Cowork workspaces and Code
+folders. A conversation links to at most one project of its own mode via
+`conversations.project_ref`; deleting a project unfiles its tasks (repository
+sets their `project_ref` to NULL — there is no FK/cascade).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `mode` | TEXT | `chat` \| `cowork` \| `code` \| `write` \| `design` (CHECK) |
+| `name` | TEXT | display name |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+Index: `idx_projects_mode (mode, updated_at DESC)` for the per-mode project list.
 
 ### `messages`
 
@@ -207,8 +230,9 @@ covers audit needs where they matter.
 | `tool_calls_json` | TEXT nullable | `ToolCallRecord[]` JSON |
 | `status` | TEXT | `complete` \| `streaming` \| `error` \| `stopped` (CHECK) |
 | `error_json` | TEXT nullable | `NormalizedError` JSON (already redacted) |
-| `provider_id`, `model_id` | TEXT nullable | provider/model actually used for this message |
+| `provider_id`, `model_id` | TEXT nullable | provider/model actually used for this message (the aggregator model for a MoA message) |
 | `usage_json` | TEXT nullable | `TokenUsage` JSON |
+| `moa_references_json` | TEXT nullable | `MoaReferenceOutput[]` JSON — the advisor model outputs behind a Mixture-of-Agents answer (v17) |
 | `seq` | INTEGER | order within the conversation |
 | `created_at` | INTEGER | unix ms |
 
@@ -222,7 +246,9 @@ such rows are marked `stopped` at next boot.
 App settings as key/value rows with JSON values. At read time the stored
 values are **merged over `DEFAULT_SETTINGS`** (from `src/shared/types.ts`), so
 new settings get defaults without a migration and only user-changed values are
-persisted.
+persisted. Structured values ride along as JSON here too — e.g. `modeModels` and
+the Mixture-of-Agents `moaPresets` (`MoaPreset[]`) / `defaultMoaPresetId` (v17,
+no dedicated table).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -285,7 +311,7 @@ the user explicitly applies a change.
 | `diff` | TEXT | unified diff for display, default `''` |
 | `new_content` | TEXT nullable | full new content used when applying create/edit |
 | `old_content` | TEXT nullable | file content captured at proposal time (migration v3) |
-| `status` | TEXT | `proposed` \| `applied` \| `rejected` (CHECK), default `proposed` |
+| `status` | TEXT | `proposed` \| `applied` \| `rejected` \| `reverted` (CHECK, v18), default `proposed` |
 | `created_at` | INTEGER | unix ms |
 | `applied_at` | INTEGER nullable | unix ms |
 

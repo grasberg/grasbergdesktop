@@ -51,6 +51,8 @@ export interface CodeStoreState {
   loadChanges(): Promise<void>
   applyChange(id: string): Promise<void>
   rejectChange(id: string): Promise<void>
+  /** Restores the pre-change content of an APPLIED change (in-app undo). */
+  revertChange(id: string): Promise<void>
   /**
    * Reads every selected file and converts it to an Attachment.
    * Returns null when a read failed (already toasted).
@@ -226,6 +228,23 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
     } catch (e) {
       set({ busyChangeId: null })
       toastError(e, 'Rejecting the change')
+    }
+  },
+
+  async revertChange(id) {
+    set({ busyChangeId: id })
+    try {
+      const updated = await unwrap(window.uld.code.changeRevert(id))
+      set((s) => ({
+        changes: s.changes.map((c) => (c.id === id ? updated : c)),
+        busyChangeId: null,
+      }))
+      // Reverting a create removes the file (and a delete restores one).
+      void get().loadTree()
+      useUiStore.getState().toast(`Reverted change to ${updated.filePath}`, 'success')
+    } catch (e) {
+      set({ busyChangeId: null })
+      toastError(e, 'Reverting the change')
     }
   },
 

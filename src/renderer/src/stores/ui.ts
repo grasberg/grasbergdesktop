@@ -10,21 +10,15 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   paletteOpen: false,
   shortcutsOpen: false,
   workflowsOpen: false,
-  projectsOpen: false,
   toasts: [],
 
   setResolvedTheme(t) {
     set({ resolvedTheme: t })
   },
 
-  // Workflows and Projects both replace the main area, so opening one
-  // closes the other.
+  // The Workflows builder replaces the main area when open.
   openWorkflows(open) {
-    set((s) => ({ workflowsOpen: open, projectsOpen: open ? false : s.projectsOpen }))
-  },
-
-  openProjects(open) {
-    set((s) => ({ projectsOpen: open, workflowsOpen: open ? false : s.workflowsOpen }))
+    set({ workflowsOpen: open })
   },
 
   openSettings(open) {

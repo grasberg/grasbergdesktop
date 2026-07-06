@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { AuthMode, ProviderConfig, ProviderType } from '@shared/types'
+import type { AuthMode, ModelInfo, ProviderConfig, ProviderType } from '@shared/types'
 import { isAllowedBaseUrl } from '@shared/schemas'
 import { CHATGPT_OAUTH_DEFAULT_MODEL } from '@shared/catalog'
 import { presetMeta, presetMetaList } from '@shared/presets'
 import { errorMessage } from '@/api/uld'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
+
+const CUSTOM = '__custom__'
 
 export function validateBaseUrl(type: ProviderType, baseUrl: string): string | null {
   const trimmed = baseUrl.trim()
@@ -53,6 +55,10 @@ export function ProviderAddForm(props: {
   const [authMode, setAuthMode] = useState<AuthMode>('api_key')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  // Live model list fetched from the provider (null = not fetched yet).
+  const [models, setModels] = useState<ModelInfo[] | null>(null)
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [customModel, setCustomModel] = useState(false)
 
   const familyMeta = types.find((t) => t.type === type)
   const presetEntry = presetId ? presetMeta(presetId) : undefined
@@ -66,6 +72,12 @@ export function ProviderAddForm(props: {
     ? `OpenAI-compatible preset · ${presetEntry.baseUrl}`
     : familyMeta?.hint
 
+  /** Drops the fetched model list (call whenever the provider/credentials change). */
+  function resetModels(): void {
+    setModels(null)
+    setCustomModel(false)
+  }
+
   // Prefill from a selected family (its catalog metadata).
   function applyFamily(t: ProviderType): void {
     const m = types.find((x) => x.type === t)
@@ -77,6 +89,7 @@ export function ProviderAddForm(props: {
       setDefaultModelId(m.defaultModelId)
     }
     setAuthMode('api_key')
+    resetModels()
   }
 
   // Prefill from a selected preset (maps onto the openai-compatible adapter).
@@ -89,6 +102,35 @@ export function ProviderAddForm(props: {
     setBaseUrl(p.baseUrl)
     setDefaultModelId(p.defaultModelId)
     setAuthMode('api_key')
+    resetModels()
+  }
+
+  /** Fetch the provider's active models with the entered credentials. */
+  async function loadModels(): Promise<void> {
+    setLoadingModels(true)
+    try {
+      const res = await window.uld.providers.previewModels({
+        type,
+        baseUrl: baseUrl.trim() || undefined,
+        apiKey: apiKey.trim() || undefined,
+        presetId: presetId ?? undefined,
+        authMode,
+      })
+      if (!res.ok) {
+        toast(res.error.message, 'error')
+        return
+      }
+      setModels(res.data)
+      // Keep the current model when it's in the live list; otherwise fall back to
+      // the custom text field so the user's choice isn't silently discarded.
+      const inList = res.data.some((m) => m.id === defaultModelId)
+      setCustomModel(res.data.length === 0 || !inList)
+      if (res.data.length === 0) toast('No models returned — enter a model id manually.', 'info')
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    } finally {
+      setLoadingModels(false)
+    }
   }
 
   // Prefill the initial family once the type list has loaded.
@@ -188,6 +230,7 @@ export function ProviderAddForm(props: {
             onChange={(e) => {
               const mode = e.target.value as AuthMode
               setAuthMode(mode)
+              resetModels()
               // ChatGPT-login uses a Codex-backend model, not the API default.
               if (mode === 'chatgpt_oauth') setDefaultModelId(CHATGPT_OAUTH_DEFAULT_MODEL)
               else if (familyMeta) setDefaultModelId(familyMeta.defaultModelId)
@@ -236,14 +279,55 @@ export function ProviderAddForm(props: {
         <label className="field-label" htmlFor="prov-add-model">
           Default model
         </label>
-        <input
-          id="prov-add-model"
-          className="input mono"
-          value={defaultModelId}
-          onChange={(e) => setDefaultModelId(e.target.value)}
-          placeholder="model id"
-          spellCheck={false}
-        />
+        {models && models.length > 0 ? (
+          <select
+            id="prov-add-model-select"
+            className="select"
+            aria-label="Default model"
+            value={customModel || !models.some((m) => m.id === defaultModelId) ? CUSTOM : defaultModelId}
+            onChange={(e) => {
+              if (e.target.value === CUSTOM) {
+                setCustomModel(true)
+                return
+              }
+              setCustomModel(false)
+              setDefaultModelId(e.target.value)
+            }}
+          >
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label ?? m.id}
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom model id…</option>
+          </select>
+        ) : null}
+        {!models || models.length === 0 || customModel ? (
+          <input
+            id="prov-add-model"
+            className="input mono"
+            value={defaultModelId}
+            onChange={(e) => setDefaultModelId(e.target.value)}
+            placeholder="model id"
+            spellCheck={false}
+          />
+        ) : null}
+        <div className="provider-model-load">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => void loadModels()}
+            disabled={loadingModels}
+          >
+            {loadingModels ? <span className="spinner" aria-hidden="true" /> : null}
+            {models ? 'Reload models' : 'Load models'}
+          </button>
+          <span className="field-hint">
+            {isOauth
+              ? 'Lists the models the ChatGPT backend accepts.'
+              : 'Fetches the provider’s active models (enter the base URL and API key first).'}
+          </span>
+        </div>
       </div>
 
       {isOauth ? (

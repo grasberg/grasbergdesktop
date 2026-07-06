@@ -1,14 +1,136 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { ChatParams } from '@shared/types'
+import type { ChatParams, ConversationMode, ModeModelDefault } from '@shared/types'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
 
 const CUSTOM = '__custom__'
 
+const MODE_LABELS: ReadonlyArray<{ mode: ConversationMode; label: string }> = [
+  { mode: 'chat', label: 'Chat' },
+  { mode: 'cowork', label: 'Cowork' },
+  { mode: 'code', label: 'Code' },
+  { mode: 'write', label: 'Write' },
+  { mode: 'design', label: 'Design' },
+]
+
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
+}
+
+/** One mode's provider + model picker for the per-mode defaults section. */
+function ModeModelRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: ModeModelDefault
+  onChange: (next: ModeModelDefault) => void
+}): React.JSX.Element {
+  const providers = useProvidersStore((s) => s.providers)
+  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
+  const loadModels = useProvidersStore((s) => s.loadModels)
+
+  const [customMode, setCustomMode] = useState(false)
+  const [customDraft, setCustomDraft] = useState(value.modelId ?? '')
+
+  const provider = providers.find((p) => p.id === value.providerId) ?? null
+  const enabledProviders = providers.filter((p) => p.enabled)
+  const models = provider ? modelsByProvider[provider.id] ?? [] : []
+  const inList = models.some((m) => m.id === value.modelId)
+  const showCustom =
+    !!provider && (customMode || models.length === 0 || (!!value.modelId && !inList))
+
+  useEffect(() => setCustomDraft(value.modelId ?? ''), [value.modelId])
+
+  // Fetch models for the picked provider (cached in the store).
+  useEffect(() => {
+    if (!provider || modelsByProvider[provider.id]) return
+    void loadModels(provider.id).catch(() => {
+      // Best-effort; the custom model input still works.
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider?.id])
+
+  const onProviderChange = (id: string): void => {
+    setCustomMode(false)
+    onChange(id ? { providerId: id, modelId: null } : { providerId: null, modelId: null })
+  }
+
+  const onModelSelect = (v: string): void => {
+    if (v === CUSTOM) {
+      setCustomMode(true)
+      setCustomDraft(value.modelId ?? '')
+      return
+    }
+    setCustomMode(false)
+    onChange({ providerId: value.providerId, modelId: v || null })
+  }
+
+  const commitCustom = (): void =>
+    onChange({ providerId: value.providerId, modelId: customDraft.trim() || null })
+
+  return (
+    <div className="mode-model-row">
+      <span className="mode-model-label">{label}</span>
+      <select
+        className="select"
+        aria-label={`${label} provider`}
+        value={value.providerId ?? ''}
+        onChange={(e) => onProviderChange(e.target.value)}
+      >
+        <option value="">Use default</option>
+        {enabledProviders.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+        {provider && !provider.enabled ? (
+          <option value={provider.id}>{provider.label} (disabled)</option>
+        ) : null}
+      </select>
+      {provider ? (
+        showCustom ? (
+          <input
+            className="input mono"
+            aria-label={`${label} custom model id`}
+            value={customDraft}
+            placeholder="model id"
+            spellCheck={false}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onBlur={commitCustom}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                commitCustom()
+              }
+            }}
+          />
+        ) : (
+          <select
+            className="select"
+            aria-label={`${label} model`}
+            value={value.modelId ?? ''}
+            onChange={(e) => onModelSelect(e.target.value)}
+          >
+            <option value="">
+              Provider default{provider.defaultModelId ? ` (${provider.defaultModelId})` : ''}
+            </option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label ?? m.id}
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom model id…</option>
+          </select>
+        )
+      ) : (
+        <span className="field-hint mode-model-hint">Uses the default above.</span>
+      )}
+    </div>
+  )
 }
 
 export default function DefaultsTab() {
@@ -181,6 +303,37 @@ export default function DefaultsTab() {
         {!provider ? <span className="field-hint">Pick a provider first.</span> : null}
       </div>
 
+      <h4 className="section-subhead">Model per mode</h4>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings.perModeModelsEnabled}
+          onChange={(e) => void persist({ perModeModelsEnabled: e.target.checked })}
+        />
+        <span>
+          Use a different model for each mode
+          <span className="field-hint">
+            Off: every mode uses the default provider/model above. On: a new conversation in each
+            mode starts with the model you pick below — modes left as “Use default” fall back to the
+            default above. You can still change any conversation’s model afterwards.
+          </span>
+        </span>
+      </label>
+      {settings.perModeModelsEnabled ? (
+        <div className="mode-model-list">
+          {MODE_LABELS.map(({ mode, label }) => (
+            <ModeModelRow
+              key={mode}
+              label={label}
+              value={settings.modeModels[mode]}
+              onChange={(next) =>
+                void persist({ modeModels: { ...settings.modeModels, [mode]: next } })
+              }
+            />
+          ))}
+        </div>
+      ) : null}
+
       <div className="settings-field">
         <label className="field-label" htmlFor="def-system-prompt">
           Default system prompt
@@ -277,6 +430,35 @@ export default function DefaultsTab() {
           onKeyDown={commitOnEnter(commitParams)}
         />
       </div>
+
+      <div className="param-row">
+        <label className="field-label" htmlFor="def-reasoning">
+          Reasoning effort
+        </label>
+        <span className="param-spacer" aria-hidden="true" />
+        <select
+          id="def-reasoning"
+          className="select param-num wide"
+          value={settings.defaultParams.reasoningEffort ?? ''}
+          onChange={(e) => {
+            const params: ChatParams = { ...settings.defaultParams }
+            const v = e.target.value
+            if (v === 'low' || v === 'medium' || v === 'high') params.reasoningEffort = v
+            else delete params.reasoningEffort
+            void persist({ defaultParams: params })
+          }}
+        >
+          <option value="">Provider default</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+      <p className="field-hint">
+        How much thinking reasoning-capable models spend before answering. Sent as
+        reasoning_effort (OpenAI-style), an extended-thinking budget (Anthropic) or a thinking
+        budget (Gemini); models without reasoning ignore it.
+      </p>
 
       <h4 className="section-subhead">Long conversations</h4>
       <label className="field-checkbox">

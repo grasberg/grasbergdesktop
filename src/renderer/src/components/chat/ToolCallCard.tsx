@@ -55,6 +55,12 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCallRecord }): ReactElement 
           <pre className="tool-call-pre tool-call-args mono">{args}</pre>
         </details>
       ) : null}
+      {!toolCall.result && toolCall.liveOutput ? (
+        <details className="tool-call-details" open>
+          <summary className="tool-call-summary">Live output</summary>
+          <pre className="tool-call-pre tool-call-result">{toolCall.liveOutput}</pre>
+        </details>
+      ) : null}
       {toolCall.result ? (
         <details className="tool-call-details">
           <summary className="tool-call-summary">Result</summary>

@@ -1,15 +1,20 @@
 /**
  * ApprovalBroker: pending tool approvals resolve via respond(), time out to
- * false, ignore unknown ids, and broadcast a well-formed ToolApprovalRequest.
+ * declined, ignore unknown ids, and broadcast a well-formed ToolApprovalRequest.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ToolApprovalRequest } from '@shared/types'
+import type { ToolApprovalAnswer, ToolApprovalRequest } from '@shared/types'
 import { CHANNELS } from '@shared/ipc'
 import {
   APPROVAL_TIMEOUT_MS,
+  APPROVAL_DECLINED,
   ApprovalBroker,
 } from '../../../src/main/services/approval-broker'
+
+const ALLOW_ONCE: ToolApprovalAnswer = { approved: true, scope: 'once' }
+const ALLOW_CONVERSATION: ToolApprovalAnswer = { approved: true, scope: 'conversation' }
+const DECLINE: ToolApprovalAnswer = { approved: false, scope: 'once' }
 
 function baseRequest(): Omit<ToolApprovalRequest, 'requestId'> {
   return {
@@ -40,9 +45,9 @@ function capture(): { broadcasts: CapturedBroadcast[]; broadcast: (c: string, p:
 }
 
 /** Observes settlement without awaiting (the promise may stay pending). */
-function settlement(promise: Promise<boolean>): Promise<string> {
+function settlement(promise: Promise<ToolApprovalAnswer>): Promise<string> {
   return Promise.race([
-    promise.then((v) => `settled:${v}`),
+    promise.then((v) => `settled:${v.approved}`),
     // One macro/micro tick is enough — settle wins the race if it happened.
     new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 0)),
   ])
@@ -53,23 +58,32 @@ afterEach(() => {
 })
 
 describe('ApprovalBroker', () => {
-  it('resolves true when the renderer approves', async () => {
+  it('resolves approved when the renderer approves', async () => {
     const broker = new ApprovalBroker()
     const { broadcasts, broadcast } = capture()
     const promise = broker.request(baseRequest(), broadcast)
 
     expect(broadcasts).toHaveLength(1)
-    broker.respond(broadcasts[0].payload.requestId, true)
-    await expect(promise).resolves.toBe(true)
+    broker.respond(broadcasts[0].payload.requestId, ALLOW_ONCE)
+    await expect(promise).resolves.toEqual(ALLOW_ONCE)
   })
 
-  it('resolves false when the renderer declines', async () => {
+  it('carries the conversation scope through to the resolver', async () => {
     const broker = new ApprovalBroker()
     const { broadcasts, broadcast } = capture()
     const promise = broker.request(baseRequest(), broadcast)
 
-    broker.respond(broadcasts[0].payload.requestId, false)
-    await expect(promise).resolves.toBe(false)
+    broker.respond(broadcasts[0].payload.requestId, ALLOW_CONVERSATION)
+    await expect(promise).resolves.toEqual(ALLOW_CONVERSATION)
+  })
+
+  it('resolves declined when the renderer declines', async () => {
+    const broker = new ApprovalBroker()
+    const { broadcasts, broadcast } = capture()
+    const promise = broker.request(baseRequest(), broadcast)
+
+    broker.respond(broadcasts[0].payload.requestId, DECLINE)
+    await expect(promise).resolves.toEqual(DECLINE)
   })
 
   it('broadcasts the full ToolApprovalRequest on the approval push channel', async () => {
@@ -98,11 +112,11 @@ describe('ApprovalBroker', () => {
     const second = broker.request(baseRequest(), broadcast)
     expect(broadcasts[1].payload.requestId).not.toBe(sent.requestId)
     broker.stopAll()
-    await expect(promise).resolves.toBe(false)
-    await expect(second).resolves.toBe(false)
+    await expect(promise).resolves.toEqual(APPROVAL_DECLINED)
+    await expect(second).resolves.toEqual(APPROVAL_DECLINED)
   })
 
-  it('times out to false after five minutes, and a late respond is ignored', async () => {
+  it('times out to declined after five minutes, and a late respond is ignored', async () => {
     vi.useFakeTimers()
     const broker = new ApprovalBroker()
     const { broadcasts, broadcast } = capture()
@@ -112,12 +126,12 @@ describe('ApprovalBroker', () => {
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS - 1)
     expect(broker.has(requestId)).toBe(true)
     vi.advanceTimersByTime(1)
-    await expect(promise).resolves.toBe(false)
+    await expect(promise).resolves.toEqual(APPROVAL_DECLINED)
     expect(broker.has(requestId)).toBe(false)
 
-    // Late/duplicate answer: no throw, and the settled value stays false.
-    expect(() => broker.respond(requestId, true)).not.toThrow()
-    await expect(promise).resolves.toBe(false)
+    // Late/duplicate answer: no throw, and the settled value stays declined.
+    expect(() => broker.respond(requestId, ALLOW_ONCE)).not.toThrow()
+    await expect(promise).resolves.toEqual(APPROVAL_DECLINED)
   })
 
   it('ignores unknown requestIds and leaves pending requests untouched', async () => {
@@ -125,29 +139,29 @@ describe('ApprovalBroker', () => {
     const { broadcasts, broadcast } = capture()
     const promise = broker.request(baseRequest(), broadcast)
 
-    expect(() => broker.respond('not-a-real-id', true)).not.toThrow()
+    expect(() => broker.respond('not-a-real-id', ALLOW_ONCE)).not.toThrow()
     expect(await settlement(promise)).toBe('pending')
 
-    broker.respond(broadcasts[0].payload.requestId, true)
-    await expect(promise).resolves.toBe(true)
+    broker.respond(broadcasts[0].payload.requestId, ALLOW_ONCE)
+    await expect(promise).resolves.toEqual(ALLOW_ONCE)
   })
 
-  it('stopAll resolves every pending request to false (quit safety)', async () => {
+  it('stopAll resolves every pending request to declined (quit safety)', async () => {
     const broker = new ApprovalBroker()
     const { broadcast } = capture()
     const first = broker.request(baseRequest(), broadcast)
     const second = broker.request(baseRequest(), broadcast)
 
     broker.stopAll()
-    await expect(first).resolves.toBe(false)
-    await expect(second).resolves.toBe(false)
+    await expect(first).resolves.toEqual(APPROVAL_DECLINED)
+    await expect(second).resolves.toEqual(APPROVAL_DECLINED)
   })
 
-  it('resolves false immediately when the broadcast itself throws', async () => {
+  it('resolves declined immediately when the broadcast itself throws', async () => {
     const broker = new ApprovalBroker()
     const promise = broker.request(baseRequest(), () => {
       throw new Error('window destroyed')
     })
-    await expect(promise).resolves.toBe(false)
+    await expect(promise).resolves.toEqual(APPROVAL_DECLINED)
   })
 })

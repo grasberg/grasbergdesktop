@@ -37,6 +37,8 @@ export interface WorkspacesRepository {
   getById(id: string): Workspace | null
   update(id: string, patch: WorkspacePatch): Workspace | null
   remove(id: string): void
+  /** Deletes every workspace (items cascade via FK). */
+  deleteAll(): void
   itemsList(workspaceId: string): WorkspaceItem[]
   /** Generates the id (crypto.randomUUID) and timestamps. */
   itemCreate(input: WorkspaceItemCreateInput): WorkspaceItem
@@ -212,6 +214,11 @@ export function createWorkspacesRepository(driver: SqliteDriver): WorkspacesRepo
     remove(id) {
       // Items cascade via FK.
       driver.run('DELETE FROM workspaces WHERE id = ?', [id])
+    },
+
+    deleteAll() {
+      // Items cascade via FK.
+      driver.run('DELETE FROM workspaces')
     },
 
     itemsList(workspaceId) {

@@ -1,32 +1,23 @@
 import { modKeyLabel } from '@/lib/platform'
-import { useConversationsStore } from '@/stores/conversations'
-import { toastError } from '@/stores/ui'
+import { newConversation } from '@/lib/new-conversation'
+import appIcon from '@/assets/icon.png'
 
 export default function EmptyState(): React.JSX.Element {
   const newChat = (): void => {
-    useConversationsStore
-      .getState()
-      .create('chat')
-      .catch((e: unknown) => {
-        toastError('Could not create chat', e)
-      })
+    newConversation('chat')
   }
 
   return (
     <div className="empty-state">
-      <svg width="56" height="56" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <rect x="1" y="1" width="22" height="22" rx="6" fill="var(--accent)" />
-        <path
-          d="M8 8 L16 8 M8 8 L8 16 M16 8 L8 16 M8 16 L16 16 M16 8 L16 16"
-          stroke="var(--accent-text)"
-          strokeWidth="1.1"
-          opacity="0.5"
-        />
-        <circle cx="8" cy="8" r="2.1" fill="var(--accent-text)" />
-        <circle cx="16" cy="8" r="2.1" fill="var(--accent-text)" opacity="0.8" />
-        <circle cx="8" cy="16" r="2.1" fill="var(--accent-text)" opacity="0.8" />
-        <circle cx="16" cy="16" r="2.1" fill="var(--accent-text)" opacity="0.6" />
-      </svg>
+      <img
+        src={appIcon}
+        width={56}
+        height={56}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        style={{ display: 'block' }}
+      />
       <h1 className="empty-title">Grasberg Desktop</h1>
       <p className="empty-subtitle">
         One local-first home for DeepSeek, GLM, MiniMax and any OpenAI-compatible model.

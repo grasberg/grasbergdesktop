@@ -105,6 +105,72 @@ function ToolTable({ tools }: { tools: ToolDefinition[] }): ReactElement {
 }
 
 // ---------------------------------------------------------------------------
+// Shell command allowlist
+// ---------------------------------------------------------------------------
+
+/**
+ * Command prefixes run_shell_command may run without the per-call approval
+ * dialog (e.g. "npm test"). One prefix per line; commands with chaining
+ * characters (;, &&, |, …) never match regardless.
+ */
+function ShellAllowlistEditor(): ReactElement {
+  const settings = useSettingsStore((s) => s.settings)
+  const updateSettings = useSettingsStore((s) => s.update)
+  const toast = useUiStore((s) => s.toast)
+  const stored = settings?.shellCommandAllowlist ?? []
+  const [text, setText] = useState(stored.join('\n'))
+  const [busy, run] = useAsyncAction()
+
+  const save = (): Promise<void> =>
+    run(async () => {
+      const entries = text
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(0, 100)
+      await updateSettings({ shellCommandAllowlist: entries })
+      toast(
+        entries.length > 0
+          ? `${entries.length} command prefix${entries.length === 1 ? '' : 'es'} will run without asking.`
+          : 'Allowlist cleared — every shell command asks again.',
+        'success'
+      )
+    })
+
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor="shell-allowlist">
+        Run without asking (command prefixes)
+      </label>
+      <textarea
+        id="shell-allowlist"
+        className="textarea mono"
+        rows={4}
+        placeholder={'npm test\ngit status\nnpx vitest run'}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <span className="field-hint">
+        One prefix per line. A command runs without the approval dialog when it equals a prefix or
+        continues it at a word boundary ("npm test -- --watch" matches "npm test"). Commands
+        containing <code>;</code>, <code>&amp;&amp;</code>, <code>|</code> or other chaining
+        characters always ask.
+      </span>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={busy || text.split('\n').map((l) => l.trim()).filter(Boolean).join('\n') === stored.join('\n')}
+          onClick={() => void save()}
+        >
+          {busy ? 'Saving…' : 'Save allowlist'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Custom tool form
 // ---------------------------------------------------------------------------
 
@@ -387,6 +453,7 @@ export default function ToolsTab(): ReactElement {
           </span>
         </span>
       </label>
+      {settings?.shellExecutionEnabled ? <ShellAllowlistEditor /> : null}
 
       <h4 className="section-subhead">Browser &amp; computer use</h4>
       <label className="field-checkbox">

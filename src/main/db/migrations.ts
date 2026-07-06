@@ -441,4 +441,73 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name)`,
     ],
   },
+  {
+    version: 16,
+    name: 'projects',
+    // Per-mode organizational projects: a lightweight folder that groups
+    // conversations within one mode. `conversations.project_ref` links a task
+    // to its project (nullable = unfiled). Adding a nullable column is a plain
+    // ALTER — no FK-safe rebuild is needed (that pattern is only for widening a
+    // CHECK constraint). Deleting a project unfiles its tasks in application
+    // code (projects repo), so no FK/cascade is declared on project_ref.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL CHECK (mode IN ('chat','cowork','code','write','design')),
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_projects_mode ON projects(mode, updated_at DESC)`,
+      `ALTER TABLE conversations ADD COLUMN project_ref TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_ref)`,
+    ],
+  },
+  {
+    version: 17,
+    name: 'mixture-of-agents',
+    // Mixture of Agents: a conversation can opt into a MoA preset (advisor
+    // models + aggregator). Presets live in AppSettings (settings repo), so no
+    // table is needed — only a nullable pointer column on conversations, plus a
+    // column on messages that persists the advisor outputs for the labelled
+    // reference blocks. Both are plain nullable ALTERs (no FK-safe rebuild —
+    // that pattern is only for widening a CHECK constraint).
+    statements: [
+      `ALTER TABLE conversations ADD COLUMN moa_preset_id TEXT`,
+      `ALTER TABLE messages ADD COLUMN moa_references_json TEXT`,
+    ],
+  },
+  {
+    version: 18,
+    name: 'code-change-reverted-status',
+    // Widen the code_changes.status CHECK with 'reverted' (an applied change
+    // whose pre-change content was restored). CHECKs can't be altered in
+    // place, so rebuild the table. Unlike the providers rebuilds (v11/v13)
+    // this needs NO noTransaction/foreign_keys-OFF dance: code_changes has no
+    // FK children, so dropping it cascades nothing.
+    statements: [
+      `CREATE TABLE code_changes_new (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES code_projects(id) ON DELETE CASCADE,
+        conversation_id TEXT,
+        file_path TEXT NOT NULL,
+        change_type TEXT NOT NULL CHECK (change_type IN ('create','edit','delete')),
+        diff TEXT NOT NULL DEFAULT '',
+        new_content TEXT,
+        old_content TEXT,
+        status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed','applied','rejected','reverted')),
+        created_at INTEGER NOT NULL,
+        applied_at INTEGER
+      )`,
+      `INSERT INTO code_changes_new
+         (id, project_id, conversation_id, file_path, change_type, diff,
+          new_content, old_content, status, created_at, applied_at)
+       SELECT id, project_id, conversation_id, file_path, change_type, diff,
+          new_content, old_content, status, created_at, applied_at
+       FROM code_changes`,
+      `DROP TABLE code_changes`,
+      `ALTER TABLE code_changes_new RENAME TO code_changes`,
+      `CREATE INDEX IF NOT EXISTS idx_code_changes ON code_changes(project_id, created_at DESC)`,
+    ],
+  },
 ]

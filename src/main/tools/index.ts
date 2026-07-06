@@ -71,6 +71,10 @@ export interface CreateToolSystemOptions {
   mcp?: ToolMcpSource
   /** Whether run_shell_command may execute (user opt-in). */
   shellEnabled?: () => boolean
+  /** Command prefixes that skip the per-call shell approval dialog. */
+  shellAllowlist?: () => string[]
+  /** Background shell jobs (run_shell_command background=true). */
+  shellBackground?: NonNullable<ToolExecutorDeps['shellBackground']>
   /** Whether the browser/computer tools may run (user opt-in). */
   browserEnabled?: () => boolean
   /** Embedded browser backing the browser/computer tools. */
@@ -108,6 +112,8 @@ export function createToolSystem(
     repoMap: new RepoMapService(),
     mcpClient: options.mcp ?? null,
     shellEnabled: options.shellEnabled,
+    shellAllowlist: options.shellAllowlist,
+    shellBackground: options.shellBackground ?? null,
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
     delegate: options.delegate,

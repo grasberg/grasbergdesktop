@@ -26,7 +26,13 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { Conversation, ToolApprovalRequest, ToolCallRecord, ToolDefinition } from '@shared/types'
+import type {
+  Conversation,
+  ToolApprovalAnswer,
+  ToolApprovalRequest,
+  ToolCallRecord,
+  ToolDefinition,
+} from '@shared/types'
 import type { CodeReadFileResult } from '@shared/ipc'
 import { encodeTaskList, type TaskListItem } from '@shared/tasklist'
 import { redactKnownSecrets, redactSecrets } from '../providers/redact'
@@ -35,6 +41,7 @@ import { capToolResult } from './definitions'
 import { customToolHeaders } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
+import { commandMatchesAllowlist } from './shell-allowlist'
 import { runGitQuery } from './git'
 import type { ToolRegistry } from './registry'
 
@@ -81,6 +88,17 @@ export interface ToolExecutorDeps {
   mcpClient?: { callTool(toolId: string, args: Record<string, unknown>): Promise<string> } | null
   /** Whether run_shell_command may actually execute (user opt-in). */
   shellEnabled?: () => boolean
+  /**
+   * Command prefixes that skip the per-call approval dialog (still requires
+   * shellEnabled; a 'deny' permission still wins). See shell-allowlist.ts.
+   */
+  shellAllowlist?: () => string[]
+  /**
+   * Long-running shell jobs (run_shell_command background=true): start()
+   * returns a model-readable note with the task id, pollable via task_output
+   * and stoppable via task_stop. Absent => background runs are refused.
+   */
+  shellBackground?: { start(command: string, cwd: string): string } | null
   /** Whether the browser/computer tools may run (user opt-in). */
   browserEnabled?: () => boolean
   /** Embedded browser for the browser/computer tools. */
@@ -132,14 +150,19 @@ export interface ToolExecuteContext {
   /** Stream this call belongs to (forwarded into the approval request). */
   streamId?: string
   /**
-   * Asks the user. Resolve true to run the tool, false to decline.
+   * Asks the user. The answer carries approved plus a scope: 'conversation'
+   * also auto-approves the tool's future calls in this conversation.
    * The integration layer generates the requestId and routes the answer.
    */
-  approval: (req: Omit<ToolApprovalRequest, 'requestId'>) => Promise<boolean>
+  approval: (req: Omit<ToolApprovalRequest, 'requestId'>) => Promise<ToolApprovalAnswer>
   /** Shows an ask_user_question dialog; null = dismissed/unanswered. */
   askUser?: (question: string, options: string[]) => Promise<string | null>
   /** Plan mode (code conversations): mutating tools are refused. */
   planMode?: boolean
+  /** Auto-accept edits: edit_file/write_file skip the approval dialog. */
+  autoAcceptEdits?: boolean
+  /** Receives live output chunks from long-running tools (shell commands). */
+  onToolOutput?: (toolCallId: string, chunk: string) => void
 }
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
@@ -158,6 +181,8 @@ const SEARCH_LINE_MAX_CHARS = 240
 const WALK_MAX_ENTRIES = 20_000
 const WALK_MAX_DEPTH = 24
 const SHELL_TIMEOUT_MS = 60_000
+/** run_shell_command timeoutSeconds is clamped to [1, this]. */
+const SHELL_MAX_TIMEOUT_SEC = 600
 const GREP_DEFAULT_RESULTS = 40
 const GREP_MAX_RESULTS = 100
 const GLOB_DEFAULT_RESULTS = 50
@@ -534,6 +559,13 @@ export function parseDuckDuckGoHtml(html: string, maxResults: number): WebSearch
 // ---------------------------------------------------------------------------
 
 export class ToolExecutor {
+  /**
+   * Tools the user approved with scope 'conversation':
+   * conversationId -> tool ids that skip the approval dialog there.
+   * In-memory only — grants die with the app session, never persisted.
+   */
+  private readonly conversationApprovals = new Map<string, Set<string>>()
+
   constructor(private readonly deps: ToolExecutorDeps) {}
 
   /**
@@ -589,23 +621,58 @@ export class ToolExecutor {
     if (decision === 'deny') {
       return `The user has denied the tool '${definition.name}' in this app's settings; it was not run.`
     }
-    if (decision === 'ask') {
-      const approved = await ctx.approval({
+    if (decision === 'ask' && !this.approvalPreGranted(definition, args, ctx)) {
+      const answer = await ctx.approval({
         streamId: ctx.streamId ?? '',
         conversationId: ctx.conversation.id,
         toolCall,
         risk: definition.risk,
       })
-      if (!approved) return USER_DECLINED_RESULT
+      if (!answer.approved) return USER_DECLINED_RESULT
+      if (answer.scope === 'conversation') {
+        let allowed = this.conversationApprovals.get(ctx.conversation.id)
+        if (!allowed) {
+          allowed = new Set()
+          this.conversationApprovals.set(ctx.conversation.id, allowed)
+        }
+        allowed.add(definition.id)
+      }
     }
 
-    return this.runTool(definition, args, ctx)
+    return this.runTool(definition, args, ctx, toolCall)
+  }
+
+  /**
+   * Standing grants that let an 'ask' tool run without the dialog:
+   * - an earlier "allow for this conversation" answer for the same tool,
+   * - auto-accept-edits mode for the file-editing tools,
+   * - a shell command covered by the user's prefix allowlist.
+   */
+  private approvalPreGranted(
+    definition: ToolDefinition,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): boolean {
+    if (this.conversationApprovals.get(ctx.conversation.id)?.has(definition.id)) return true
+    if (
+      ctx.autoAcceptEdits === true &&
+      (definition.id === 'edit_file' || definition.id === 'write_file')
+    ) {
+      return true
+    }
+    if (definition.id === 'run_shell_command') {
+      const command = getString(args, 'command') ?? ''
+      const allowlist = this.deps.shellAllowlist?.() ?? []
+      if (allowlist.length > 0 && commandMatchesAllowlist(command, allowlist)) return true
+    }
+    return false
   }
 
   private async runTool(
     definition: ToolDefinition,
     args: Record<string, unknown>,
-    ctx: ToolExecuteContext
+    ctx: ToolExecuteContext,
+    toolCall: ToolCallRecord
   ): Promise<string> {
     switch (definition.id) {
       case 'file_search':
@@ -641,7 +708,7 @@ export class ToolExecutor {
       case 'propose_shell_command':
         return this.runProposeShellCommand(args)
       case 'run_shell_command':
-        return this.runShellCommand(args, ctx)
+        return this.runShellCommand(args, ctx, toolCall)
       case 'use_skill':
         return this.runUseSkill(args)
       case 'delegate':
@@ -1286,7 +1353,8 @@ export class ToolExecutor {
 
   private async runShellCommand(
     args: Record<string, unknown>,
-    ctx: ToolExecuteContext
+    ctx: ToolExecuteContext,
+    toolCall: ToolCallRecord
   ): Promise<string> {
     if (!this.deps.shellEnabled?.()) {
       return 'Error: shell command execution is disabled. The user can enable it in Settings → Tools.'
@@ -1296,10 +1364,23 @@ export class ToolExecutor {
     const [command, commandError] = requireStringArg(args, 'command')
     if (commandError) return commandError
 
-    const result = await runShell(command, root, SHELL_TIMEOUT_MS)
+    // Long-running work (dev servers, watch modes): detach as a background
+    // job pollable via task_output / stoppable via task_stop.
+    if (args.background === true) {
+      if (!this.deps.shellBackground) {
+        return 'Error: background shell jobs are unavailable in this build.'
+      }
+      return this.deps.shellBackground.start(command, root)
+    }
+
+    const timeoutMs =
+      clampIntArg(args, 'timeoutSeconds', SHELL_TIMEOUT_MS / 1000, SHELL_MAX_TIMEOUT_SEC) * 1000
+    const onToolOutput = ctx.onToolOutput
+    const onChunk = onToolOutput ? (chunk: string) => onToolOutput(toolCall.id, chunk) : undefined
+    const result = await runShell(command, root, timeoutMs, undefined, onChunk)
     const parts: string[] = []
     if (result.timedOut) {
-      parts.push(`Command timed out after ${SHELL_TIMEOUT_MS / 1000}s and was killed.`)
+      parts.push(`Command timed out after ${timeoutMs / 1000}s and was killed.`)
     } else if (result.aborted) {
       parts.push('Command was aborted.')
     } else {

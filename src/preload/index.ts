@@ -42,6 +42,7 @@ const api: UldApi = {
     deleteKey: (id) => ipcRenderer.invoke(CHANNELS.providersDeleteKey, id),
     test: (id) => ipcRenderer.invoke(CHANNELS.providersTest, id),
     listModels: (id) => ipcRenderer.invoke(CHANNELS.providersListModels, id),
+    previewModels: (input) => ipcRenderer.invoke(CHANNELS.providersPreviewModels, input),
     oauthStart: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStart, id),
     oauthLogout: (id) => ipcRenderer.invoke(CHANNELS.providersOauthLogout, id),
     oauthStatus: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStatus, id),
@@ -55,11 +56,21 @@ const api: UldApi = {
     messages: (conversationId) => ipcRenderer.invoke(CHANNELS.convMessages, conversationId),
     export: (req) => ipcRenderer.invoke(CHANNELS.convExport, req),
   },
+  projects: {
+    list: (req) => ipcRenderer.invoke(CHANNELS.projectsList, req),
+    create: (input) => ipcRenderer.invoke(CHANNELS.projectsCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(CHANNELS.projectsUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.projectsDelete, id),
+  },
+  data: {
+    deleteAllContent: () => ipcRenderer.invoke(CHANNELS.dataDeleteAllContent),
+  },
   chat: {
     send: (req) => ipcRenderer.invoke(CHANNELS.chatSend, req),
     stop: (streamId) => ipcRenderer.invoke(CHANNELS.chatStop, streamId),
     regenerate: (req) => ipcRenderer.invoke(CHANNELS.chatRegenerate, req),
     editAndRerun: (req) => ipcRenderer.invoke(CHANNELS.chatEditAndRerun, req),
+    compact: (conversationId) => ipcRenderer.invoke(CHANNELS.chatCompact, conversationId),
     onStreamEvent: subscribe<StreamEventEnvelope>(CHANNELS.streamEvent),
   },
   workspaces: {
@@ -82,6 +93,8 @@ const api: UldApi = {
     changesList: (projectId) => ipcRenderer.invoke(CHANNELS.codeChangesList, projectId),
     changeApply: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeApply, changeId),
     changeReject: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeReject, changeId),
+    changeRevert: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeRevert, changeId),
+    suggestFiles: (req) => ipcRenderer.invoke(CHANNELS.codeSuggestFiles, req),
   },
   tools: {
     list: () => ipcRenderer.invoke(CHANNELS.toolsList),
@@ -89,8 +102,8 @@ const api: UldApi = {
     permissionsList: () => ipcRenderer.invoke(CHANNELS.toolsPermissionsList),
     permissionSet: (toolId, decision) =>
       ipcRenderer.invoke(CHANNELS.toolsPermissionSet, toolId, decision),
-    approvalRespond: (requestId, approved) =>
-      ipcRenderer.invoke(CHANNELS.toolsApprovalRespond, requestId, approved),
+    approvalRespond: (requestId, approved, scope) =>
+      ipcRenderer.invoke(CHANNELS.toolsApprovalRespond, requestId, approved, scope),
     customList: () => ipcRenderer.invoke(CHANNELS.toolsCustomList),
     customCreate: (input) => ipcRenderer.invoke(CHANNELS.toolsCustomCreate, input),
     customUpdate: (toolId, patch) => ipcRenderer.invoke(CHANNELS.toolsCustomUpdate, toolId, patch),

@@ -90,8 +90,21 @@ export function buildGeminiBody(req: AdapterChatRequest): Record<string, unknown
   if (req.params.temperature !== undefined) gen.temperature = req.params.temperature
   if (req.params.topP !== undefined) gen.topP = req.params.topP
   if (req.params.maxTokens !== undefined) gen.maxOutputTokens = req.params.maxTokens
+  if (req.params.reasoningEffort !== undefined) {
+    gen.thinkingConfig = {
+      thinkingBudget: GEMINI_THINKING_BUDGETS[req.params.reasoningEffort],
+      includeThoughts: true,
+    }
+  }
   if (Object.keys(gen).length > 0) body.generationConfig = gen
   return body
+}
+
+/** thinkingConfig.thinkingBudget (tokens) per reasoning effort. */
+export const GEMINI_THINKING_BUDGETS: Record<'low' | 'medium' | 'high', number> = {
+  low: 1024,
+  medium: 8192,
+  high: 24576,
 }
 
 export function toGeminiTools(tools: AdapterToolDef[] | undefined): Record<string, unknown>[] | undefined {
@@ -145,7 +158,12 @@ export function parseGeminiChunk(json: unknown): AdapterStreamEvent[] {
     if (finish) out.push({ type: 'finish', reason: finish })
   }
   const usage = ev.usageMetadata as
-    | { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
+    | {
+        promptTokenCount?: number
+        candidatesTokenCount?: number
+        totalTokenCount?: number
+        cachedContentTokenCount?: number
+      }
     | undefined
   if (usage) {
     out.push({
@@ -154,6 +172,10 @@ export function parseGeminiChunk(json: unknown): AdapterStreamEvent[] {
         promptTokens: usage.promptTokenCount,
         completionTokens: usage.candidatesTokenCount,
         totalTokens: usage.totalTokenCount,
+        ...(typeof usage.cachedContentTokenCount === 'number' &&
+        usage.cachedContentTokenCount > 0
+          ? { cachedInputTokens: usage.cachedContentTokenCount }
+          : {}),
       },
     })
   }

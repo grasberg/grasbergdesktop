@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Conversation, ToolCallRecord } from '@shared/types'
+import type { Conversation, ToolApprovalAnswer, ToolCallRecord } from '@shared/types'
 import { openDatabase, type AppDatabase } from '../../../src/main/db/database'
 import { CodeService } from '../../../src/main/code/code-service'
 import { createToolSystem, USER_DECLINED_RESULT } from '../../../src/main/tools'
@@ -60,7 +60,10 @@ function call(name: string, args: unknown = {}): ToolCallRecord {
   }
 }
 
-const approveAll = vi.fn(async () => true)
+const APPROVE: ToolApprovalAnswer = { approved: true, scope: 'once' }
+const DECLINE: ToolApprovalAnswer = { approved: false, scope: 'once' }
+
+const approveAll = vi.fn(async () => APPROVE)
 
 /** Tool system wired like main: real CodeService behind codeChanges. */
 function system(options: Parameters<typeof createToolSystem>[2] = {}) {
@@ -221,7 +224,7 @@ describe('web_search tool', () => {
 describe('edit_file / write_file — approval-gated writes', () => {
   it('edit_file replaces a unique string on disk and records an applied change', async () => {
     const { executor } = system()
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(
       call('edit_file', { path: 'src/beta.ts', old_string: 'value = 42', new_string: 'value = 43' }),
       { conversation: conv(), approval }
@@ -268,7 +271,7 @@ describe('edit_file / write_file — approval-gated writes', () => {
     const { executor } = system()
     const result = await executor.execute(
       call('edit_file', { path: 'src/beta.ts', old_string: '42', new_string: '43' }),
-      { conversation: conv(), approval: vi.fn(async () => false) }
+      { conversation: conv(), approval: vi.fn(async () => DECLINE) }
     )
     expect(result).toBe(USER_DECLINED_RESULT)
     expect(readFileSync(join(projectDir, 'src', 'beta.ts'), 'utf8')).toContain('42')
@@ -296,7 +299,7 @@ describe('edit_file / write_file — approval-gated writes', () => {
 describe('plan mode', () => {
   it('refuses mutating tools without asking, read-only tools still work', async () => {
     const { executor } = system()
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const blocked = await executor.execute(
       call('edit_file', { path: 'src/beta.ts', old_string: '42', new_string: '43' }),
       { conversation: conv(), approval, planMode: true }

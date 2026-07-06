@@ -46,7 +46,9 @@ export async function runShell(
   command: string,
   cwd: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Called with each output chunk (stdout + stderr interleaved), up to the cap. */
+  onChunk?: (chunk: string) => void
 ): Promise<ShellResult> {
   return new Promise<ShellResult>((resolve) => {
     const child = spawn(command, {
@@ -64,7 +66,16 @@ export async function runShell(
 
     const append = (buf: string, chunk: Buffer): string => {
       if (buf.length >= MAX_OUTPUT_BYTES) return buf
-      return (buf + chunk.toString('utf8')).slice(0, MAX_OUTPUT_BYTES)
+      const text = chunk.toString('utf8')
+      const next = (buf + text).slice(0, MAX_OUTPUT_BYTES)
+      if (onChunk && next.length > buf.length) {
+        try {
+          onChunk(text.slice(0, next.length - buf.length))
+        } catch {
+          // Live output is cosmetic; never let a listener break the run.
+        }
+      }
+      return next
     }
     child.stdout?.on('data', (c: Buffer) => {
       stdout = append(stdout, c)

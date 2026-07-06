@@ -1,7 +1,7 @@
 /**
  * Shared "new conversation" behavior for the sidebar's New button/menu and the
- * global Ctrl/Cmd+N shortcut. (ProjectsView, EmptyState and CommandPalette
- * intentionally have their own variants — do not funnel them through here.)
+ * global Ctrl/Cmd+N shortcut. (EmptyState and CommandPalette intentionally have
+ * their own variants — do not funnel them through here.)
  */
 
 import type { ConversationMode } from '@shared/types'
@@ -9,23 +9,32 @@ import { useConversationsStore } from '@/stores/conversations'
 import { toastError, useUiStore } from '@/stores/ui'
 
 /**
- * Leaves the Workflows/Projects surface so the new conversation shows, then
- * creates and selects a conversation in the given mode, toasting on failure.
+ * Leaves the Workflows surface, switches the sidebar to `mode` (its own
+ * projects + tasks), and creates+selects a fresh unfiled task there.
  */
 export function newConversation(mode: ConversationMode): void {
-  const ui = useUiStore.getState()
-  ui.openWorkflows(false)
-  ui.openProjects(false)
+  useUiStore.getState().openWorkflows(false)
+  const convs = useConversationsStore.getState()
+  // Switch the current mode first (also clears the previous mode's project
+  // filter), then create the task unfiled in the target mode.
+  convs.setModeFilter(mode)
   useConversationsStore
     .getState()
-    .create(mode)
+    .create(mode, null)
     .catch((e: unknown) => {
       toastError('Could not create conversation', e)
     })
 }
 
-/** New conversation in the active mode tab ('All' falls back to chat). */
+/**
+ * New standalone (unfiled) task in the current mode. To create a task inside a
+ * project, the sidebar calls `create(mode, projectId)` directly from the
+ * project's "+" button.
+ */
 export function newTaskInActiveMode(): void {
-  const filter = useConversationsStore.getState().modeFilter
-  newConversation(filter === 'all' ? 'chat' : filter)
+  useUiStore.getState().openWorkflows(false)
+  const convs = useConversationsStore.getState()
+  convs.create(convs.modeFilter, null).catch((e: unknown) => {
+    toastError('Could not create conversation', e)
+  })
 }

@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { Switch } from '@/components/common/controls'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
+import { useConversationsStore } from '@/stores/conversations'
+import { useProjectsStore } from '@/stores/projects'
 import { useMemoriesStore } from '@/stores/memories'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
@@ -72,6 +74,69 @@ function BackupSection() {
   )
 }
 
+function DeleteAllSection() {
+  const toast = useUiStore((s) => s.toast)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const runDelete = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await unwrap(window.uld.data.deleteAllContent())
+      // Reset the sidebar: no active conversation, empty lists.
+      const convs = useConversationsStore.getState()
+      convs.select(null)
+      await convs.load()
+      await useProjectsStore.getState().load(useConversationsStore.getState().modeFilter)
+      toast('Deleted all projects and chats.', 'success')
+      setConfirming(false)
+    } catch (e) {
+      toast(toNormalized(e).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="toggle-row">
+      <div className="toggle-row-text">
+        <span className="toggle-row-title">Delete all projects and chats</span>
+        <span className="field-hint">
+          Permanently removes every conversation in all modes (with their messages and documents),
+          every project, and every cowork workspace. Your API keys, providers, settings, memories,
+          skills and granted code folders are kept. This cannot be undone.
+        </span>
+      </div>
+      <div className="prompt-form-actions">
+        {confirming ? (
+          <>
+            <button
+              type="button"
+              className="btn btn-danger"
+              disabled={busy}
+              onClick={() => void runDelete()}
+            >
+              {busy ? 'Deleting…' : 'Yes, delete everything'}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn btn-danger" onClick={() => setConfirming(true)}>
+            Delete…
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function PrivacyTab() {
   const settings = useSettingsStore((s) => s.settings)
   const persist = usePersistSettings()
@@ -124,6 +189,7 @@ export default function PrivacyTab() {
       </div>
 
       <BackupSection />
+      <DeleteAllSection />
     </section>
   )
 }

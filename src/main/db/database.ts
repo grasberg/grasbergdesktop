@@ -12,6 +12,7 @@ import {
   type ConversationsRepository,
 } from './repositories/conversations'
 import { createMessagesRepository, type MessagesRepository } from './repositories/messages'
+import { createProjectsRepository, type ProjectsRepository } from './repositories/projects'
 import { createSettingsRepository, type SettingsRepository } from './repositories/settings'
 import { createWorkspacesRepository, type WorkspacesRepository } from './repositories/workspaces'
 import { createCodeRepository, type CodeRepository } from './repositories/code'
@@ -35,6 +36,7 @@ export interface AppDatabase {
   driver: SqliteDriver
   providers: ProvidersRepository
   conversations: ConversationsRepository
+  projects: ProjectsRepository
   messages: MessagesRepository
   settings: SettingsRepository
   workspaces: WorkspacesRepository
@@ -106,6 +108,7 @@ export function openDatabase(filePath: string): AppDatabase {
     driver,
     providers: createProvidersRepository(driver),
     conversations: createConversationsRepository(driver),
+    projects: createProjectsRepository(driver),
     messages: createMessagesRepository(driver),
     settings: createSettingsRepository(driver),
     workspaces: createWorkspacesRepository(driver),

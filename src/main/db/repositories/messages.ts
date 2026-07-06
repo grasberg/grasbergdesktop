@@ -8,6 +8,7 @@ import type {
   Message,
   MessageRole,
   MessageStatus,
+  MoaReferenceOutput,
   NormalizedError,
   TokenUsage,
   ToolCallRecord,
@@ -23,6 +24,8 @@ export interface MessagePatch {
   error?: NormalizedError | null
   usage?: TokenUsage | null
   toolCalls?: ToolCallRecord[] | null
+  /** null clears the column. */
+  moaReferences?: MoaReferenceOutput[] | null
 }
 
 export interface MessagesRepository {
@@ -56,6 +59,7 @@ interface MessageRow {
   provider_id: string | null
   model_id: string | null
   usage_json: string | null
+  moa_references_json: string | null
   seq: number
   created_at: number
 }
@@ -78,6 +82,7 @@ function toMessage(row: MessageRow): Message {
     providerId: row.provider_id ?? undefined,
     modelId: row.model_id ?? undefined,
     usage: parseJsonColumn<TokenUsage>(row.usage_json),
+    moaReferences: parseJsonColumn<MoaReferenceOutput[]>(row.moa_references_json),
     seq: row.seq,
     createdAt: row.created_at,
   }
@@ -103,8 +108,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         `INSERT INTO messages
            (id, conversation_id, role, content, reasoning, attachments_json,
             tool_calls_json, status, error_json, provider_id, model_id,
-            usage_json, seq, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            usage_json, moa_references_json, seq, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           message.id,
           message.conversationId,
@@ -118,6 +123,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           message.providerId ?? null,
           message.modelId ?? null,
           message.usage ? JSON.stringify(message.usage) : null,
+          message.moaReferences ? JSON.stringify(message.moaReferences) : null,
           message.seq,
           message.createdAt,
         ]
@@ -133,6 +139,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         error_json: patch.error == null ? patch.error : JSON.stringify(patch.error),
         usage_json: patch.usage == null ? patch.usage : JSON.stringify(patch.usage),
         tool_calls_json: patch.toolCalls == null ? patch.toolCalls : JSON.stringify(patch.toolCalls),
+        moa_references_json:
+          patch.moaReferences == null ? patch.moaReferences : JSON.stringify(patch.moaReferences),
       })
       return getById(id)
     },

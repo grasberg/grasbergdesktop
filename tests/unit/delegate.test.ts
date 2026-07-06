@@ -86,7 +86,11 @@ const fileSearch: ToolDefinition = {
 }
 
 function ctx(conversation: Conversation): ToolExecuteContext {
-  return { conversation, streamId: 's1', approval: vi.fn(async () => true) }
+  return {
+    conversation,
+    streamId: 's1',
+    approval: vi.fn(async () => ({ approved: true, scope: 'once' as const })),
+  }
 }
 
 describe('ChatService.runDelegate', () => {
@@ -120,7 +124,7 @@ describe('ChatService.runDelegate', () => {
     const tools: ChatToolSystem = {
       registry: { listEnabledDefinitions: () => [fileSearch] },
       executor: { execute },
-      broker: { request: async () => true },
+      broker: { request: async () => ({ approved: true, scope: 'once' as const }) },
     }
     const service = new ChatService(db, () => undefined, {
       resolveAdapter: () => adapter,

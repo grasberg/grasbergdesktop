@@ -269,6 +269,91 @@ export class CodeService {
     return updated
   }
 
+  /**
+   * Restores the pre-change content of an APPLIED change (the in-app "undo").
+   * Reached only from the code:changes:revert IPC — an explicit user click.
+   * Refuses when the file has diverged from the change's own after-content,
+   * so a revert can never clobber later edits (by the user or a later change).
+   */
+  revertChange(changeId: string): CodeChange {
+    const change = this.requireChange(changeId)
+    if (change.status !== 'applied') {
+      throw invalid('Only applied changes can be reverted.')
+    }
+    const project = this.db.code.projectGetById(change.projectId)
+    if (!project) throw invalid('Project not found.')
+    // SECURITY: re-validate the stored path against the root before writing.
+    const abs = this.resolveInsideRoot(project.path, change.filePath)
+
+    switch (change.changeType) {
+      case 'create':
+      case 'edit': {
+        const real = this.realInsideRoot(project.path, abs)
+        const current = this.readCurrentText(real)
+        if (current === null || current !== (change.newContent ?? '')) {
+          throw invalid(
+            'The file changed on disk after this change was applied; revert it manually.'
+          )
+        }
+        if (change.changeType === 'create' && (change.oldContent ?? '') === '') {
+          // The change created this file: reverting removes it again.
+          unlinkSync(real)
+        } else {
+          if (change.oldContent === null || change.oldContent === undefined) {
+            throw invalid('No pre-change content was captured for this change.')
+          }
+          writeFileSync(real, change.oldContent, 'utf8')
+        }
+        break
+      }
+      case 'delete': {
+        if (change.oldContent === null || change.oldContent === undefined) {
+          throw invalid('No pre-change content was captured for this change.')
+        }
+        if (existsSync(abs)) {
+          throw invalid('A file already exists at this path; revert it manually.')
+        }
+        mkdirSync(dirname(abs), { recursive: true })
+        const realDir = this.realInsideRoot(project.path, dirname(abs))
+        writeFileSync(join(realDir, basename(abs)), change.oldContent, 'utf8')
+        break
+      }
+    }
+
+    const updated = this.db.code.changeSetStatus(changeId, 'reverted')
+    if (!updated) throw invalid('Change not found.')
+    return updated
+  }
+
+  /**
+   * Relative-path suggestions for @-file mentions in the composer: files whose
+   * path contains `query` (case-insensitive), basename matches first. Reuses
+   * the file-tree walk, so the same ignore rules and caps apply.
+   */
+  suggestFiles(projectId: string, query: string, limit: number): string[] {
+    const needle = query.trim().toLowerCase()
+    const max = Math.min(Math.max(limit, 1), 50)
+    const files: string[] = []
+    const collect = (node: FileTreeNode): void => {
+      if (node.type === 'file') files.push(node.relPath)
+      for (const child of node.children ?? []) collect(child)
+    }
+    collect(this.fileTree(projectId))
+    const matches = needle
+      ? files.filter((relPath) => relPath.toLowerCase().includes(needle))
+      : files
+    const basenameOf = (relPath: string): string => relPath.slice(relPath.lastIndexOf('/') + 1)
+    return matches
+      .sort((a, b) => {
+        const aBase = basenameOf(a).toLowerCase().startsWith(needle)
+        const bBase = basenameOf(b).toLowerCase().startsWith(needle)
+        if (aBase !== bBase) return aBase ? -1 : 1
+        if (a.length !== b.length) return a.length - b.length
+        return a < b ? -1 : a > b ? 1 : 0
+      })
+      .slice(0, max)
+  }
+
   // -- internals --------------------------------------------------------------
 
   private requireProject(projectId: string): CodeProject {

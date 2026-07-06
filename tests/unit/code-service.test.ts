@@ -184,27 +184,29 @@ describe('CodeService.readFile', () => {
   })
 })
 
-describe('CodeService.registerProposedChanges + apply/reject', () => {
-  const assistantContent = [
-    'Proposals:',
-    '```uld-change',
-    '{"path":"notes/new.txt","type":"create"}',
-    'hello new file',
-    '```',
-    '```uld-change',
-    '{"path":"README.md","type":"edit"}',
-    '# Readme',
-    'new line',
-    '```',
-    '```uld-change',
-    '{"path":"src/app.ts","type":"delete"}',
-    '```',
-    '```uld-change',
-    '{"path":"../evil.txt","type":"create"}',
-    'escape attempt',
-    '```',
-  ].join('\n')
+// Shared fixture: a create + edit + delete proposal (plus one escape attempt),
+// used by the apply/reject describe below and the revert tests further down.
+const assistantContent = [
+  'Proposals:',
+  '```uld-change',
+  '{"path":"notes/new.txt","type":"create"}',
+  'hello new file',
+  '```',
+  '```uld-change',
+  '{"path":"README.md","type":"edit"}',
+  '# Readme',
+  'new line',
+  '```',
+  '```uld-change',
+  '{"path":"src/app.ts","type":"delete"}',
+  '```',
+  '```uld-change',
+  '{"path":"../evil.txt","type":"create"}',
+  'escape attempt',
+  '```',
+].join('\n')
 
+describe('CodeService.registerProposedChanges + apply/reject', () => {
   it('registers proposed changes with diffs and skips escaping paths', () => {
     const project = openTestProject()
     const conversation = createCodeConversation(project.id)
@@ -318,5 +320,102 @@ describe('CodeService.registerProposedChanges + apply/reject', () => {
     expectInvalid(() => service.applyChange(create.id))
     expectInvalid(() => service.rejectChange(create.id))
     expectInvalid(() => service.applyChange('unknown-change'))
+  })
+})
+
+describe('CodeService.revertChange', () => {
+  it('restores an applied edit to its pre-change content', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const edit = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'edit')!
+
+    service.applyChange(edit.id)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nnew line\n')
+
+    const reverted = service.revertChange(edit.id)
+    expect(reverted.status).toBe('reverted')
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nold line\n')
+
+    // A reverted change cannot be reverted (or applied) again.
+    expectInvalid(() => service.revertChange(edit.id))
+    expectInvalid(() => service.applyChange(edit.id))
+  })
+
+  it('reverting an applied create removes the created file', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const create = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'create')!
+
+    service.applyChange(create.id)
+    expect(existsSync(join(projectDir, 'notes', 'new.txt'))).toBe(true)
+
+    const reverted = service.revertChange(create.id)
+    expect(reverted.status).toBe('reverted')
+    expect(existsSync(join(projectDir, 'notes', 'new.txt'))).toBe(false)
+  })
+
+  it('reverting an applied delete restores the file content', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const del = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'delete')!
+
+    service.applyChange(del.id)
+    expect(existsSync(join(projectDir, 'src', 'app.ts'))).toBe(false)
+
+    const reverted = service.revertChange(del.id)
+    expect(reverted.status).toBe('reverted')
+    expect(readFileSync(join(projectDir, 'src', 'app.ts'), 'utf8')).toBe('console.log(1)\n')
+  })
+
+  it('refuses to revert when the file diverged after the change was applied', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const edit = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'edit')!
+
+    service.applyChange(edit.id)
+    // Someone (or a later change) edits the file after the apply.
+    writeFileSync(join(projectDir, 'README.md'), '# Readme\neven newer\n', 'utf8')
+
+    expectInvalid(() => service.revertChange(edit.id), 'changed on disk')
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\neven newer\n')
+  })
+
+  it('refuses to revert proposed or rejected changes', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const [create, edit] = service.registerProposedChanges(conversation.id, assistantContent)
+
+    expectInvalid(() => service.revertChange(create.id), 'Only applied')
+    service.rejectChange(edit.id)
+    expectInvalid(() => service.revertChange(edit.id), 'Only applied')
+  })
+})
+
+describe('CodeService.suggestFiles', () => {
+  it('returns matching relative paths, basename matches first', () => {
+    const project = openTestProject()
+    const hits = service.suggestFiles(project.id, 'app', 10)
+    expect(hits).toContain('src/app.ts')
+    expect(hits[0]).toBe('src/app.ts')
+  })
+
+  it('lists files (capped) for an empty query and never leaks ignored dirs', () => {
+    const project = openTestProject()
+    const hits = service.suggestFiles(project.id, '', 50)
+    expect(hits.length).toBeGreaterThan(0)
+    expect(hits.some((p) => p.includes('node_modules'))).toBe(false)
+  })
+
+  it('returns [] when nothing matches', () => {
+    const project = openTestProject()
+    expect(service.suggestFiles(project.id, 'zzz-no-such-file', 10)).toEqual([])
   })
 })

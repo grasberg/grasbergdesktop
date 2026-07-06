@@ -56,6 +56,12 @@ export interface AdapterChatRequest {
     topP?: number
     frequencyPenalty?: number
     presencePenalty?: number
+    /**
+     * Reasoning/thinking effort. Mapped per dialect: OpenAI-compatible
+     * `reasoning_effort`, Anthropic extended-thinking budget, Gemini
+     * `thinkingConfig.thinkingBudget`. Omitted from the wire when unset.
+     */
+    reasoningEffort?: 'low' | 'medium' | 'high'
   }
   tools?: AdapterToolDef[]
   stream: boolean

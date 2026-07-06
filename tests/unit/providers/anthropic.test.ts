@@ -43,12 +43,79 @@ describe('buildAnthropicBody', () => {
       },
       true
     )
-    expect(body).toMatchObject({ model: 'claude-sonnet-5', max_tokens: 4096, system: 'S', stream: true })
+    expect(body).toMatchObject({ model: 'claude-sonnet-5', max_tokens: 4096, stream: true })
+    // Prompt caching: the system prompt rides as a cache_control text block.
+    expect(body.system).toEqual([
+      { type: 'text', text: 'S', cache_control: { type: 'ephemeral' } },
+    ])
     expect(toolsToAnthropic([{ name: 'f', description: 'd', parameters: { type: 'object' } }])[0]).toEqual({
       name: 'f',
       description: 'd',
       input_schema: { type: 'object' },
     })
+  })
+
+  it('marks the last message block with cache_control (incremental prefix caching)', () => {
+    const body = buildAnthropicBody(
+      {
+        modelId: 'claude-sonnet-5',
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'reply' },
+          { role: 'user', content: 'second' },
+        ],
+        params: {},
+        stream: false,
+      },
+      false
+    )
+    const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>
+    const lastBlocks = messages[messages.length - 1].content
+    expect(lastBlocks[lastBlocks.length - 1]).toMatchObject({
+      type: 'text',
+      text: 'second',
+      cache_control: { type: 'ephemeral' },
+    })
+    // Earlier messages carry no cache markers (max 4 breakpoints allowed).
+    expect(messages[0].content[0]).not.toHaveProperty('cache_control')
+  })
+
+  it('maps reasoningEffort to an extended-thinking budget and drops temperature', () => {
+    const body = buildAnthropicBody(
+      {
+        modelId: 'claude-sonnet-5',
+        messages: [{ role: 'user', content: 'hi' }],
+        params: { reasoningEffort: 'medium', temperature: 0.2, maxTokens: 1024 },
+        stream: false,
+      },
+      false
+    )
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 })
+    // max_tokens must exceed the budget; temperature/top_p are incompatible.
+    expect(body.max_tokens as number).toBeGreaterThan(8192)
+    expect(body).not.toHaveProperty('temperature')
+  })
+
+  it('skips thinking when the transcript already contains assistant tool_use turns', () => {
+    const body = buildAnthropicBody(
+      {
+        modelId: 'claude-sonnet-5',
+        messages: [
+          { role: 'user', content: 'hi' },
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ id: 't1', name: 'f', arguments: '{}', status: 'done' }],
+          },
+          { role: 'tool', content: 'r', toolCallId: 't1' },
+        ],
+        params: { reasoningEffort: 'high', temperature: 0.5 },
+        stream: false,
+      },
+      false
+    )
+    expect(body).not.toHaveProperty('thinking')
+    expect(body.temperature).toBe(0.5)
   })
 })
 

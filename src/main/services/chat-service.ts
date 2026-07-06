@@ -17,6 +17,8 @@ import type {
   ConversationMode,
   Message,
   MessageStatus,
+  MoaPreset,
+  MoaReferenceOutput,
   NormalizedError,
   ProviderConfig,
   ProviderType,
@@ -24,6 +26,7 @@ import type {
   StreamEvent,
   StreamEventEnvelope,
   TokenUsage,
+  ToolApprovalAnswer,
   ToolApprovalRequest,
   ToolCallRecord,
   ToolDefinition,
@@ -57,6 +60,8 @@ import { decryptKey } from '../keys/keystore'
 import { buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
 import type { ToolExecuteContext } from '../tools/executor'
 import { USER_DECLINED_RESULT } from '../tools/executor'
+import { runShell } from '../tools/shell'
+import { redactSecrets } from '../providers/redact'
 import { isValidStorageKey } from '@shared/schemas'
 import { runCompletionHooks } from './completion-hooks'
 
@@ -66,11 +71,13 @@ const TITLE_MAX_CHARS = 60
 /**
  * Maximum number of tool-execution rounds per generation. Each round is one
  * adapter invocation that finished with 'tool_calls' followed by executing
- * those calls and feeding the results back. When the model asks for tools yet
- * again after the fifth round, the remaining calls are recorded (unexecuted)
- * and the generation finishes with a note appended to the content.
+ * those calls and feeding the results back. Generous by design — real agent
+ * work (search → read → edit → test → fix) burns many rounds; the cap is a
+ * runaway backstop, not a workflow limit. When the model asks for tools yet
+ * again past the cap, the remaining calls are recorded (unexecuted) and the
+ * generation finishes with a note appended to the content.
  */
-const MAX_TOOL_ROUNDS = 5
+const MAX_TOOL_ROUNDS = 40
 
 const TOOL_LIMIT_NOTE =
   `[Tool-call limit reached (${MAX_TOOL_ROUNDS} rounds) — the remaining tool calls were not run.]`
@@ -105,20 +112,39 @@ Create the file at the repository root with the write_file tool (path "AGENTS.md
 
 /**
  * Expands a slash command in a user message to its full prompt for the wire.
- * Only '/init' in code mode expands; everything else passes through verbatim.
+ * '/init' (code mode) and '/skill <name> [task]' expand; everything else
+ * passes through verbatim. The transcript keeps the short command.
  */
 export function expandSlashCommand(content: string, mode: ConversationMode): string {
-  if (mode === 'code' && content.trim() === '/init') return INIT_COMMAND_PROMPT
+  const trimmed = content.trim()
+  if (mode === 'code' && trimmed === '/init') return INIT_COMMAND_PROMPT
+  const skillMatch = /^\/skill\s+(\S+)(?:\s+([\s\S]+))?$/.exec(trimmed)
+  if (skillMatch) {
+    const [, name, task] = skillMatch
+    return (
+      `Load the skill "${name}" with the use_skill tool and follow its instructions` +
+      (task ? ` for this task:\n\n${task}` : '.')
+    )
+  }
   return content
 }
 
-/** Concurrent background sub-agent tasks (delegate background=true). */
+/** True when a user message is a slash command that expands on the wire. */
+export function isExpandingSlashCommand(content: string, mode: ConversationMode): boolean {
+  return expandSlashCommand(content, mode) !== content
+}
+
+/** Concurrent background tasks (delegate/shell background=true). */
 const MAX_BACKGROUND_TASKS = 8
+/** Hard runtime cap for a background shell job. */
+const SHELL_BACKGROUND_TIMEOUT_MS = 30 * 60_000
 
 interface BackgroundTask {
   status: 'running' | 'done' | 'error' | 'stopped'
   result: string
   controller: AbortController
+  /** Shell jobs: output captured so far (task_output shows it while running). */
+  getPartial?: () => string
 }
 
 type Broadcast = (channel: string, payload: unknown) => void
@@ -142,7 +168,7 @@ export interface ChatApprovalBroker {
     req: Omit<ToolApprovalRequest, 'requestId'>,
     broadcast: Broadcast,
     signal?: AbortSignal
-  ): Promise<boolean>
+  ): Promise<ToolApprovalAnswer>
 }
 
 export interface ChatQuestionBroker {
@@ -223,6 +249,8 @@ function addUsage(total: TokenUsage | undefined, next: TokenUsage): TokenUsage {
     promptTokens: add(total.promptTokens, next.promptTokens),
     completionTokens: add(total.completionTokens, next.completionTokens),
     totalTokens: add(total.totalTokens, next.totalTokens),
+    cachedInputTokens: add(total.cachedInputTokens, next.cachedInputTokens),
+    cacheCreationTokens: add(total.cacheCreationTokens, next.cacheCreationTokens),
   }
 }
 
@@ -340,20 +368,72 @@ function estimateTokens(text: string): number {
 
 // -- sub-agent delegation -----------------------------------------------------
 
-const DELEGATE_MAX_ROUNDS = 4
-/** Read-only builtin tools a delegated sub-agent may use. */
+const DELEGATE_MAX_ROUNDS = 12
+/**
+ * Builtin tools a delegated sub-agent may use. Mostly read-only plus the
+ * approval-gated file editors: every edit_file/write_file call still goes
+ * through the parent's approval flow (and the audited change pipeline), so a
+ * sub-agent can carry out real work without widening the write path.
+ */
 const DELEGATE_TOOL_IDS = new Set([
   'file_search',
   'repo_map',
   'read_file',
   'list_directory',
+  'grep',
+  'glob',
+  'git',
   'fetch_url',
+  'edit_file',
+  'write_file',
 ])
 const DELEGATE_PERSONA =
   'You are a focused sub-agent working on a single delegated task. You do not see the parent ' +
-  'conversation — work only from the task and context you are given. Use the available read-only ' +
-  'tools when they help, then return a concise, self-contained result. Do not ask questions; make ' +
-  'reasonable assumptions and state them.'
+  'conversation — work only from the task and context you are given. Use the available tools ' +
+  'when they help (file edits still require the user’s approval), then return a concise, ' +
+  'self-contained result. Do not ask questions; make reasonable assumptions and state them.'
+
+// -- mixture of agents --------------------------------------------------------
+
+/**
+ * The private context appended to the aggregator's latest user turn: the advisor
+ * (reference) model outputs framed as material to synthesize. Mirrors Hermes'
+ * "reference outputs as private context for the aggregator".
+ */
+function formatMoaContext(references: MoaReferenceOutput[], preset: MoaPreset): string {
+  const blocks = references.map((ref) =>
+    ref.status === 'error'
+      ? `### ${ref.label}\n[This advisor was unavailable: ${ref.error?.message ?? 'error'}]`
+      : `### ${ref.label}\n${ref.text.trim() || '[empty response]'}`
+  )
+  return (
+    `You are the aggregator in a Mixture-of-Agents system named "${preset.name}". ` +
+    `Below are independent analyses of the user's latest message from advisor models. ` +
+    `Weigh them critically — they may disagree, omit things or be wrong — and synthesize a ` +
+    `single, best response in your own voice. Do not merely repeat or list them, and do not ` +
+    `mention this process unless the user asks.\n\n` +
+    `--- Advisor analyses ---\n\n${blocks.join('\n\n')}`
+  )
+}
+
+/**
+ * Appends `text` to the last user message's content (Hermes appends reference
+ * context to the tail of the latest user turn). Keeps role alternation valid for
+ * strict providers by never inserting a second consecutive user message unless
+ * there is no user message at all.
+ */
+function appendContextToLastUser(messages: AdapterMessage[], text: string): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== 'user') continue
+    const content = messages[i].content
+    messages[i] =
+      typeof content === 'string'
+        ? { ...messages[i], content: `${content}\n\n${text}` }
+        : { ...messages[i], content: [...content, { type: 'text', text }] }
+    return
+  }
+  messages.push({ role: 'user', content: text })
+}
 
 /** Text of a message for estimation/summarization (inlines attachment text). */
 function messageEstimateText(message: Message): string {
@@ -379,9 +459,14 @@ export class ChatService {
   async send(req: ChatSendRequest): Promise<StartStreamResult> {
     return this.withReservation(req.conversationId, async (conversation) => {
       const settings = this.db.settings.get()
-      const resolved = await this.resolveTarget(conversation, settings, req.overrides)
+      const moa = this.resolveMoaPreset(conversation, settings, req.overrides)
+      const resolved = await this.resolveTarget(
+        conversation,
+        settings,
+        moa ? this.aggregatorOverrides(moa, req.overrides) : req.overrides
+      )
       const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
-      return this.start(conversation, settings, resolved, userMessage)
+      return this.start(conversation, settings, resolved, userMessage, moa)
     })
   }
 
@@ -400,9 +485,14 @@ export class ChatService {
         )
       }
       const settings = this.db.settings.get()
-      const resolved = await this.resolveTarget(conversation, settings, undefined)
+      const moa = this.resolveMoaPreset(conversation, settings, undefined)
+      const resolved = await this.resolveTarget(
+        conversation,
+        settings,
+        moa ? this.aggregatorOverrides(moa) : undefined
+      )
       this.db.messages.deleteById(target.id)
-      return this.start(conversation, settings, resolved, null)
+      return this.start(conversation, settings, resolved, null, moa)
     })
   }
 
@@ -414,13 +504,18 @@ export class ChatService {
         throw new ProviderError('invalid_request', 'Only user messages can be edited and rerun.')
       }
       const settings = this.db.settings.get()
-      const resolved = await this.resolveTarget(conversation, settings, undefined)
+      const moa = this.resolveMoaPreset(conversation, settings, undefined)
+      const resolved = await this.resolveTarget(
+        conversation,
+        settings,
+        moa ? this.aggregatorOverrides(moa) : undefined
+      )
       const updated = this.db.messages.update(target.id, { content: req.newContent })
       if (!updated) {
         throw new ProviderError('invalid_request', 'Message not found.')
       }
       this.db.messages.deleteAfterSeq(conversation.id, target.seq)
-      return this.start(conversation, settings, resolved, updated)
+      return this.start(conversation, settings, resolved, updated, moa)
     })
   }
 
@@ -619,6 +714,55 @@ export class ChatService {
     return { provider, modelId, params, apiKey, accountId }
   }
 
+  /**
+   * The MoA preset a generation should run through, or null for ordinary
+   * single-model generation. A one-shot override (the `/moa` command) wins over
+   * the conversation's stored preset. Returns null for an unknown, disabled or
+   * structurally-invalid preset so generation silently falls back to the model.
+   */
+  private resolveMoaPreset(
+    conversation: Conversation,
+    settings: AppSettings,
+    overrides: ChatSendRequest['overrides']
+  ): MoaPreset | null {
+    const id = overrides?.moaPresetId ?? conversation.moaPresetId
+    if (!id) return null
+    const preset = settings.moaPresets.find((p) => p.id === id)
+    if (!preset || !preset.enabled) return null
+    if (preset.referenceModels.length === 0) return null
+    if (!preset.aggregator?.providerId || !preset.aggregator?.modelId) return null
+    return preset
+  }
+
+  /**
+   * Turns a MoA preset into resolveTarget overrides that select its aggregator
+   * as the acting model and fold in the aggregator temperature / max-tokens
+   * tunings. `base` (the caller's own overrides) is preserved for params.
+   */
+  private aggregatorOverrides(
+    preset: MoaPreset,
+    base?: ChatSendRequest['overrides']
+  ): ChatSendRequest['overrides'] {
+    const params: ChatParams = {
+      ...base?.params,
+      ...(preset.aggregatorTemperature !== undefined
+        ? { temperature: preset.aggregatorTemperature }
+        : {}),
+      ...(preset.maxTokens !== undefined ? { maxTokens: preset.maxTokens } : {}),
+    }
+    return {
+      providerId: preset.aggregator.providerId,
+      modelId: preset.aggregator.modelId,
+      ...(Object.keys(params).length > 0 ? { params } : {}),
+    }
+  }
+
+  /** "<provider label> · <modelId>" for an advisor/aggregator model reference. */
+  private moaLabel(ref: { providerId: string; modelId: string }): string {
+    const provider = this.db.providers.getById(ref.providerId)
+    return `${provider?.label ?? ref.providerId} · ${ref.modelId}`
+  }
+
   /** Adapter for the resolved provider (test seam first, then the registry). */
   private adapterFor(resolved: ResolvedTarget): ProviderAdapter {
     return (this.options.resolveAdapter ?? resolveAdapterForProvider)(
@@ -666,7 +810,8 @@ export class ChatService {
     conversation: Conversation,
     settings: AppSettings,
     resolved: ResolvedTarget,
-    userMessage: Message | null
+    userMessage: Message | null,
+    moa?: MoaPreset | null
   ): StartStreamResult {
     const assistantMessage: Message = {
       id: randomUUID(),
@@ -694,15 +839,28 @@ export class ChatService {
     }
 
     // Track the detached loop so stopAll() can await its persistence on quit.
-    active.done = this.runStream(
-      streamId,
-      conversation,
-      resolved,
-      buildOpts,
-      assistantMessage,
-      controller,
-      toolPlan.adapterTools
-    )
+    // A MoA preset first fans out its advisor models, then delegates to the same
+    // streaming core with the aggregator as the acting model.
+    active.done = moa
+      ? this.runMoaStream(
+          streamId,
+          conversation,
+          resolved,
+          moa,
+          buildOpts,
+          assistantMessage,
+          controller,
+          toolPlan.adapterTools
+        )
+      : this.runStream(
+          streamId,
+          conversation,
+          resolved,
+          buildOpts,
+          assistantMessage,
+          controller,
+          toolPlan.adapterTools
+        )
 
     return { streamId, userMessage, assistantMessage }
   }
@@ -798,11 +956,11 @@ export class ChatService {
       if (message.role !== 'user' && message.role !== 'assistant') continue
       if (message.status !== 'complete' && message.status !== 'stopped') continue
       if (message.seq <= throughSeq) continue
-      // Slash commands ('/init') stay short in the transcript but expand to
-      // their full prompt on the wire, every round and replay alike.
+      // Slash commands ('/init', '/skill …') stay short in the transcript but
+      // expand to their full prompt on the wire, every round and replay alike.
       const content =
         message.role === 'user'
-          ? message.content.trim() === '/init' && conversation.mode === 'code'
+          ? isExpandingSlashCommand(message.content, conversation.mode)
             ? expandSlashCommand(message.content, conversation.mode)
             : composeUserContent(message, visionEnabled, this.options.imageDir)
           : message.content
@@ -828,65 +986,100 @@ export class ChatService {
   ): Promise<void> {
     if (!settings.compactionEnabled) return
     try {
-      const contextLength =
-        resolveModelInfo(resolved.provider, resolved.modelId)?.contextLength ??
-        DEFAULT_CONTEXT_LENGTH
-      const threshold = contextLength * settings.compactionThresholdRatio
+      await this.compact(conversation, resolved, settings, signal, false)
+    } catch {
+      // Auto-compaction is best-effort: fall back to the full history.
+    }
+  }
 
-      const throughSeq = conversation.summaryThroughSeq ?? 0
-      const active = this.db.messages
-        .listByConversation(conversation.id)
-        .filter(
-          (m) =>
-            (m.role === 'user' || m.role === 'assistant') &&
-            (m.status === 'complete' || m.status === 'stopped') &&
-            m.seq > throughSeq
-        )
+  /**
+   * Manual compaction (the /compact command): summarizes regardless of the
+   * auto-compaction setting and threshold. Returns whether anything was
+   * summarized; provider/config errors propagate to the caller.
+   */
+  async compactNow(conversationId: string): Promise<{ compacted: boolean }> {
+    const conversation = this.requireConversation(conversationId)
+    // Take the single-generation slot so /compact can't interleave with a
+    // running stream (and vice versa).
+    this.reserve(conversation.id)
+    try {
+      const settings = this.db.settings.get()
+      const resolved = await this.resolveTarget(conversation, settings, undefined)
+      const compacted = await this.compact(conversation, resolved, settings, undefined, true)
+      if (compacted) this.broadcast(CHANNELS.conversationsChanged, {})
+      return { compacted }
+    } finally {
+      this.releaseReservation(conversation.id)
+    }
+  }
 
+  /** Shared compaction core; `force` skips the token-estimate threshold. */
+  private async compact(
+    conversation: Conversation,
+    resolved: ResolvedTarget,
+    settings: AppSettings,
+    signal: AbortSignal | undefined,
+    force: boolean
+  ): Promise<boolean> {
+    const contextLength =
+      resolveModelInfo(resolved.provider, resolved.modelId)?.contextLength ??
+      DEFAULT_CONTEXT_LENGTH
+    const threshold = contextLength * settings.compactionThresholdRatio
+
+    const throughSeq = conversation.summaryThroughSeq ?? 0
+    const active = this.db.messages
+      .listByConversation(conversation.id)
+      .filter(
+        (m) =>
+          (m.role === 'user' || m.role === 'assistant') &&
+          (m.status === 'complete' || m.status === 'stopped') &&
+          m.seq > throughSeq
+      )
+
+    if (!force) {
       const estimate =
         active.reduce((sum, m) => sum + estimateTokens(messageEstimateText(m)), 0) +
         estimateTokens(conversation.summaryText ?? '')
-      if (estimate < threshold) return
-      if (active.length <= COMPACTION_KEEP_RECENT + 1) return
-
-      const toSummarize = active.slice(0, active.length - COMPACTION_KEEP_RECENT)
-      if (toSummarize.length === 0) return
-      const newThroughSeq = toSummarize[toSummarize.length - 1].seq
-      // Never summarize past the latest user turn (it must be sent verbatim).
-      const latestUserSeq = Math.max(
-        ...active.filter((m) => m.role === 'user').map((m) => m.seq),
-        -1
-      )
-      if (newThroughSeq >= latestUserSeq) return
-
-      const parts: string[] = []
-      if (conversation.summaryText) parts.push(`Summary so far:\n${conversation.summaryText}`)
-      for (const m of toSummarize) {
-        parts.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${messageEstimateText(m)}`)
-      }
-
-      const adapter = this.adapterFor(resolved)
-      const result = await adapter.chat(
-        {
-          modelId: resolved.modelId,
-          messages: [
-            { role: 'system', content: COMPACTION_INSTRUCTION },
-            { role: 'user', content: parts.join('\n\n') },
-          ],
-          params: { maxTokens: 1024 },
-          stream: false,
-        },
-        this.adapterCtx(resolved, signal)
-      )
-      const summary = result.text.trim()
-      if (summary.length === 0) return
-
-      this.db.conversations.setSummary(conversation.id, summary, newThroughSeq)
-      conversation.summaryText = summary
-      conversation.summaryThroughSeq = newThroughSeq
-    } catch {
-      // Compaction is best-effort: fall back to the full history on any error.
+      if (estimate < threshold) return false
     }
+    if (active.length <= COMPACTION_KEEP_RECENT + 1) return false
+
+    const toSummarize = active.slice(0, active.length - COMPACTION_KEEP_RECENT)
+    if (toSummarize.length === 0) return false
+    const newThroughSeq = toSummarize[toSummarize.length - 1].seq
+    // Never summarize past the latest user turn (it must be sent verbatim).
+    const latestUserSeq = Math.max(
+      ...active.filter((m) => m.role === 'user').map((m) => m.seq),
+      -1
+    )
+    if (newThroughSeq >= latestUserSeq) return false
+
+    const parts: string[] = []
+    if (conversation.summaryText) parts.push(`Summary so far:\n${conversation.summaryText}`)
+    for (const m of toSummarize) {
+      parts.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${messageEstimateText(m)}`)
+    }
+
+    const adapter = this.adapterFor(resolved)
+    const result = await adapter.chat(
+      {
+        modelId: resolved.modelId,
+        messages: [
+          { role: 'system', content: COMPACTION_INSTRUCTION },
+          { role: 'user', content: parts.join('\n\n') },
+        ],
+        params: { maxTokens: 1024 },
+        stream: false,
+      },
+      this.adapterCtx(resolved, signal)
+    )
+    const summary = result.text.trim()
+    if (summary.length === 0) return false
+
+    this.db.conversations.setSummary(conversation.id, summary, newThroughSeq)
+    conversation.summaryText = summary
+    conversation.summaryThroughSeq = newThroughSeq
+    return true
   }
 
   /**
@@ -979,6 +1172,8 @@ export class ChatService {
       params: {},
       workspaceId: null,
       projectId: null,
+      projectRef: null,
+      moaPresetId: null,
       createdAt: 0,
       updatedAt: 0,
     }
@@ -1059,15 +1254,75 @@ export class ChatService {
     return `Started background task '${taskId}'. Poll it with task_output({"taskId":"${taskId}"}); continue other work meanwhile.`
   }
 
+  /**
+   * Starts a background shell job (run_shell_command background=true) in the
+   * granted project root and returns a task-id note for the model. The job
+   * shares the delegate background-task registry, so task_output/task_stop
+   * work on it; task_output additionally shows its output so far.
+   */
+  startShellBackground(command: string, cwd: string): string {
+    const running = [...this.backgroundTasks.values()].filter(
+      (t) => t.status === 'running'
+    ).length
+    if (running >= MAX_BACKGROUND_TASKS) {
+      return `Error: ${MAX_BACKGROUND_TASKS} background tasks are already running. Poll task_output or stop one with task_stop first.`
+    }
+    this.backgroundTaskSeq += 1
+    const taskId = `task-${this.backgroundTaskSeq}`
+    const controller = new AbortController()
+    let output = ''
+    const record: BackgroundTask = {
+      status: 'running',
+      result: '',
+      controller,
+      getPartial: () => output,
+    }
+    this.backgroundTasks.set(taskId, record)
+    void runShell(command, cwd, SHELL_BACKGROUND_TIMEOUT_MS, controller.signal, (chunk) => {
+      output += chunk // runShell stops emitting at its output cap
+    })
+      .then((result) => {
+        const parts: string[] = []
+        if (result.timedOut) {
+          parts.push(
+            `Command timed out after ${SHELL_BACKGROUND_TIMEOUT_MS / 60_000} minutes and was killed.`
+          )
+        } else if (result.aborted) {
+          parts.push('Command was stopped.')
+        } else {
+          parts.push(`Exit code: ${result.code ?? 'unknown'}`)
+        }
+        if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout.trimEnd()}`)
+        if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr.trimEnd()}`)
+        const text = redactSecrets(parts.join('\n\n')) || '(no output)'
+        // A stopped job keeps 'stopped' status but records what it printed.
+        if (record.status === 'running') record.status = 'done'
+        record.result = text
+      })
+      .catch((e: unknown) => {
+        if (record.status === 'running') {
+          record.status = 'error'
+          record.result = toNormalizedError(e).message
+        }
+      })
+    return `Started background shell job '${taskId}' running: ${command}\nPoll it with task_output({"taskId":"${taskId}"}); stop it with task_stop.`
+  }
+
   /** Status/result of a background task, as a model-readable string. */
   delegateTaskOutput(taskId: string): string {
     const record = this.backgroundTasks.get(taskId)
     if (!record) return `Error: unknown task id '${taskId}'.`
     switch (record.status) {
       case 'running':
-        return `Task '${taskId}' is still running.`
+        return record.getPartial
+          ? `Task '${taskId}' is still running. Output so far:\n${
+              redactSecrets(record.getPartial()) || '(no output yet)'
+            }`
+          : `Task '${taskId}' is still running.`
       case 'stopped':
-        return `Task '${taskId}' was stopped before finishing.`
+        return record.result
+          ? `Task '${taskId}' was stopped. ${record.result}`
+          : `Task '${taskId}' was stopped before finishing.`
       case 'error':
         return `Task '${taskId}' failed: ${record.result}`
       default:
@@ -1134,6 +1389,10 @@ export class ChatService {
                 conversation: parent,
                 streamId: ctx.streamId,
                 approval: ctx.approval,
+                // Inherit the parent's mode gates: plan mode still blocks
+                // mutations, auto-accept edits still skips the edit dialog.
+                planMode: ctx.planMode,
+                autoAcceptEdits: ctx.autoAcceptEdits,
               })
             : `Tool '${call.name}' is not available to the sub-agent.`
           messages.push({ role: 'tool', content: out, toolCallId: call.id })
@@ -1145,6 +1404,120 @@ export class ChatService {
     } catch (e) {
       return `Delegation failed: ${toNormalizedError(e).message}`
     }
+  }
+
+  /**
+   * Mixture of Agents: fan the advisor (reference) models out in parallel over
+   * the conversation text (no tools, no system prompt — cheap and provider-safe),
+   * stream each result to the renderer as a labelled block, persist the blocks on
+   * the placeholder, then delegate to runStream with the aggregator as the acting
+   * model and the advisor analyses injected as private context. Advisor failures
+   * are captured, never fatal — the aggregator still runs. Abort during fan-out
+   * flows through: runStream sees the aborted signal and finalizes 'stopped'.
+   */
+  private async runMoaStream(
+    streamId: string,
+    conversation: Conversation,
+    aggregator: ResolvedTarget,
+    preset: MoaPreset,
+    buildOpts: HistoryBuildOptions,
+    placeholder: Message,
+    controller: AbortController,
+    adapterTools?: AdapterToolDef[]
+  ): Promise<void> {
+    const conversationId = conversation.id
+    const emit = (event: StreamEvent): void => {
+      try {
+        this.broadcast(CHANNELS.streamEvent, { streamId, conversationId, event })
+      } catch {
+        // A window can be torn down mid-broadcast; persistence still happens.
+      }
+    }
+    const settings = buildOpts.settings
+    const references: MoaReferenceOutput[] = preset.referenceModels.map((ref, index) => ({
+      index,
+      label: this.moaLabel(ref),
+      providerId: ref.providerId,
+      modelId: ref.modelId,
+      status: 'running',
+      text: '',
+    }))
+
+    try {
+      // Advisors see the conversation turns only (system prompt + tools stripped),
+      // matching Hermes: keeps reference calls cheap and dodges strict-provider
+      // rejections of an unfamiliar system prompt.
+      const refHistory = this.buildHistory(
+        conversation,
+        settings,
+        {},
+        buildOpts.visionEnabled
+      ).filter((m) => m.role !== 'system')
+
+      for (const ref of references) emit({ type: 'moa-reference', reference: { ...ref } })
+
+      await Promise.all(
+        preset.referenceModels.map(async (modelRef, index) => {
+          const ref = references[index]
+          let target: ResolvedTarget | undefined
+          try {
+            target = await this.resolveTarget(conversation, settings, {
+              providerId: modelRef.providerId,
+              modelId: modelRef.modelId,
+            })
+            const params: ChatParams = {
+              ...target.params,
+              ...(preset.referenceMaxTokens !== undefined
+                ? { maxTokens: preset.referenceMaxTokens }
+                : {}),
+              ...(preset.referenceTemperature !== undefined
+                ? { temperature: preset.referenceTemperature }
+                : {}),
+            }
+            const result = await this.adapterFor(target).chat(
+              { modelId: target.modelId, messages: refHistory, params, stream: false },
+              this.adapterCtx(target, controller.signal)
+            )
+            ref.status = 'done'
+            ref.text = result.text
+            if (result.usage) ref.usage = result.usage
+          } catch (e) {
+            ref.status = 'error'
+            ref.error = toNormalizedError(
+              e,
+              target?.provider.type,
+              target?.apiKey ? [target.apiKey] : undefined
+            )
+          }
+          emit({ type: 'moa-reference', reference: { ...ref } })
+        })
+      )
+
+      // Persist the advisor blocks now so a reload mid-aggregation still shows
+      // them (finalize re-persists the same array at the end).
+      try {
+        this.db.messages.update(placeholder.id, { moaReferences: references })
+      } catch {
+        // Best-effort; runStream.finalize persists them again regardless.
+      }
+    } catch {
+      // Unexpected reference-phase failure (e.g. a DB read): fall through and run
+      // the aggregator alone rather than wedging the stream as 'streaming'.
+    }
+
+    const anyReferences = references.some((r) => r.status !== 'running')
+    return this.runStream(
+      streamId,
+      conversation,
+      aggregator,
+      buildOpts,
+      placeholder,
+      controller,
+      adapterTools,
+      anyReferences
+        ? { injectedContext: formatMoaContext(references, preset), moaReferences: references }
+        : undefined
+    )
   }
 
   /**
@@ -1168,7 +1541,14 @@ export class ChatService {
     buildOpts: HistoryBuildOptions,
     placeholder: Message,
     controller: AbortController,
-    adapterTools?: AdapterToolDef[]
+    adapterTools?: AdapterToolDef[],
+    /**
+     * Mixture-of-Agents seam: `injectedContext` is appended to the last user
+     * turn (the advisor analyses the aggregator synthesizes), and
+     * `moaReferences` are persisted on the final message so the labelled blocks
+     * survive a reload. Both undefined on the ordinary single-model path.
+     */
+    moaOpts?: { injectedContext?: string; moaReferences?: MoaReferenceOutput[] }
   ): Promise<void> {
     const conversationId = conversation.id
     const emit = (event: StreamEvent): void => {
@@ -1197,6 +1577,7 @@ export class ChatService {
         usage: usage ?? null,
         toolCalls: toolCalls.length > 0 ? toolCalls : null,
         error: error ?? null,
+        ...(moaOpts?.moaReferences ? { moaReferences: moaOpts.moaReferences } : {}),
       }
       try {
         const updated = this.db.messages.update(placeholder.id, patch)
@@ -1236,6 +1617,8 @@ export class ChatService {
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
       const messages: AdapterMessage[] = [...history]
+      // MoA: fold the advisor analyses into the aggregator's latest user turn.
+      if (moaOpts?.injectedContext) appendContextToLastUser(messages, moaOpts.injectedContext)
 
       const appendText = (chunk: string): void => {
         if (chunk.length === 0) return
@@ -1320,7 +1703,9 @@ export class ChatService {
         // and routes 'ask' through the broker -> renderer approval click. The
         // stream's AbortSignal is threaded through so a pending approval
         // resolves false immediately when the stream is stopped.
-        const approval = (req: Omit<ToolApprovalRequest, 'requestId'>): Promise<boolean> =>
+        const approval = (
+          req: Omit<ToolApprovalRequest, 'requestId'>
+        ): Promise<ToolApprovalAnswer> =>
           tools.broker.request(req, this.broadcast, controller.signal)
         const questions = tools.questions
         const askUser = questions
@@ -1332,6 +1717,11 @@ export class ChatService {
               )
           : undefined
         const planMode = conversation.mode === 'code' && conversation.params.planMode === true
+        const autoAcceptEdits = !planMode && conversation.params.autoAcceptEdits === true
+        // Live tool output (shell commands) streams into the same envelope
+        // channel so the renderer can show it while the tool runs.
+        const onToolOutput = (toolCallId: string, chunk: string): void =>
+          emit({ type: 'tool-output', toolCallId, chunk })
         for (const call of roundCalls) {
           if (controller.signal.aborted) {
             throw new ProviderError('aborted', 'Generation stopped.')
@@ -1343,6 +1733,8 @@ export class ChatService {
             approval,
             ...(askUser ? { askUser } : {}),
             planMode,
+            autoAcceptEdits,
+            onToolOutput,
           })
           call.result = result
           call.status = toolCallStatus(result)

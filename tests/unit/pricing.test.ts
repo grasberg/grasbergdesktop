@@ -32,6 +32,22 @@ describe('estimateCost', () => {
     expect(estimateCost({ completionTokens: 1_000_000 }, pricing)).toBeCloseTo(2, 6)
     expect(estimateCost({ totalTokens: 5 }, pricing)).toBeUndefined()
   })
+
+  it('bills cache-hit input tokens at the cached rate when known', () => {
+    const pricing = { inputPerMTok: 1, outputPerMTok: 2, cachedInputPerMTok: 0.1 }
+    // 1M prompt of which 500k cached: 0.5 * $1 + 0.5 * $0.1 = 0.55
+    const cost = estimateCost({ promptTokens: 1_000_000, cachedInputTokens: 500_000 }, pricing)
+    expect(cost).toBeCloseTo(0.55, 6)
+    // Without a cached rate, cached tokens bill at the normal rate.
+    const flat = estimateCost(
+      { promptTokens: 1_000_000, cachedInputTokens: 500_000 },
+      { inputPerMTok: 1, outputPerMTok: 2 }
+    )
+    expect(flat).toBeCloseTo(1, 6)
+    // A cached count larger than the prompt is clamped, never negative.
+    const clamped = estimateCost({ promptTokens: 100, cachedInputTokens: 200 }, pricing)
+    expect(clamped).toBeGreaterThanOrEqual(0)
+  })
 })
 
 describe('formatCost', () => {

@@ -9,6 +9,9 @@ const PLATFORM_LABELS: Record<AppInfo['platform'], string> = {
   linux: 'Linux',
 }
 
+const AUTHOR_NAME = 'Magnus Gräsberg'
+const AUTHOR_EMAIL = 'magnus@grasberg.se'
+
 export default function AboutTab() {
   const toast = useUiStore((s) => s.toast)
   const [info, setInfo] = useState<AppInfo | null>(null)
@@ -36,6 +39,15 @@ export default function AboutTab() {
     try {
       await navigator.clipboard.writeText(info.userDataPath)
       toast('Data path copied', 'success')
+    } catch {
+      toast('Could not copy to clipboard', 'error')
+    }
+  }
+
+  async function copyEmail() {
+    try {
+      await navigator.clipboard.writeText(AUTHOR_EMAIL)
+      toast('Email copied', 'success')
     } catch {
       toast('Could not copy to clipboard', 'error')
     }
@@ -99,6 +111,30 @@ export default function AboutTab() {
           ) : null}
         </>
       ) : null}
+
+      <h4 className="section-subhead">Developer</h4>
+      <dl className="kv-table">
+        <div className="kv-row">
+          <dt>Name</dt>
+          <dd>{AUTHOR_NAME}</dd>
+        </div>
+        <div className="kv-row">
+          <dt>Email</dt>
+          <dd className="kv-path">
+            <span className="mono" title={AUTHOR_EMAIL}>
+              {AUTHOR_EMAIL}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void copyEmail()}
+              aria-label="Copy email"
+            >
+              Copy
+            </button>
+          </dd>
+        </div>
+      </dl>
 
       <p className="field-hint about-licenses">
         Grasberg Desktop is released under the MIT license. It is built with open-source

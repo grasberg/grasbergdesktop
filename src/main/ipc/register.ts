@@ -36,6 +36,7 @@ import {
   resolveModelCatalog,
 } from '@shared/catalog'
 import { presetMeta } from '@shared/presets'
+import { modeModelDefault } from '@shared/mode-models'
 import {
   apiKeySchema,
   chatParamsSchema,
@@ -52,6 +53,8 @@ import {
   skillPatchSchema,
   providerConfigInputSchema,
   providerConfigPatchSchema,
+  providerTypeSchema,
+  authModeSchema,
   settingsPatchSchema,
   isValidStorageKey,
 } from '@shared/schemas'
@@ -159,10 +162,20 @@ const conversationModeSchema = z.enum([
   'design',
 ]) satisfies z.ZodType<ConversationMode>
 
+const previewModelsSchema = z.object({
+  type: providerTypeSchema,
+  baseUrl: z.string().trim().max(2000).optional(),
+  // Same cap as apiKeySchema; used transiently, never stored.
+  apiKey: z.string().max(4096).optional(),
+  presetId: z.string().max(100).nullable().optional(),
+  authMode: authModeSchema.optional(),
+})
+
 const convListSchema = z
   .object({
     mode: conversationModeSchema.optional(),
     search: z.string().max(500).optional(),
+    projectRef: z.string().min(1).max(200).optional(),
     limit: z.number().int().positive().max(1000).optional(),
   })
   .optional()
@@ -175,6 +188,8 @@ const convCreateSchema = z.object({
   systemPrompt: z.string().max(100_000).nullable().optional(),
   workspaceId: z.string().nullable().optional(),
   projectId: z.string().nullable().optional(),
+  projectRef: z.string().min(1).nullable().optional(),
+  moaPresetId: z.string().min(1).nullable().optional(),
 })
 
 const convUpdateSchema = z.object({
@@ -187,7 +202,24 @@ const convUpdateSchema = z.object({
     params: chatParamsSchema.optional(),
     workspaceId: z.string().min(1).nullable().optional(),
     projectId: z.string().min(1).nullable().optional(),
+    projectRef: z.string().min(1).nullable().optional(),
+    moaPresetId: z.string().min(1).nullable().optional(),
   }),
+})
+
+const projectListSchema = z
+  .object({
+    mode: conversationModeSchema.optional(),
+  })
+  .optional()
+
+const projectCreateSchema = z.object({
+  mode: conversationModeSchema,
+  name: z.string().trim().min(1).max(200),
+})
+
+const projectPatchSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
 })
 
 // A non-strict object: unknown keys (e.g. the transient `dataUrl`) are dropped,
@@ -217,6 +249,7 @@ const chatSendSchema = z.object({
       providerId: z.string().optional(),
       modelId: z.string().optional(),
       params: chatParamsSchema.optional(),
+      moaPresetId: z.string().min(1).nullable().optional(),
     })
     .optional(),
 })
@@ -277,6 +310,14 @@ const codeReadFileSchema = z.object({
   projectId: z.string().min(1),
   relPath: z.string().min(1).max(2000),
 })
+
+const codeSuggestFilesSchema = z.object({
+  projectId: z.string().min(1),
+  query: z.string().max(500),
+  limit: z.number().int().positive().max(50).optional(),
+})
+
+const approvalScopeSchema = z.enum(['once', 'conversation'])
 
 const convExportSchema = z.object({
   conversationId: z.string().min(1),
@@ -471,6 +512,12 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       }
       apiKey = keystore.decryptKey(encrypted)
     }
+    // Probe with the provider's chosen model (falling back to the catalog
+    // default) so Test validates the model the user actually configured.
+    const catalog = resolveModelCatalog(provider)
+    const modelCatalog = provider.defaultModelId
+      ? { ...catalog, defaultModelId: provider.defaultModelId }
+      : catalog
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TEST_CONNECTION_TIMEOUT_MS)
     try {
@@ -478,7 +525,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
         apiKey,
         baseUrl: provider.baseUrl,
         accountId,
-        modelCatalog: resolveModelCatalog(provider),
+        modelCatalog,
         signal: controller.signal,
       })
     } finally {
@@ -504,6 +551,28 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl, modelCatalog })
   })
 
+  register(CHANNELS.providersPreviewModels, async (req) => {
+    const parsed = parseInput(previewModelsSchema, req)
+    const meta = PROVIDER_TYPES[parsed.type]
+    const authMode = parsed.authMode ?? 'api_key'
+    const modelCatalog = resolveModelCatalog({ type: parsed.type, presetId: parsed.presetId ?? null })
+    const baseUrl = parsed.baseUrl?.trim() || meta.defaultBaseUrl
+    // Never send the key to a plaintext remote endpoint.
+    if (baseUrl && !isAllowedHttpUrl(baseUrl)) {
+      throw invalid('Base URL must use https:// (http:// is only allowed for localhost).')
+    }
+    const apiKey = parsed.apiKey?.trim() ?? ''
+    try {
+      // OAuth returns its static Codex list (no key); listing families fetch
+      // /models with the ad-hoc key; the rest return their static catalog.
+      return await resolveAdapter(parsed.type, authMode).listModels({ apiKey, baseUrl, modelCatalog })
+    } catch {
+      // Bad key / unreachable / no /models: fall back to the known catalog so the
+      // user can still pick a model (or type a custom id).
+      return modelCatalog.knownModels
+    }
+  })
+
   register(CHANNELS.providersOauthStart, async (id) => {
     const provider = requireProvider(id)
     if (provider.authMode !== 'chatgpt_oauth') {
@@ -527,9 +596,22 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.convList, (req) => db.conversations.list(parseInput(convListSchema, req)))
 
-  register(CHANNELS.convCreate, (req) =>
-    db.conversations.create(parseInput(convCreateSchema, req))
-  )
+  register(CHANNELS.convCreate, (req) => {
+    const parsed = parseInput(convCreateSchema, req)
+    // Stamp the per-mode default provider/model onto the new conversation when
+    // the caller didn't specify one and the feature is on for this mode.
+    if (parsed.providerId == null && parsed.modelId == null) {
+      const modeDefault = modeModelDefault(db.settings.get(), parsed.mode)
+      if (modeDefault) {
+        return db.conversations.create({
+          ...parsed,
+          providerId: modeDefault.providerId,
+          modelId: modeDefault.modelId,
+        })
+      }
+    }
+    return db.conversations.create(parsed)
+  })
 
   register(CHANNELS.convGet, (id) =>
     found(db.conversations.getById(requireString(id, 'Conversation id')), 'Conversation')
@@ -571,6 +653,41 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     )
   })
 
+  // -- projects (per-mode organizational grouping) ---------------------------------
+
+  register(CHANNELS.projectsList, (req) => {
+    const parsed = parseInput(projectListSchema, req)
+    return db.projects.list(parsed?.mode)
+  })
+
+  register(CHANNELS.projectsCreate, (input) =>
+    db.projects.create(parseInput(projectCreateSchema, input))
+  )
+
+  register(CHANNELS.projectsUpdate, (id, patch) => {
+    const projectId = requireString(id, 'Project id')
+    return found(db.projects.update(projectId, parseInput(projectPatchSchema, patch)), 'Project')
+  })
+
+  register(CHANNELS.projectsDelete, (id) => {
+    db.projects.remove(requireString(id, 'Project id'))
+    return undefined
+  })
+
+  // -- data maintenance ------------------------------------------------------------
+
+  register(CHANNELS.dataDeleteAllContent, async () => {
+    // Abort (and persist) any in-flight generation first so no detached loop
+    // writes to rows we are about to delete.
+    await chatService.stopAll()
+    db.driver.transaction(() => {
+      db.conversations.deleteAll() // cascades messages + documents
+      db.workspaces.deleteAll() // cascades workspace_items
+      db.projects.deleteAll()
+    })
+    return undefined
+  })
+
   // -- chat ------------------------------------------------------------------------
 
   register(CHANNELS.chatSend, (req) => {
@@ -590,6 +707,11 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.chatRegenerate, (req) =>
     chatService.regenerate(parseInput(chatRegenerateSchema, req))
+  )
+
+  // Manual context compaction (the /compact command).
+  register(CHANNELS.chatCompact, (conversationId) =>
+    chatService.compactNow(requireString(conversationId, 'Conversation id'))
   )
 
   register(CHANNELS.chatEditAndRerun, (req) => {
@@ -682,6 +804,16 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     codeService.rejectChange(requireString(changeId, 'Change id'))
   )
 
+  // Restores an APPLIED change's pre-change content — explicit user click only.
+  register(CHANNELS.codeChangeRevert, (changeId) =>
+    codeService.revertChange(requireString(changeId, 'Change id'))
+  )
+
+  register(CHANNELS.codeSuggestFiles, (req) => {
+    const parsed = parseInput(codeSuggestFilesSchema, req)
+    return codeService.suggestFiles(parsed.projectId, parsed.query, parsed.limit ?? 12)
+  })
+
   // -- tools --------------------------------------------------------------------
 
   register(CHANNELS.toolsList, () => toolSystem.registry.listDefinitions())
@@ -704,12 +836,14 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   // The renderer's approve/decline click for a pending tool call. Unknown or
-  // expired requestIds are ignored by the broker (still resolves ok).
-  register(CHANNELS.toolsApprovalRespond, (requestId, approved) => {
-    approvalBroker.respond(
-      requireString(requestId, 'Request id'),
-      requireBoolean(approved, 'approved')
-    )
+  // expired requestIds are ignored by the broker (still resolves ok). Scope
+  // 'conversation' additionally auto-approves the tool's future calls in the
+  // same conversation (in-memory, this app session only).
+  register(CHANNELS.toolsApprovalRespond, (requestId, approved, scope) => {
+    approvalBroker.respond(requireString(requestId, 'Request id'), {
+      approved: requireBoolean(approved, 'approved'),
+      scope: parseInput(approvalScopeSchema, scope ?? 'once'),
+    })
     return undefined
   })
 

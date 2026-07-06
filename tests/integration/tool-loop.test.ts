@@ -156,15 +156,15 @@ function makeHarness(): Harness {
 
   // Auto-approving broker stub + executor stub that exercises the approval
   // seam exactly like the real ToolExecutor would for an 'ask' permission.
-  const brokerRequest = vi.fn(async () => true)
+  const brokerRequest = vi.fn(async () => ({ approved: true, scope: 'once' as const }))
   const execute = vi.fn(async (toolCall: ToolCallRecord, ctx: ToolExecuteContext) => {
-    const approved = await ctx.approval({
+    const answer = await ctx.approval({
       streamId: ctx.streamId ?? '',
       conversationId: ctx.conversation.id,
       toolCall,
       risk: 'sensitive',
     })
-    return approved ? TOOL_RESULT : 'declined'
+    return answer.approved ? TOOL_RESULT : 'declined'
   })
   const tools: ChatToolSystem = {
     registry: { listEnabledDefinitions: () => [fileSearchDefinition] },
@@ -319,7 +319,7 @@ describe('ChatService tool loop (real db, scripted adapter)', () => {
           registry: { listEnabledDefinitions: () => [fileSearchDefinition] },
           // Mirrors the real executor's decline sentinel exactly.
           executor: { execute: async () => 'User declined this tool call.' },
-          broker: { request: async () => false },
+          broker: { request: async () => ({ approved: false, scope: 'once' as const }) },
         },
         resolveAdapter: () => adapter,
       }

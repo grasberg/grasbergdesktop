@@ -21,9 +21,8 @@ export interface ModelPricing {
   /** USD per 1M output (completion) tokens. */
   outputPerMTok: number
   /**
-   * USD per 1M input tokens that hit the provider's prompt cache. Present for
-   * reference; not applied in the estimate because TokenUsage does not yet
-   * report a cache-hit token split.
+   * USD per 1M input tokens that hit the provider's prompt cache. Applied in
+   * the estimate when TokenUsage reports cachedInputTokens.
    */
   cachedInputPerMTok?: number
 }
@@ -94,7 +93,13 @@ export function estimateCost(usage: TokenUsage, pricing: ModelPricing): number |
   const prompt = usage.promptTokens
   const completion = usage.completionTokens
   if (prompt == null && completion == null) return undefined
-  const input = ((prompt ?? 0) / 1_000_000) * pricing.inputPerMTok
+  // Cache-hit input tokens bill at the (cheaper) cached rate when known.
+  // Providers report promptTokens inclusive of cached tokens, so split them.
+  const cached = Math.min(usage.cachedInputTokens ?? 0, prompt ?? 0)
+  const cachedRate = pricing.cachedInputPerMTok ?? pricing.inputPerMTok
+  const input =
+    (((prompt ?? 0) - cached) / 1_000_000) * pricing.inputPerMTok +
+    (cached / 1_000_000) * cachedRate
   const output = ((completion ?? 0) / 1_000_000) * pricing.outputPerMTok
   return input + output
 }

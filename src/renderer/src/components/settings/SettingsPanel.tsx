@@ -4,6 +4,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
 import ProvidersTab from './ProvidersTab'
 import DefaultsTab from './DefaultsTab'
+import MoaTab from './MoaTab'
 import ToolsTab from './ToolsTab'
 import McpServersTab from './McpServersTab'
 import BridgesTab from './BridgesTab'
@@ -18,6 +19,7 @@ import './settings.css'
 const TABS = [
   { id: 'providers', label: 'Providers' },
   { id: 'defaults', label: 'Defaults' },
+  { id: 'moa', label: 'Mixture of Agents' },
   { id: 'tools', label: 'Tools' },
   { id: 'mcp', label: 'MCP' },
   { id: 'bridges', label: 'Bridges' },
@@ -114,6 +116,7 @@ export default function SettingsPanel() {
           >
             {tab === 'providers' ? <ProvidersTab /> : null}
             {tab === 'defaults' ? <DefaultsTab /> : null}
+            {tab === 'moa' ? <MoaTab /> : null}
             {tab === 'tools' ? <ToolsTab /> : null}
             {tab === 'mcp' ? <McpServersTab /> : null}
             {tab === 'bridges' ? <BridgesTab /> : null}

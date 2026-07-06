@@ -202,12 +202,22 @@ export interface ToolCallRecord {
   /** Result content if the tool ran (or user-declined note). */
   result?: string
   status: 'proposed' | 'approved' | 'denied' | 'done' | 'error'
+  /**
+   * Live output streamed while the tool runs (currently shell commands).
+   * Renderer-side only — accumulated from 'tool-output' stream events; main
+   * never sets it and the final `result` supersedes it.
+   */
+  liveOutput?: string
 }
 
 export interface TokenUsage {
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
+  /** Prompt tokens served from the provider's prompt cache (cheaper rate). */
+  cachedInputTokens?: number
+  /** Prompt tokens written to the provider's prompt cache (Anthropic). */
+  cacheCreationTokens?: number
 }
 
 export interface Message {
@@ -225,10 +235,24 @@ export interface Message {
   providerId?: string
   modelId?: string
   usage?: TokenUsage
+  /**
+   * Mixture-of-Agents: the advisor (reference) model outputs that fed the
+   * aggregator which produced this assistant message. Present only when the
+   * message was generated via a MoA preset.
+   */
+  moaReferences?: MoaReferenceOutput[]
   /** Monotonic order within the conversation. */
   seq: number
   createdAt: number
 }
+
+/**
+ * How much reasoning/thinking the model should spend before answering.
+ * Mapped per provider: OpenAI-compatible `reasoning_effort`, Anthropic
+ * extended-thinking budgets, Gemini `thinkingConfig.thinkingBudget`.
+ * Unset = provider default (no reasoning parameter sent).
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high'
 
 /** Sampling parameters; all optional — provider defaults apply when unset. */
 export interface ChatParams {
@@ -239,6 +263,13 @@ export interface ChatParams {
   presencePenalty?: number
   /** Code mode: read-only investigation + plan first (mutating tools blocked). */
   planMode?: boolean
+  /**
+   * Auto-accept file edits: edit_file/write_file run without the per-call
+   * approval dialog (all other tools still ask). Off unless explicitly set.
+   */
+  autoAcceptEdits?: boolean
+  /** Reasoning/thinking effort; unset = provider default. */
+  reasoningEffort?: ReasoningEffort
 }
 
 export interface Conversation {
@@ -252,8 +283,21 @@ export interface Conversation {
   params: ChatParams
   /** Cowork workspace this conversation belongs to (cowork mode). */
   workspaceId: string | null
-  /** Code project this conversation belongs to (code mode). */
+  /** Code project (folder) this conversation belongs to (code mode). */
   projectId: string | null
+  /**
+   * Organizational Project (see the `Project` type / `projects` table) this
+   * task belongs to, or null = unfiled. Available in every mode and always of
+   * the same mode as the conversation. Distinct from `projectId`, which is the
+   * Code-mode granted folder.
+   */
+  projectRef: string | null
+  /**
+   * Mixture-of-Agents preset (see `AppSettings.moaPresets`) this conversation
+   * generates through, or null = ordinary single-model generation. When set,
+   * the aggregator model of the preset acts as the assistant.
+   */
+  moaPresetId: string | null
   /** Running summary of older messages (context compaction), or null. */
   summaryText?: string | null
   /** Highest message seq the summary covers; messages at/below it are pruned. */
@@ -269,6 +313,82 @@ export interface ConversationSummary {
   updatedAt: number
   /** First ~100 chars of the latest message, for the sidebar. */
   snippet: string | null
+  /** Organizational Project this task belongs to, or null = unfiled. */
+  projectRef: string | null
+}
+
+/**
+ * A per-mode organizational Project: a lightweight folder that groups tasks
+ * (conversations) within one mode. Every mode (chat/cowork/code/write/design)
+ * has its own project list. Orthogonal to Cowork workspaces and Code folders —
+ * a project just organizes the sidebar; it holds no working state of its own.
+ */
+export interface Project {
+  id: string
+  mode: ConversationMode
+  name: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ProjectInput {
+  mode: ConversationMode
+  name: string
+}
+
+export interface ProjectPatch {
+  name?: string
+}
+
+// ---------------------------------------------------------------------------
+// Mixture of Agents (MoA)
+// ---------------------------------------------------------------------------
+
+/** A provider+model pair referenced by a MoA preset (advisor or aggregator). */
+export interface MoaModelRef {
+  providerId: string
+  modelId: string
+}
+
+/**
+ * A Mixture-of-Agents preset: N advisor ("reference") models answer the request
+ * in parallel, then a single aggregator model synthesizes their outputs into the
+ * final answer (and drives any tool calls). Presets live in AppSettings; a
+ * conversation opts in via `Conversation.moaPresetId`.
+ */
+export interface MoaPreset {
+  id: string
+  name: string
+  /** Advisor models, run in parallel with no tools on the conversation text (≥1). */
+  referenceModels: MoaModelRef[]
+  /** The acting model: reads all advisor outputs and writes the assistant reply. */
+  aggregator: MoaModelRef
+  /** Caps advisor output; undefined = provider/conversation default. */
+  referenceMaxTokens?: number
+  referenceTemperature?: number
+  aggregatorTemperature?: number
+  /** Max output tokens for the aggregator; undefined = provider/conversation default. */
+  maxTokens?: number
+  enabled: boolean
+}
+
+/**
+ * One advisor model's contribution to a MoA generation. Streamed to the renderer
+ * as it runs and persisted on the produced assistant message so the labelled
+ * blocks survive a reload. A failed advisor is recorded (status 'error') but
+ * never aborts the aggregator.
+ */
+export interface MoaReferenceOutput {
+  /** Stable position in the preset's referenceModels list. */
+  index: number
+  /** Human-readable "<provider label> · <modelId>". */
+  label: string
+  providerId: string
+  modelId: string
+  status: 'running' | 'done' | 'error'
+  text: string
+  error?: NormalizedError
+  usage?: TokenUsage
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +400,11 @@ export type StreamEvent =
   | { type: 'text-delta'; text: string }
   | { type: 'reasoning-delta'; text: string }
   | { type: 'tool-call'; toolCall: ToolCallRecord }
+  /** Incremental output from a running tool (shell commands stream stdout/err). */
+  | { type: 'tool-output'; toolCallId: string; chunk: string }
   | { type: 'usage'; usage: TokenUsage }
+  /** Mixture-of-Agents: an advisor model started/finished (upsert by index). */
+  | { type: 'moa-reference'; reference: MoaReferenceOutput }
   | {
       type: 'done'
       finishReason: 'stop' | 'length' | 'tool_calls' | 'aborted' | 'error'
@@ -309,11 +433,33 @@ export interface StartStreamResult {
 
 export type ThemeSetting = 'system' | 'light' | 'dark'
 
+/** A per-mode default provider/model for new conversations (null = global default). */
+export interface ModeModelDefault {
+  providerId: string | null
+  modelId: string | null
+}
+
 export interface AppSettings {
   theme: ThemeSetting
   /** Global default provider/model used by new conversations. */
   defaultProviderId: string | null
   defaultModelId: string | null
+  /**
+   * When true, a new conversation is stamped with the per-mode provider/model
+   * from `modeModels` for its mode (modes left blank fall back to the global
+   * default). When false, every mode uses the global default. Existing
+   * conversations are unaffected; each can still override its model.
+   */
+  perModeModelsEnabled: boolean
+  /** Per-mode default provider/model (a null providerId means "use default"). */
+  modeModels: Record<ConversationMode, ModeModelDefault>
+  /**
+   * Mixture-of-Agents presets (advisor models + aggregator). Configured in
+   * Settings → Mixture of Agents; a conversation opts in via its `moaPresetId`.
+   */
+  moaPresets: MoaPreset[]
+  /** Preset used by the one-shot `/moa` command; null = no default configured. */
+  defaultMoaPresetId: string | null
   defaultSystemPrompt: string
   defaultParams: ChatParams
   /** Local-first: everything below defaults to false/off. */
@@ -340,6 +486,13 @@ export interface AppSettings {
    */
   shellExecutionEnabled: boolean
   /**
+   * Command prefixes run_shell_command may run WITHOUT the per-call approval
+   * dialog (e.g. "npm test", "git status"). A command matches when it equals a
+   * prefix or continues it at a word boundary. Empty by default; only relevant
+   * while shellExecutionEnabled is on.
+   */
+  shellCommandAllowlist: string[]
+  /**
    * Opt-in: enable the `browser` and `computer` tools (an embedded, sandboxed
    * browser the assistant can drive). Off by default — they reach the internet
    * and act on pages, still gated by per-call approval.
@@ -364,6 +517,16 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
   defaultProviderId: null,
   defaultModelId: null,
+  perModeModelsEnabled: false,
+  modeModels: {
+    chat: { providerId: null, modelId: null },
+    cowork: { providerId: null, modelId: null },
+    code: { providerId: null, modelId: null },
+    write: { providerId: null, modelId: null },
+    design: { providerId: null, modelId: null },
+  },
+  moaPresets: [],
+  defaultMoaPresetId: null,
   defaultSystemPrompt: '',
   defaultParams: {},
   telemetryEnabled: false,
@@ -375,6 +538,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   compactionThresholdRatio: 0.75,
   memoryEnabled: true,
   shellExecutionEnabled: false,
+  shellCommandAllowlist: [],
   browserToolsEnabled: false,
   telegramBridgeEnabled: false,
   telegramBridgeConversationId: null,
@@ -392,6 +556,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
  */
 export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'shellExecutionEnabled',
+  'shellCommandAllowlist',
   'browserToolsEnabled',
   'outboundWebhookUrl',
   'telegramBridgeEnabled',
@@ -453,7 +618,7 @@ export interface FileTreeNode {
 }
 
 export type CodeChangeType = 'create' | 'edit' | 'delete'
-export type CodeChangeStatus = 'proposed' | 'applied' | 'rejected'
+export type CodeChangeStatus = 'proposed' | 'applied' | 'rejected' | 'reverted'
 
 export interface CodeChange {
   id: string
@@ -581,6 +746,20 @@ export interface ToolApprovalRequest {
   conversationId: string
   toolCall: ToolCallRecord
   risk: ToolRiskLevel
+}
+
+/**
+ * How far an approval reaches. 'once' approves this single call;
+ * 'conversation' also auto-approves future calls of the same tool in the same
+ * conversation (in-memory only — resets on app restart).
+ */
+export type ToolApprovalScope = 'once' | 'conversation'
+
+/** The renderer's answer to a ToolApprovalRequest. */
+export interface ToolApprovalAnswer {
+  approved: boolean
+  /** Meaningful only when approved; defaults to 'once'. */
+  scope: ToolApprovalScope
 }
 
 /** A structured clarifying question from the assistant (ask_user_question). */

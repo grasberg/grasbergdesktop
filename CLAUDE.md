@@ -40,7 +40,7 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v15, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v18, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
 - `src/renderer/src/stores/contracts.ts` — renderer store contracts
 
@@ -70,6 +70,8 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 ### Chat/streaming pipeline (`src/main/services/chat-service.ts`)
 
 `chat.send` persists the user message + a placeholder assistant message (`status: 'streaming'`), returns a `streamId`, then runs the adapter generator and forwards `StreamEventEnvelope`s to the renderer. Stop aborts the AbortController and persists partial text as `stopped`; streaming rows are marked `stopped` at boot. Regenerate = delete trailing assistant message and re-run; edit+rerun = truncate after the edited message. History is linear (`seq` column). The chat service also owns the multi-round tool-call loop, the `delegate` sub-agent, context compaction, and headless generation (IM bridge, workflows).
+
+**Mixture of Agents:** a conversation can opt into a MoA preset (`AppSettings.moaPresets`; composer toggle sets `conversation.moaPresetId`, or one-shot via `/moa`). `runMoaStream` fans the preset's advisor models out in parallel (`adapter.chat`, no tools, conversation text only), streams each as a `moa-reference` event + persists them on the message (`Message.moaReferences`), then delegates to the same `runStream` with the aggregator as the acting model and the advisor analyses injected into the last user turn — so the aggregator keeps the full tool loop / abort / persistence path. Advisor failures are captured, never fatal.
 
 ### Tool system (`src/main/tools/`)
 

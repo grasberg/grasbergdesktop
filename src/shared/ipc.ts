@@ -15,11 +15,13 @@ import type {
   AppInfo,
   AppSettings,
   Attachment,
+  AuthMode,
   ChatParams,
   CodeChange,
   CodeProject,
   Conversation,
   ConversationMode,
+  ProviderType,
   ConversationSummary,
   CustomToolInfo,
   CustomToolInput,
@@ -48,6 +50,9 @@ import type {
   ModelInfo,
   NormalizedError,
   OAuthStatus,
+  Project,
+  ProjectInput,
+  ProjectPatch,
   ProviderConfig,
   ProviderConfigInput,
   ProviderConfigPatch,
@@ -59,6 +64,7 @@ import type {
   StreamEventEnvelope,
   TestConnectionResult,
   ToolApprovalRequest,
+  ToolApprovalScope,
   UserQuestionRequest,
   ToolDefinition,
   ToolPermission,
@@ -102,6 +108,7 @@ export const CHANNELS = {
   providersDeleteKey: 'providers:deleteKey',
   providersTest: 'providers:test',
   providersListModels: 'providers:listModels',
+  providersPreviewModels: 'providers:previewModels',
   providersOauthStart: 'providers:oauthStart',
   providersOauthLogout: 'providers:oauthLogout',
   providersOauthStatus: 'providers:oauthStatus',
@@ -115,11 +122,22 @@ export const CHANNELS = {
   convMessages: 'conv:messages',
   convExport: 'conv:export',
 
+  // projects (per-mode organizational grouping of conversations)
+  projectsList: 'projects:list',
+  projectsCreate: 'projects:create',
+  projectsUpdate: 'projects:update',
+  projectsDelete: 'projects:delete',
+
+  // data maintenance (destructive bulk operations)
+  dataDeleteAllContent: 'data:deleteAllContent',
+
   // chat generation
   chatSend: 'chat:send',
   chatStop: 'chat:stop',
   chatRegenerate: 'chat:regenerate',
   chatEditAndRerun: 'chat:editAndRerun',
+  /** Manual context compaction (the /compact command). */
+  chatCompact: 'chat:compact',
 
   // cowork
   workspaceList: 'workspace:list',
@@ -141,6 +159,9 @@ export const CHANNELS = {
   codeChangesList: 'code:changes:list',
   codeChangeApply: 'code:changes:apply',
   codeChangeReject: 'code:changes:reject',
+  codeChangeRevert: 'code:changes:revert',
+  /** Path autocomplete for @-file mentions in the composer. */
+  codeSuggestFiles: 'code:suggestFiles',
 
   // tools
   toolsList: 'tools:list',
@@ -224,10 +245,26 @@ export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
 // Request payloads
 // ---------------------------------------------------------------------------
 
+/**
+ * Ad-hoc "list the provider's models" for the Add-provider form, before the
+ * provider exists. The apiKey travels to main once, is used transiently for the
+ * /models call and is never stored or returned. Falls back to the static
+ * catalog when listing isn't supported or the call fails.
+ */
+export interface PreviewModelsRequest {
+  type: ProviderType
+  baseUrl?: string
+  apiKey?: string
+  presetId?: string | null
+  authMode?: AuthMode
+}
+
 export interface ConvListRequest {
   mode?: ConversationMode
   /** Case-insensitive search over title and message content. */
   search?: string
+  /** Restrict to tasks filed under this organizational Project. */
+  projectRef?: string
   limit?: number
 }
 
@@ -239,6 +276,10 @@ export interface ConvCreateRequest {
   systemPrompt?: string | null
   workspaceId?: string | null
   projectId?: string | null
+  /** File the new task under this organizational Project (same mode). */
+  projectRef?: string | null
+  /** Generate this conversation through a Mixture-of-Agents preset. */
+  moaPresetId?: string | null
 }
 
 export interface ConvUpdateRequest {
@@ -253,7 +294,16 @@ export interface ConvUpdateRequest {
     workspaceId: string | null
     /** Link/unlink a code project (code mode). */
     projectId: string | null
+    /** File/unfile the task under an organizational Project (any mode). */
+    projectRef: string | null
+    /** Select/clear the Mixture-of-Agents preset this conversation runs through. */
+    moaPresetId: string | null
   }>
+}
+
+export interface ProjectListRequest {
+  /** List projects for this mode (omit to list every mode's projects). */
+  mode?: ConversationMode
 }
 
 export type ConvExportFormat = 'markdown' | 'json'
@@ -275,7 +325,13 @@ export interface ChatSendRequest {
   content: string
   attachments?: Attachment[]
   /** One-off overrides for this generation only. */
-  overrides?: { providerId?: string; modelId?: string; params?: ChatParams }
+  overrides?: {
+    providerId?: string
+    modelId?: string
+    params?: ChatParams
+    /** One-shot Mixture-of-Agents run (the `/moa` command) without changing the model. */
+    moaPresetId?: string | null
+  }
 }
 
 export interface ChatRegenerateRequest {
@@ -294,6 +350,20 @@ export interface ChatEditAndRerunRequest {
 export interface CodeReadFileRequest {
   projectId: string
   relPath: string
+}
+
+export interface CodeSuggestFilesRequest {
+  projectId: string
+  /** Case-insensitive substring matched against relative paths. */
+  query: string
+  /** Max paths returned (default 12, capped in main). */
+  limit?: number
+}
+
+/** Result of a manual /compact run. */
+export interface ChatCompactResult {
+  /** False when there was nothing (or too little) to summarize. */
+  compacted: boolean
 }
 
 export interface CodeReadFileResult {
@@ -336,6 +406,8 @@ export interface UldApi {
     deleteKey(id: string): Promise<IpcResult<ProviderConfig>>
     test(id: string): Promise<IpcResult<TestConnectionResult>>
     listModels(id: string): Promise<IpcResult<ModelInfo[]>>
+    /** Live model list for a not-yet-created provider (Add form). Key not stored. */
+    previewModels(input: PreviewModelsRequest): Promise<IpcResult<ModelInfo[]>>
     /** Start the "Sign in with ChatGPT" OAuth flow (opens the system browser). */
     oauthStart(id: string): Promise<IpcResult<OAuthStatus>>
     /** Sign out / forget the stored OAuth session. */
@@ -353,11 +425,29 @@ export interface UldApi {
     /** Serializes a conversation to a file via a native save dialog (main). */
     export(req: ConvExportRequest): Promise<IpcResult<ConvExportResult>>
   }
+  projects: {
+    /** Organizational projects, newest first; scoped by mode when given. */
+    list(req?: ProjectListRequest): Promise<IpcResult<Project[]>>
+    create(input: ProjectInput): Promise<IpcResult<Project>>
+    update(id: string, patch: ProjectPatch): Promise<IpcResult<Project>>
+    /** Deletes the project; its tasks are unfiled (projectRef set to null). */
+    delete(id: string): Promise<IpcResult<void>>
+  }
+  data: {
+    /**
+     * Permanently deletes ALL conversations (every mode, with their messages and
+     * documents), ALL organizational projects, and ALL cowork workspaces. Keys,
+     * providers, settings, memories, skills and granted code folders are kept.
+     */
+    deleteAllContent(): Promise<IpcResult<void>>
+  }
   chat: {
     send(req: ChatSendRequest): Promise<IpcResult<StartStreamResult>>
     stop(streamId: string): Promise<IpcResult<void>>
     regenerate(req: ChatRegenerateRequest): Promise<IpcResult<StartStreamResult>>
     editAndRerun(req: ChatEditAndRerunRequest): Promise<IpcResult<StartStreamResult>>
+    /** Summarize older messages now (the /compact command). */
+    compact(conversationId: string): Promise<IpcResult<ChatCompactResult>>
     /** Subscribe to stream events; returns unsubscribe. */
     onStreamEvent(cb: (envelope: StreamEventEnvelope) => void): () => void
   }
@@ -395,13 +485,22 @@ export interface UldApi {
     /** Applies a proposed change to disk — only ever called from an explicit user click. */
     changeApply(changeId: string): Promise<IpcResult<CodeChange>>
     changeReject(changeId: string): Promise<IpcResult<CodeChange>>
+    /** Restores the pre-change content of an APPLIED change (explicit click). */
+    changeRevert(changeId: string): Promise<IpcResult<CodeChange>>
+    /** Relative-path suggestions for @-file mentions in the composer. */
+    suggestFiles(req: CodeSuggestFilesRequest): Promise<IpcResult<string[]>>
   }
   tools: {
     list(): Promise<IpcResult<ToolDefinition[]>>
     setEnabled(toolId: string, enabled: boolean): Promise<IpcResult<void>>
     permissionsList(): Promise<IpcResult<ToolPermission[]>>
     permissionSet(toolId: string, decision: ToolPermissionDecision): Promise<IpcResult<void>>
-    approvalRespond(requestId: string, approved: boolean): Promise<IpcResult<void>>
+    /** scope 'conversation' also auto-approves the tool's future calls there. */
+    approvalRespond(
+      requestId: string,
+      approved: boolean,
+      scope?: ToolApprovalScope
+    ): Promise<IpcResult<void>>
     onApprovalRequest(cb: (req: ToolApprovalRequest) => void): () => void
     /** Fires with the requestId whenever main settles an approval (respond/timeout/abort). */
     onApprovalSettled(cb: (requestId: string) => void): () => void

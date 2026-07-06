@@ -220,6 +220,13 @@ function bootstrap(): void {
   const toolSystem = createToolSystem(database, codeService, {
     mcp,
     shellEnabled: () => database.settings.get().shellExecutionEnabled,
+    shellAllowlist: () => database.settings.get().shellCommandAllowlist,
+    shellBackground: {
+      start: (command, cwd) =>
+        chatService
+          ? chatService.startShellBackground(command, cwd)
+          : 'Error: background shell jobs unavailable.',
+    },
     browserEnabled: () => database.settings.get().browserToolsEnabled,
     browser,
     // Resolved at call time; chatService (below) is set before any generation.

@@ -14,6 +14,7 @@ import {
   ChatService,
   INIT_COMMAND_PROMPT,
   expandSlashCommand,
+  isExpandingSlashCommand,
 } from '../../src/main/services/chat-service'
 
 interface InstructionsReader {
@@ -86,5 +87,29 @@ describe('expandSlashCommand (/init)', () => {
     expect(expandSlashCommand('/init', 'chat')).toBe('/init')
     expect(expandSlashCommand('/init now please', 'code')).toBe('/init now please')
     expect(expandSlashCommand('hello', 'code')).toBe('hello')
+  })
+})
+
+describe('expandSlashCommand (/skill)', () => {
+  it('expands "/skill <name>" to a use_skill instruction in every mode', () => {
+    const bare = expandSlashCommand('/skill triage', 'chat')
+    expect(bare).toContain('use_skill')
+    expect(bare).toContain('"triage"')
+
+    const withTask = expandSlashCommand('/skill triage sort these five bug reports', 'code')
+    expect(withTask).toContain('"triage"')
+    expect(withTask).toContain('sort these five bug reports')
+  })
+
+  it('leaves a bare "/skill" (no name) verbatim', () => {
+    expect(expandSlashCommand('/skill', 'chat')).toBe('/skill')
+    expect(expandSlashCommand('/skill   ', 'chat')).toBe('/skill   ')
+  })
+
+  it('isExpandingSlashCommand mirrors the expansion rules', () => {
+    expect(isExpandingSlashCommand('/init', 'code')).toBe(true)
+    expect(isExpandingSlashCommand('/init', 'chat')).toBe(false)
+    expect(isExpandingSlashCommand('/skill triage', 'chat')).toBe(true)
+    expect(isExpandingSlashCommand('hello', 'chat')).toBe(false)
   })
 })

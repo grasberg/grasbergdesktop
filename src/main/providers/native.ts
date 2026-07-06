@@ -67,6 +67,8 @@ function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     promptTokens: a.promptTokens ?? b.promptTokens,
     completionTokens: a.completionTokens ?? b.completionTokens,
     totalTokens: a.totalTokens ?? b.totalTokens,
+    cachedInputTokens: a.cachedInputTokens ?? b.cachedInputTokens,
+    cacheCreationTokens: a.cacheCreationTokens ?? b.cacheCreationTokens,
   }
 }
 

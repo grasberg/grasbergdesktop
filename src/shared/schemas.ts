@@ -17,6 +17,8 @@ export const chatParamsSchema = z
     frequencyPenalty: z.number().min(-2).max(2).optional(),
     presencePenalty: z.number().min(-2).max(2).optional(),
     planMode: z.boolean().optional(),
+    autoAcceptEdits: z.boolean().optional(),
+    reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
   })
   .strict()
 
@@ -234,11 +236,62 @@ export function isValidStorageKey(storageKey: string): boolean {
   return /^[A-Za-z0-9-]+\.[A-Za-z0-9]+$/.test(storageKey)
 }
 
+const modeModelDefaultSchema = z
+  .object({
+    providerId: z.string().nullable(),
+    modelId: z.string().max(200).nullable(),
+  })
+  .strict()
+
+/** Full per-mode map (all five modes present, matching AppSettings.modeModels). */
+const modeModelsSchema = z
+  .object({
+    chat: modeModelDefaultSchema,
+    cowork: modeModelDefaultSchema,
+    code: modeModelDefaultSchema,
+    write: modeModelDefaultSchema,
+    design: modeModelDefaultSchema,
+  })
+  .strict()
+
+// ---------------------------------------------------------------------------
+// Mixture of Agents presets (Settings → Mixture of Agents).
+// ---------------------------------------------------------------------------
+
+const moaModelRefSchema = z
+  .object({
+    providerId: z.string().min(1).max(200),
+    modelId: z.string().min(1).max(200),
+  })
+  .strict()
+
+/** A positive temperature bound matching chatParamsSchema. */
+const moaTemperatureSchema = z.number().min(0).max(2)
+const moaMaxTokensSchema = z.number().int().positive().max(1_000_000)
+
+export const moaPresetSchema = z
+  .object({
+    id: z.string().min(1).max(100),
+    name: z.string().trim().min(1).max(100),
+    referenceModels: z.array(moaModelRefSchema).min(1).max(8),
+    aggregator: moaModelRefSchema,
+    referenceMaxTokens: moaMaxTokensSchema.optional(),
+    referenceTemperature: moaTemperatureSchema.optional(),
+    aggregatorTemperature: moaTemperatureSchema.optional(),
+    maxTokens: moaMaxTokensSchema.optional(),
+    enabled: z.boolean(),
+  })
+  .strict()
+
 export const settingsPatchSchema = z
   .object({
     theme: z.enum(['system', 'light', 'dark']),
     defaultProviderId: z.string().nullable(),
     defaultModelId: z.string().nullable(),
+    perModeModelsEnabled: z.boolean(),
+    modeModels: modeModelsSchema,
+    moaPresets: z.array(moaPresetSchema).max(50),
+    defaultMoaPresetId: z.string().nullable(),
     defaultSystemPrompt: z.string().max(100_000),
     defaultParams: chatParamsSchema,
     telemetryEnabled: z.boolean(),
@@ -250,6 +303,7 @@ export const settingsPatchSchema = z
     compactionThresholdRatio: z.number().min(0.1).max(0.95),
     memoryEnabled: z.boolean(),
     shellExecutionEnabled: z.boolean(),
+    shellCommandAllowlist: z.array(z.string().trim().min(1).max(200)).max(100),
     browserToolsEnabled: z.boolean(),
     telegramBridgeEnabled: z.boolean(),
     telegramBridgeConversationId: z.string().nullable(),
@@ -287,6 +341,11 @@ export const oaiUsageSchema = z
     prompt_tokens: z.number().optional(),
     completion_tokens: z.number().optional(),
     total_tokens: z.number().optional(),
+    prompt_tokens_details: z
+      .object({ cached_tokens: z.number().optional() })
+      .passthrough()
+      .nullable()
+      .optional(),
   })
   .passthrough()
 

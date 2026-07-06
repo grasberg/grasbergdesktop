@@ -288,6 +288,60 @@ function PlanModeToggle(): ReactElement | null {
 }
 
 /**
+ * Toggles auto-accept edits on the open conversation (params.autoAcceptEdits).
+ * While on, edit_file/write_file run without the per-call approval dialog;
+ * every other tool still asks. Ignored while plan mode is active.
+ */
+function AutoAcceptEditsToggle(): ReactElement | null {
+  const conversation = useChatStore((s) => s.conversation)
+  const [busy, setBusy] = useState(false)
+  if (!conversation) return null
+  const active = conversation.params.autoAcceptEdits === true
+
+  const toggle = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const params: ChatParams = { ...conversation.params }
+      if (active) delete params.autoAcceptEdits
+      else params.autoAcceptEdits = true
+      const updated = await unwrap(
+        window.uld.conversations.update({ id: conversation.id, patch: { params } })
+      )
+      useChatStore.setState({ conversation: updated })
+    } catch (e) {
+      useUiStore
+        .getState()
+        .toast(`Could not toggle auto-accept edits: ${toNormalized(e).message}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className={`btn btn-ghost code-plan-toggle${active ? ' active' : ''}`}
+      title="Auto-accept edits: file edits apply without the per-call approval dialog (other tools still ask)"
+      aria-pressed={active}
+      disabled={busy}
+      onClick={() => void toggle()}
+    >
+      <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+        <path
+          d="M2.5 8.5l3.5 3.5 7-8"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </svg>
+      Auto-accept edits{active ? ' on' : ''}
+    </button>
+  )
+}
+
+/**
  * Read-only view of the assistant's update_task_list checklist (stored as the
  * 'Task list' workspace item). Refreshes when a generation finishes.
  */
@@ -418,6 +472,7 @@ export default function CodeView(): ReactElement {
       <section className="code-pane code-pane-center" aria-label="Conversation">
         <div className="code-center-bar">
           <PlanModeToggle />
+          <AutoAcceptEditsToggle />
           <TaskListStrip />
         </div>
         <ChatView />

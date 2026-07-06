@@ -14,6 +14,7 @@ import type {
   ModelInfo,
   NormalizedError,
   OAuthStatus,
+  Project,
   ProviderConfig,
   ProviderConfigInput,
   ProviderConfigPatch,
@@ -53,16 +54,46 @@ export interface ConversationsStoreState {
   summaries: ConversationSummary[]
   activeId: string | null
   search: string
-  modeFilter: ConversationMode | 'all'
+  /** The single current mode the sidebar is scoped to. */
+  modeFilter: ConversationMode
   loaded: boolean
+  /** Loads every task for the current mode (grouped into the tree client-side). */
   load(): Promise<void>
   setSearch(q: string): void
-  setModeFilter(mode: ConversationMode | 'all'): void
-  /** Creates and selects a new conversation. */
-  create(mode: ConversationMode): Promise<Conversation>
+  /** Switches the current mode and reloads. */
+  setModeFilter(mode: ConversationMode): void
+  /**
+   * Creates and selects a new conversation in the given mode. Files it under
+   * `projectRef` when given, otherwise standalone (unfiled).
+   */
+  create(mode: ConversationMode, projectRef?: string | null): Promise<Conversation>
   select(id: string | null): void
   rename(id: string, title: string): Promise<void>
+  /** Files/unfiles a task under a project, updating the list in place. */
+  setProject(id: string, projectRef: string | null): Promise<void>
   remove(id: string): Promise<void>
+}
+
+export interface ProjectsStoreState {
+  /** Projects for the currently loaded mode, newest first. */
+  projects: Project[]
+  /** The mode `projects` were loaded for (guards stale async responses). */
+  mode: ConversationMode | null
+  loaded: boolean
+  /**
+   * Ids of collapsed groups in the sidebar tree (the "No project" group uses a
+   * stable key). Persisted to localStorage so expand/collapse survives reloads.
+   */
+  collapsed: Set<string>
+  /** Loads the projects for a mode into `projects`. */
+  load(mode: ConversationMode): Promise<void>
+  create(mode: ConversationMode, name: string): Promise<Project>
+  rename(id: string, name: string): Promise<void>
+  remove(id: string): Promise<void>
+  /** Toggles a group's collapsed state (and persists it). */
+  toggleCollapsed(id: string): void
+  /** Force-expands a group (used after creating a task inside it). */
+  expand(id: string): void
 }
 
 export interface ChatStoreState {
@@ -78,11 +109,12 @@ export interface ChatStoreState {
   stop(): Promise<void>
   regenerate(messageId: string): Promise<void>
   editAndRerun(messageId: string, newContent: string): Promise<void>
-  /** Update the open conversation's provider/model/systemPrompt/params. */
+  /** Update the open conversation's provider/model/systemPrompt/MoA preset. */
   updateConversation(patch: {
     providerId?: string | null
     modelId?: string | null
     systemPrompt?: string | null
+    moaPresetId?: string | null
   }): Promise<void>
   /** Wired once at app start to window.uld.chat.onStreamEvent. */
   handleStreamEvent(envelope: StreamEventEnvelope): void
@@ -104,15 +136,12 @@ export interface UiStoreState {
   shortcutsOpen: boolean
   /** The Workflows builder surface replaces the main area when true. */
   workflowsOpen: boolean
-  /** The Projects overview surface replaces the main area when true. */
-  projectsOpen: boolean
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
   openWorkflows(open: boolean): void
-  openProjects(open: boolean): void
   toast(message: string, kind?: ToastKind): void
   dismissToast(id: string): void
 }

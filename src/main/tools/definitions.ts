@@ -456,10 +456,11 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: 'delegate',
     description:
       'Delegate a focused sub-task to a fresh sub-agent and get back its result. The sub-agent ' +
-      'runs its own short reasoning loop with read-only project tools (file search, repo map, ' +
-      'read file, list directory, fetch URL) and returns a concise answer. Use it to decompose ' +
-      'work, investigate a specific question, or draft a section independently. Give it a ' +
-      'self-contained task and any context it needs — it does not see this conversation.',
+      'runs its own bounded reasoning loop with project tools (search, repo map, read/list, grep, ' +
+      'glob, git queries, fetch URL, and approval-gated file edits) and returns a concise answer. ' +
+      'Use it to decompose work, investigate a specific question, or carry out a well-scoped ' +
+      'change independently. Give it a self-contained task and any context it needs — it does ' +
+      'not see this conversation.',
     parameters: {
       type: 'object',
       properties: {
@@ -488,8 +489,9 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     id: 'task_output',
     name: 'task_output',
     description:
-      'Get the status and (when finished) the result of a background sub-agent task started ' +
-      'with delegate background=true. Returns "running" while the task is still working.',
+      'Get the status and result of a background task (a delegate background=true sub-agent or ' +
+      'a run_shell_command background=true job). While a shell job is running this returns its ' +
+      'output so far.',
     parameters: {
       type: 'object',
       properties: {
@@ -505,8 +507,8 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     id: 'task_stop',
     name: 'task_stop',
     description:
-      'Stop a running background sub-agent task started with delegate background=true. ' +
-      'Its partial result (if any) is discarded.',
+      'Stop a running background task (sub-agent or shell job). A stopped sub-agent discards ' +
+      'its partial result; a stopped shell job reports the output captured so far.',
     parameters: {
       type: 'object',
       properties: {
@@ -579,8 +581,11 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       'Execute a shell command in the project folder the user granted for this conversation and ' +
       'return its exit code, stdout and stderr. This ACTUALLY RUNS the command, so it requires the ' +
       'user to have enabled shell execution AND to approve each call. Commands run with a timeout ' +
-      'and capped output. Prefer propose_shell_command when you only need to suggest a command for ' +
-      'the user to run themselves. Only works when a project folder is granted.',
+      '(default 60s, raisable via timeoutSeconds up to 600) and capped output. Set background=true ' +
+      'for long-running processes (dev servers, watchers): it returns a task id immediately — poll ' +
+      'output with task_output and stop it with task_stop. Prefer propose_shell_command when you ' +
+      'only need to suggest a command for the user to run themselves. Only works when a project ' +
+      'folder is granted.',
     parameters: {
       type: 'object',
       properties: {
@@ -591,6 +596,17 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         explanation: {
           type: 'string',
           description: 'One or two sentences explaining what the command does and why.',
+        },
+        timeoutSeconds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 600,
+          description: 'Timeout for a foreground run (default 60, max 600).',
+        },
+        background: {
+          type: 'boolean',
+          description:
+            'Run as a detached background job; returns a task id for task_output/task_stop.',
         },
       },
       required: ['command'],

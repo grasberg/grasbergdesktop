@@ -111,6 +111,13 @@ export function toolsToAnthropic(tools: AdapterToolDef[] | undefined): Block[] {
   }))
 }
 
+/** Extended-thinking token budgets per reasoning effort. */
+export const ANTHROPIC_THINKING_BUDGETS: Record<'low' | 'medium' | 'high', number> = {
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+}
+
 export function buildAnthropicBody(req: AdapterChatRequest, stream: boolean): Record<string, unknown> {
   const { system, messages } = toAnthropicMessages(req.messages)
   const body: Record<string, unknown> = {
@@ -119,9 +126,39 @@ export function buildAnthropicBody(req: AdapterChatRequest, stream: boolean): Re
     messages,
     stream,
   }
-  if (system) body.system = system
-  if (req.params.temperature !== undefined) body.temperature = req.params.temperature
-  if (req.params.topP !== undefined) body.top_p = req.params.topP
+  // Prompt caching: mark the system prompt (caches tools + system, which are
+  // stable across a conversation) and the last message (caches the growing
+  // transcript incrementally — each request re-reads the previous turns from
+  // cache and extends it). Both are cheap no-ops when the prefix is too short
+  // for the provider's cache minimum.
+  if (system) {
+    body.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
+  }
+  const lastMessage = messages[messages.length - 1]
+  if (lastMessage) {
+    const content = lastMessage.content as Block[]
+    const lastBlock = content[content.length - 1]
+    if (lastBlock) lastBlock.cache_control = { type: 'ephemeral' }
+  }
+  // Extended thinking. Skipped when the transcript already contains assistant
+  // tool_use turns: with thinking enabled Anthropic requires those turns to
+  // carry their original thinking blocks, which our normalized history does
+  // not preserve — so thinking applies to the first round of a tool loop and
+  // to tool-free requests, never to feedback rounds.
+  const effort = req.params.reasoningEffort
+  const hasToolUseHistory = req.messages.some(
+    (m) => m.role === 'assistant' && (m.toolCalls?.length ?? 0) > 0
+  )
+  if (effort && !hasToolUseHistory) {
+    const budget = ANTHROPIC_THINKING_BUDGETS[effort]
+    body.thinking = { type: 'enabled', budget_tokens: budget }
+    // max_tokens must exceed the thinking budget.
+    body.max_tokens = Math.max(req.params.maxTokens ?? DEFAULT_MAX_TOKENS, budget + 2048)
+  } else {
+    // temperature/top_p are rejected alongside thinking — send only without it.
+    if (req.params.temperature !== undefined) body.temperature = req.params.temperature
+    if (req.params.topP !== undefined) body.top_p = req.params.topP
+  }
   const tools = toolsToAnthropic(req.tools)
   if (tools.length > 0) body.tools = tools
   return body
@@ -159,9 +196,31 @@ export function parseAnthropicEvent(json: unknown, state: AnthropicStreamState):
 
   if (type === 'message_start') {
     const usage = (ev.message as Record<string, unknown> | undefined)?.usage as
-      | { input_tokens?: number }
+      | {
+          input_tokens?: number
+          cache_read_input_tokens?: number
+          cache_creation_input_tokens?: number
+        }
       | undefined
-    if (typeof usage?.input_tokens === 'number') out.push({ type: 'usage', usage: { promptTokens: usage.input_tokens } })
+    if (usage && typeof usage.input_tokens === 'number') {
+      const cacheRead =
+        typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
+      const cacheWrite =
+        typeof usage.cache_creation_input_tokens === 'number'
+          ? usage.cache_creation_input_tokens
+          : 0
+      out.push({
+        type: 'usage',
+        usage: {
+          // Anthropic's input_tokens EXCLUDES cached tokens; normalize to the
+          // inclusive convention (OpenAI/Gemini) so display and cost math are
+          // provider-independent.
+          promptTokens: usage.input_tokens + cacheRead + cacheWrite,
+          ...(cacheRead > 0 ? { cachedInputTokens: cacheRead } : {}),
+          ...(cacheWrite > 0 ? { cacheCreationTokens: cacheWrite } : {}),
+        },
+      })
+    }
   } else if (type === 'content_block_start') {
     const block = ev.content_block as Record<string, unknown> | undefined
     if (block?.type === 'tool_use' && typeof ev.index === 'number') {

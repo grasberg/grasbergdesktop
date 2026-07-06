@@ -229,11 +229,22 @@ export class OpenAICodexAdapter implements ProviderAdapter {
     return ctx.accountId ? [ctx.apiKey, ctx.accountId] : [ctx.apiKey]
   }
 
+  /**
+   * The ChatGPT sign-in backend only serves the models in
+   * CHATGPT_OAUTH_MODEL_IDS (gpt-5 and the older codex line were retired). Coerce
+   * anything else — e.g. a provider that still has `gpt-5` stored — to the
+   * current signin default so a stale id doesn't hard-fail every request.
+   */
+  private codexModel(modelId: string): string {
+    return CHATGPT_OAUTH_MODEL_IDS.includes(modelId) ? modelId : CHATGPT_OAUTH_DEFAULT_MODEL
+  }
+
   private post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
+    const body = buildResponsesBody({ ...req, modelId: this.codexModel(req.modelId) }, stream)
     return checkedFetch(CHATGPT_RESPONSES_URL, {
       method: 'POST',
       headers: this.buildHeaders(ctx),
-      body: JSON.stringify(buildResponsesBody(req, stream)),
+      body: JSON.stringify(body),
       signal: ctx.signal,
       providerType: this.type,
       secrets: this.secrets(ctx),
@@ -285,10 +296,11 @@ export class OpenAICodexAdapter implements ProviderAdapter {
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {
     // A single non-streaming exchange is enough to validate the token. Probe
-    // with a Codex-valid model — the family default (gpt-4o) is rejected by
-    // this backend, which would fail Test for a valid session.
+    // with the provider's chosen model when set, else a Codex-valid default
+    // (CHATGPT_OAUTH_DEFAULT_MODEL) — the rest of the platform-API catalog is
+    // rejected by this backend, which would fail Test for a valid session.
     return probeConnection((req) => this.chat(req, ctx), {
-      modelId: CHATGPT_OAUTH_DEFAULT_MODEL,
+      modelId: ctx.modelCatalog?.defaultModelId || CHATGPT_OAUTH_DEFAULT_MODEL,
       providerType: this.type,
       secrets: this.secrets(ctx),
       successMessage: 'Signed in to ChatGPT (experimental).',

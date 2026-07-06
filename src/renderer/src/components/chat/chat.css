@@ -869,9 +869,64 @@
 }
 
 .composer-inputrow {
+  position: relative; /* anchors the slash/@ autocomplete menu */
   display: flex;
   align-items: flex-end;
   gap: 8px;
+}
+
+/* Slash-command / @-mention autocomplete (anchored to the input row) */
+.composer-suggest {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 41;
+  min-width: 280px;
+  max-width: 480px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+}
+
+.composer-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.composer-suggest-item:hover,
+.composer-suggest-item.active {
+  background: var(--bg-hover);
+}
+
+.composer-suggest-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.composer-suggest-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-attach {
@@ -1147,4 +1202,143 @@
 .compaction-banner-body {
   padding: 0 10px 8px; color: var(--text-muted);
   white-space: pre-wrap; max-height: 200px; overflow-y: auto;
+}
+
+/* --- Mixture of Agents: composer control --- */
+.composer-moa {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-bottom: 4px;
+}
+
+.composer-moa-toggle {
+  width: auto;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+
+.composer-moa-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.composer-moa-select {
+  max-width: 160px;
+  height: 30px;
+  padding: 0 6px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* --- Mixture of Agents: advisor blocks on an assistant message --- */
+.msg-moa {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.msg-moa-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.msg-moa-toggle:hover {
+  color: var(--text);
+}
+
+.msg-moa-chevron {
+  display: inline-block;
+  transition: transform 120ms ease;
+}
+
+.msg-moa-chevron.open {
+  transform: rotate(90deg);
+}
+
+.msg-moa-live {
+  margin-left: auto;
+  font-weight: 400;
+  font-style: italic;
+}
+
+.msg-moa-failed {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--warning);
+}
+
+.msg-moa-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg-moa-ref {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: var(--bg-panel);
+}
+
+.msg-moa-ref-error {
+  border-color: var(--danger);
+}
+
+.msg-moa-ref-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.msg-moa-ref-label {
+  font-family: var(--font-mono);
+}
+
+.msg-moa-ref-status {
+  margin-left: auto;
+  font-weight: 400;
+  font-style: italic;
+}
+
+.msg-moa-ref-error {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.msg-moa-ref-empty {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-moa-chevron {
+    transition: none;
+  }
 }

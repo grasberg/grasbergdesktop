@@ -21,7 +21,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
  *   Ctrl/Cmd+N  new task in the active mode tab ('All' falls back to chat)
  *   Ctrl/Cmd+K  toggle command palette
  *   Ctrl/Cmd+,  toggle settings
- *   Escape      close palette/settings/shortcuts/projects, else stop generation
+ *   Escape      close palette/settings/shortcuts, else stop generation
  * Plain keys are ignored while typing in an input/textarea; Escape and
  * Ctrl/Cmd combos always work.
  */
@@ -64,10 +64,6 @@ export function useKeyboardShortcuts(): void {
         }
         if (ui.shortcutsOpen) {
           ui.openShortcuts(false)
-          return
-        }
-        if (ui.projectsOpen) {
-          ui.openProjects(false)
           return
         }
         const chat = useChatStore.getState()

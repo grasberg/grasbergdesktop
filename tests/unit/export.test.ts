@@ -13,6 +13,8 @@ function conversation(patch: Partial<Conversation> = {}): Conversation {
     params: {},
     workspaceId: null,
     projectId: null,
+    projectRef: null,
+    moaPresetId: null,
     createdAt: 0,
     updatedAt: 0,
     ...patch,

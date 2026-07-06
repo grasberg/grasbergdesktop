@@ -123,6 +123,43 @@
   font-weight: 600;
 }
 
+/* Per-mode model defaults (Defaults tab). */
+.mode-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.mode-model-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.mode-model-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.mode-model-hint {
+  align-self: center;
+}
+
+/* "Load models" row under the Default model field in the add-provider form. */
+.provider-model-load {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.provider-model-load .field-hint {
+  flex: 1;
+  min-width: 160px;
+}
+
 /* -------------------------------------------------------- fields & forms */
 
 .settings-field {
@@ -947,3 +984,98 @@
 .mcp-status-error { background: color-mix(in srgb, var(--danger) 22%, transparent); }
 .mcp-status-connecting { background: var(--bg-hover); }
 .mcp-status-disconnected { background: var(--bg-hover); color: var(--text-muted); }
+
+/* --- Mixture of Agents tab --- */
+.moa-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.moa-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  background: var(--bg-panel);
+}
+
+.moa-card-disabled {
+  opacity: 0.65;
+}
+
+.moa-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.moa-name {
+  flex: 1;
+  min-width: 160px;
+  font-weight: 600;
+}
+
+.moa-inline {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.moa-subhead {
+  margin: 14px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.moa-ref-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.moa-ref-row {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.moa-ref-row .select {
+  flex: 0 0 40%;
+  min-width: 0;
+}
+
+.moa-ref-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.moa-add-ref {
+  margin-top: 2px;
+}
+
+.moa-tuning-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.moa-tuning {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.moa-tuning .param-num {
+  width: 120px;
+}
+
+.btn-danger-text {
+  color: var(--danger);
+}

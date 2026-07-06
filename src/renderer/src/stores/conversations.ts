@@ -9,16 +9,18 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   summaries: [],
   activeId: null,
   search: '',
-  modeFilter: 'all',
+  modeFilter: 'chat',
   loaded: false,
 
   async load() {
     const { search, modeFilter } = get()
     try {
+      // Load every task in the mode; the sidebar groups them under their
+      // projects (and a "No project" group) client-side.
       const summaries = await unwrap(
         window.uld.conversations.list({
           search: search.trim() ? search.trim() : undefined,
-          mode: modeFilter === 'all' ? undefined : modeFilter,
+          mode: modeFilter,
         })
       )
       set({ summaries, loaded: true })
@@ -33,20 +35,29 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   },
 
   setModeFilter(mode) {
+    if (get().modeFilter === mode) return
+    // The Sidebar reloads the project list off `modeFilter` via an effect.
     set({ modeFilter: mode })
     void get().load()
   },
 
-  async create(mode) {
-    const conversation = await unwrap(window.uld.conversations.create({ mode }))
+  async create(mode, projectRef) {
+    const conversation = await unwrap(
+      window.uld.conversations.create({ mode, projectRef: projectRef ?? null })
+    )
     const summary: ConversationSummary = {
       id: conversation.id,
       mode: conversation.mode,
       title: conversation.title,
       updatedAt: conversation.updatedAt,
+      projectRef: conversation.projectRef,
       snippet: null,
     }
-    set((s) => ({ summaries: [summary, ...s.summaries.filter((x) => x.id !== summary.id)] }))
+    // Show it in the list when it belongs to the mode on screen; the tree places
+    // it under the right project group by its projectRef.
+    if (conversation.mode === get().modeFilter) {
+      set((s) => ({ summaries: [summary, ...s.summaries.filter((x) => x.id !== summary.id)] }))
+    }
     get().select(conversation.id)
     return conversation
   },
@@ -67,6 +78,20 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
     if (chat.conversation?.id === id) {
       useChatStore.setState({ conversation: updated })
     }
+  },
+
+  async setProject(id, projectRef) {
+    const updated = await unwrap(window.uld.conversations.update({ id, patch: { projectRef } }))
+    const chat = useChatStore.getState()
+    if (chat.conversation?.id === id) {
+      useChatStore.setState({ conversation: updated })
+    }
+    // Update the projectRef in place; the tree re-groups the row automatically.
+    set((s) => ({
+      summaries: s.summaries.map((x) =>
+        x.id === id ? { ...x, projectRef: updated.projectRef } : x
+      ),
+    }))
   },
 
   async remove(id) {

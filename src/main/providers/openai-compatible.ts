@@ -78,6 +78,9 @@ export function buildChatBody(
   if (p.maxTokens !== undefined) body.max_tokens = p.maxTokens
   if (p.frequencyPenalty !== undefined) body.frequency_penalty = p.frequencyPenalty
   if (p.presencePenalty !== undefined) body.presence_penalty = p.presencePenalty
+  // Only on the wire when the user explicitly picked an effort; reasoning
+  // models honor it, non-reasoning OpenAI-compatible servers ignore it.
+  if (p.reasoningEffort !== undefined) body.reasoning_effort = p.reasoningEffort
   if (req.tools && req.tools.length > 0) {
     body.tools = req.tools.map((t) => ({
       type: 'function',
@@ -110,14 +113,17 @@ function mapUsage(u: {
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number } | null
 }): TokenUsage | undefined {
   if (u.prompt_tokens === undefined && u.completion_tokens === undefined && u.total_tokens === undefined) {
     return undefined
   }
+  const cached = u.prompt_tokens_details?.cached_tokens
   return {
     promptTokens: u.prompt_tokens,
     completionTokens: u.completion_tokens,
     totalTokens: u.total_tokens,
+    ...(typeof cached === 'number' && cached > 0 ? { cachedInputTokens: cached } : {}),
   }
 }
 

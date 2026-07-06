@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { Attachment } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
@@ -6,17 +6,46 @@ import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
 import { usePromptsStore } from '@/stores/prompts'
+import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
 import './chat.css'
 
 const MAX_TEXTAREA_HEIGHT = 240 // ~10 lines
 const CHAR_COUNT_THRESHOLD = 2000
+const MENTION_DEBOUNCE_MS = 150
+
+/** One entry in the composer's slash-command menu. */
+interface SlashItem {
+  /** Text inserted into the input when picked. */
+  command: string
+  label: string
+  description: string
+  /** Command expects arguments after it (a trailing space is inserted). */
+  takesArgs: boolean
+}
+
+/**
+ * The @-mention token surrounding the caret: '@partial' with no whitespace,
+ * either at the start of the text or after whitespace. Null when the caret is
+ * not inside one.
+ */
+function mentionTokenAt(
+  text: string,
+  caret: number
+): { start: number; end: number; query: string } | null {
+  let start = caret
+  while (start > 0 && !/\s/.test(text[start - 1])) start -= 1
+  const token = text.slice(start, caret)
+  if (!/^@[^\s@]*$/.test(token)) return null
+  return { start, end: caret, query: token.slice(1) }
+}
 
 export default function Composer(): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
   const streaming = useChatStore((s) => s.streaming)
   const send = useChatStore((s) => s.send)
   const stop = useChatStore((s) => s.stop)
+  const updateConversation = useChatStore((s) => s.updateConversation)
   const settings = useSettingsStore((s) => s.settings)
   const providers = useProvidersStore((s) => s.providers)
   const openSettings = useUiStore((s) => s.openSettings)
@@ -24,18 +53,29 @@ export default function Composer(): ReactElement {
 
   const promptTemplates = usePromptsStore((s) => s.templates)
   const loadPrompts = usePromptsStore((s) => s.load)
+  const skills = useSkillsStore((s) => s.skills)
+  const skillsLoaded = useSkillsStore((s) => s.loaded)
 
   const [value, setValue] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<Attachment[] | null>(null)
   const [confirmFlash, setConfirmFlash] = useState(false)
   const [promptMenuOpen, setPromptMenuOpen] = useState(false)
+  // Slash-command / @-mention autocomplete state.
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [mention, setMention] = useState<{ start: number; end: number; query: string } | null>(null)
+  const [mentionItems, setMentionItems] = useState<string[]>([])
+  const [suggestIndex, setSuggestIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const confirmRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     void loadPrompts()
   }, [loadPrompts])
+
+  useEffect(() => {
+    if (!skillsLoaded) void useSkillsStore.getState().load()
+  }, [skillsLoaded])
 
   const insertPrompt = (body: string): void => {
     setPromptMenuOpen(false)
@@ -65,6 +105,22 @@ export default function Composer(): ReactElement {
     return providers.some((p) => p.enabled && p.hasKey)
   })()
 
+  // Mixture of Agents: the composer toggle + preset dropdown. An active preset
+  // supplies its own aggregator provider, so usability is checked against that
+  // provider rather than the conversation's single-model selection.
+  const enabledPresets = (settings?.moaPresets ?? []).filter((p) => p.enabled)
+  const activePreset =
+    conversation?.moaPresetId != null
+      ? (enabledPresets.find((p) => p.id === conversation.moaPresetId) ?? null)
+      : null
+  const moaUsable = activePreset
+    ? (() => {
+        const p = providers.find((x) => x.id === activePreset.aggregator.providerId)
+        return !!p && p.enabled && p.hasKey
+      })()
+    : false
+  const usable = activePreset ? moaUsable : providerUsable
+
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
   // Preset-aware: for the 120+ preset-backed 'openai-compatible' providers
   // (empty family knownModels) the preset catalog is consulted, so
@@ -74,7 +130,122 @@ export default function Composer(): ReactElement {
     : false
 
   const isStreaming = streaming !== null
-  const disabled = !conversation || isStreaming || !providerUsable
+  const disabled = !conversation || isStreaming || !usable
+
+  // -- slash-command menu -------------------------------------------------------
+
+  const slashItems = useMemo<SlashItem[]>(() => {
+    if (!conversation) return []
+    const items: SlashItem[] = []
+    if (conversation.mode === 'code' && conversation.projectId) {
+      items.push({
+        command: '/init',
+        label: '/init',
+        description: 'Create AGENTS.md for this project',
+        takesArgs: false,
+      })
+    }
+    items.push({
+      command: '/compact',
+      label: '/compact',
+      description: 'Summarize older messages to free up context',
+      takesArgs: false,
+    })
+    if (settings?.defaultMoaPresetId) {
+      items.push({
+        command: '/moa',
+        label: '/moa <prompt>',
+        description: 'Run one message through the default MoA preset',
+        takesArgs: true,
+      })
+    }
+    for (const skill of skills.filter((s) => s.enabled)) {
+      items.push({
+        command: `/skill ${skill.name}`,
+        label: `/skill ${skill.name}`,
+        description: skill.description || 'Run this skill',
+        takesArgs: true,
+      })
+    }
+    return items
+  }, [conversation, settings?.defaultMoaPresetId, skills])
+
+  // The menu stays open while the first token is being typed ('/comp…') and
+  // while a skill name is being chosen ('/skill ji…').
+  const slashActive =
+    !slashDismissed && (/^\/\S*$/.test(value) || /^\/skill\s\S*$/.test(value))
+  const filteredSlash = slashActive
+    ? slashItems.filter((item) => {
+        const cmd = item.command.toLowerCase()
+        const v = value.toLowerCase()
+        if (!cmd.startsWith(v)) return false
+        // Fully typed no-arg command: hide so Enter sends instead of re-picking.
+        if (!item.takesArgs && cmd === v) return false
+        return true
+      })
+    : []
+  const slashVisible = filteredSlash.length > 0 && !isStreaming && !!conversation
+
+  const pickSlash = (item: SlashItem): void => {
+    setValue(item.takesArgs ? `${item.command} ` : item.command)
+    setSuggestIndex(0)
+    textareaRef.current?.focus()
+  }
+
+  // -- @-file mentions ----------------------------------------------------------
+
+  const projectId = conversation?.projectId ?? null
+
+  useEffect(() => {
+    if (!mention || !projectId) {
+      setMentionItems([])
+      return
+    }
+    const token = window.setTimeout(() => {
+      void window.uld.code
+        .suggestFiles({ projectId, query: mention.query, limit: 8 })
+        .then((res) => setMentionItems(res.ok ? res.data : []))
+    }, MENTION_DEBOUNCE_MS)
+    return () => window.clearTimeout(token)
+  }, [mention, projectId])
+
+  const mentionVisible = !slashVisible && mention !== null && mentionItems.length > 0
+
+  const pickMention = (relPath: string): void => {
+    const m = mention
+    if (!m || !projectId) return
+    setValue((cur) => `${cur.slice(0, m.start)}@${relPath} ${cur.slice(m.end)}`)
+    setMention(null)
+    setMentionItems([])
+    setSuggestIndex(0)
+    // Attach the mentioned file's content so the model actually sees it. An
+    // explicit @-mention is an intentional share, so it skips the
+    // warn-before-sending-files confirmation bar.
+    void (async () => {
+      const res = await window.uld.code.readFile({ projectId, relPath })
+      if (!res.ok) {
+        toast(`Could not attach ${relPath}: ${res.error.message}`, 'error')
+        return
+      }
+      const attachment: Attachment = {
+        id: crypto.randomUUID(),
+        name: relPath,
+        mimeType: 'text/plain',
+        sizeBytes: res.data.sizeBytes,
+        kind: 'text',
+        textContent: res.data.truncated ? `${res.data.content}\n…[truncated]` : res.data.content,
+      }
+      setAttachments((prev) =>
+        prev.some((a) => a.kind !== 'image' && a.name === relPath) ? prev : [...prev, attachment]
+      )
+    })()
+    textareaRef.current?.focus()
+  }
+
+  // Reset menu selection whenever the candidate list changes.
+  useEffect(() => {
+    setSuggestIndex(0)
+  }, [value, mentionItems.length])
 
   const resize = useCallback(() => {
     const el = textareaRef.current
@@ -144,6 +315,8 @@ export default function Composer(): ReactElement {
     const sentAttachments = attachments.length > 0 ? attachments : undefined
     setValue('')
     setAttachments([])
+    setMention(null)
+    setMentionItems([])
     void (async () => {
       await send(content, sentAttachments)
       // send() sets `error` (without starting a stream) when the send fails —
@@ -184,18 +357,30 @@ export default function Composer(): ReactElement {
     ? 'Select or create a conversation to start'
     : isStreaming
       ? 'Generating… press Stop to interrupt'
-      : !providerUsable
+      : !usable
         ? 'Configure a provider to start chatting'
         : 'Send a message… (Enter to send, Shift+Enter for a new line)'
 
+  const toggleMoa = (): void => {
+    if (activePreset) {
+      void updateConversation({ moaPresetId: null })
+      return
+    }
+    const pick =
+      enabledPresets.find((p) => p.id === settings?.defaultMoaPresetId) ?? enabledPresets[0]
+    if (pick) void updateConversation({ moaPresetId: pick.id })
+  }
+
   return (
     <div className="composer">
-      {!providerUsable && (
+      {!usable && (
         <div className="composer-banner" role="status">
           <span>
-            {providers.length === 0
-              ? 'No providers configured yet.'
-              : 'The selected provider has no API key or is disabled.'}
+            {activePreset
+              ? 'The aggregator provider for this Mixture-of-Agents preset has no API key or is disabled.'
+              : providers.length === 0
+                ? 'No providers configured yet.'
+                : 'The selected provider has no API key or is disabled.'}
           </span>
           <button type="button" className="btn btn-primary" onClick={() => openSettings(true)}>
             Open Settings
@@ -316,6 +501,78 @@ export default function Composer(): ReactElement {
             )}
           </div>
         )}
+        {enabledPresets.length > 0 && (
+          <div className="composer-moa">
+            <button
+              type="button"
+              className={`btn-icon composer-attach composer-moa-toggle${activePreset ? ' active' : ''}`}
+              aria-pressed={!!activePreset}
+              aria-label={
+                activePreset
+                  ? `Mixture of Agents on (${activePreset.name}) — click to turn off`
+                  : 'Turn on Mixture of Agents'
+              }
+              title={
+                activePreset
+                  ? `Mixture of Agents: ${activePreset.name}`
+                  : 'Mixture of Agents — combine several models'
+              }
+              disabled={!conversation || isStreaming}
+              onClick={toggleMoa}
+            >
+              MoA
+            </button>
+            {activePreset && enabledPresets.length > 1 && (
+              <select
+                className="composer-moa-select"
+                aria-label="Mixture of Agents preset"
+                value={activePreset.id}
+                disabled={isStreaming}
+                onChange={(e) => void updateConversation({ moaPresetId: e.target.value })}
+              >
+                {enabledPresets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+        {(slashVisible || mentionVisible) && (
+          <ul
+            className="composer-suggest"
+            role="listbox"
+            aria-label={slashVisible ? 'Commands' : 'Project files'}
+          >
+            {slashVisible
+              ? filteredSlash.map((item, i) => (
+                  <li key={item.command} role="option" aria-selected={i === suggestIndex}>
+                    <button
+                      type="button"
+                      className={`composer-suggest-item${i === suggestIndex ? ' active' : ''}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickSlash(item)}
+                    >
+                      <span className="composer-suggest-name mono">{item.label}</span>
+                      <span className="composer-suggest-desc">{item.description}</span>
+                    </button>
+                  </li>
+                ))
+              : mentionItems.map((relPath, i) => (
+                  <li key={relPath} role="option" aria-selected={i === suggestIndex}>
+                    <button
+                      type="button"
+                      className={`composer-suggest-item${i === suggestIndex ? ' active' : ''}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickMention(relPath)}
+                    >
+                      <span className="composer-suggest-name mono">{relPath}</span>
+                    </button>
+                  </li>
+                ))}
+          </ul>
+        )}
         <textarea
           ref={textareaRef}
           className="textarea composer-textarea"
@@ -324,8 +581,47 @@ export default function Composer(): ReactElement {
           placeholder={placeholder}
           disabled={!conversation || isStreaming}
           aria-label="Message"
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value)
+            setSlashDismissed(false)
+            setMention(mentionTokenAt(e.target.value, e.target.selectionStart ?? 0))
+          }}
           onKeyDown={(e) => {
+            const menuLength = slashVisible
+              ? filteredSlash.length
+              : mentionVisible
+                ? mentionItems.length
+                : 0
+            if (menuLength > 0 && !e.nativeEvent.isComposing) {
+              const index = Math.min(suggestIndex, menuLength - 1)
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setSuggestIndex((index + 1) % menuLength)
+                return
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setSuggestIndex((index - 1 + menuLength) % menuLength)
+                return
+              }
+              if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+                e.preventDefault()
+                if (slashVisible) pickSlash(filteredSlash[index])
+                else pickMention(mentionItems[index])
+                return
+              }
+              if (e.key === 'Escape') {
+                // Close the menu only; don't let Escape stop the generation.
+                e.preventDefault()
+                e.stopPropagation()
+                if (slashVisible) setSlashDismissed(true)
+                else {
+                  setMention(null)
+                  setMentionItems([])
+                }
+                return
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               submit()

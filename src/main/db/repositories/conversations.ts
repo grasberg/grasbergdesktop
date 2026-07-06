@@ -23,6 +23,8 @@ export interface ConversationCreateInput {
   systemPrompt?: string | null
   workspaceId?: string | null
   projectId?: string | null
+  projectRef?: string | null
+  moaPresetId?: string | null
 }
 
 export type ConversationPatch = ConvUpdateRequest['patch']
@@ -35,6 +37,8 @@ export interface ConversationsRepository {
   /** Returns the updated row (updated_at bumped), or null when id is unknown. */
   update(id: string, patch: ConversationPatch): Conversation | null
   remove(id: string): void
+  /** Deletes every conversation (messages + documents cascade via FK). */
+  deleteAll(): void
   touch(id: string, updatedAtMs: number): void
   /** Null out provider_id/model_id on every conversation that referenced a deleted provider. */
   clearProvider(providerId: string): void
@@ -52,6 +56,8 @@ interface ConversationRow {
   params_json: string
   workspace_id: string | null
   project_id: string | null
+  project_ref: string | null
+  moa_preset_id: string | null
   summary_text: string | null
   summary_through_seq: number | null
   created_at: number
@@ -63,6 +69,7 @@ interface SummaryRow {
   mode: string
   title: string
   updated_at: number
+  project_ref: string | null
   snippet: string | null
 }
 
@@ -85,6 +92,8 @@ function toConversation(row: ConversationRow): Conversation {
     params: parseParams(row.params_json),
     workspaceId: row.workspace_id,
     projectId: row.project_id,
+    projectRef: row.project_ref,
+    moaPresetId: row.moa_preset_id,
     summaryText: row.summary_text,
     summaryThroughSeq: row.summary_through_seq,
     createdAt: row.created_at,
@@ -116,6 +125,10 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         where.push('c.mode = ?')
         params.push(req.mode)
       }
+      if (req.projectRef) {
+        where.push('c.project_ref = ?')
+        params.push(req.projectRef)
+      }
       const search = req.search?.trim()
       if (search) {
         // Lowercase both the needle (in JS, so non-ASCII folds too) and the
@@ -135,7 +148,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         params.push(Math.max(1, Math.floor(req.limit)))
       }
       const rows = driver.all<SummaryRow>(
-        `SELECT c.id, c.mode, c.title, c.updated_at,
+        `SELECT c.id, c.mode, c.title, c.updated_at, c.project_ref,
            (SELECT m2.content FROM messages m2
             WHERE m2.conversation_id = c.id
               AND m2.status <> 'streaming'
@@ -152,6 +165,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         mode: row.mode as ConversationMode,
         title: row.title,
         updatedAt: row.updated_at,
+        projectRef: row.project_ref,
         snippet: toSnippet(row.snippet),
       }))
     },
@@ -168,14 +182,16 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         params: {},
         workspaceId: input.workspaceId ?? null,
         projectId: input.projectId ?? null,
+        projectRef: input.projectRef ?? null,
+        moaPresetId: input.moaPresetId ?? null,
         createdAt: now,
         updatedAt: now,
       }
       driver.run(
         `INSERT INTO conversations
            (id, mode, title, provider_id, model_id, system_prompt, params_json,
-            workspace_id, project_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            workspace_id, project_id, project_ref, moa_preset_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           conversation.id,
           conversation.mode,
@@ -186,6 +202,8 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           JSON.stringify(conversation.params),
           conversation.workspaceId,
           conversation.projectId,
+          conversation.projectRef,
+          conversation.moaPresetId,
           conversation.createdAt,
           conversation.updatedAt,
         ]
@@ -208,6 +226,8 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           params_json: patch.params === undefined ? undefined : JSON.stringify(patch.params),
           workspace_id: patch.workspaceId,
           project_id: patch.projectId,
+          project_ref: patch.projectRef,
+          moa_preset_id: patch.moaPresetId,
         },
         { touchUpdatedAt: true }
       )
@@ -217,6 +237,11 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
     remove(id) {
       // Messages cascade via FK.
       driver.run('DELETE FROM conversations WHERE id = ?', [id])
+    },
+
+    deleteAll() {
+      // Messages + documents cascade via FK.
+      driver.run('DELETE FROM conversations')
     },
 
     touch(id, updatedAtMs) {

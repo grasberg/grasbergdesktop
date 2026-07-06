@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { Attachment, Message } from '@shared/types'
+import type { Attachment, Message, MoaReferenceOutput } from '@shared/types'
 import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
 import { useCopied } from '@/hooks/useCopied'
@@ -134,6 +134,63 @@ function UserMessage({ message }: { message: Message }): ReactElement {
   )
 }
 
+/**
+ * Mixture of Agents transparency: the advisor (reference) model outputs that fed
+ * the aggregator, as a collapsible section of labelled blocks above the answer.
+ */
+function MoaReferences({ references }: { references: MoaReferenceOutput[] }): ReactElement {
+  const [open, setOpen] = useState(false)
+  const running = references.some((r) => r.status === 'running')
+  const failed = references.filter((r) => r.status === 'error').length
+  return (
+    <div className="msg-moa">
+      <button
+        type="button"
+        className="msg-moa-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className={`msg-moa-chevron${open ? ' open' : ''}`} aria-hidden>
+          ▸
+        </span>
+        Advisor models ({references.length})
+        {running && <span className="msg-moa-live">analyzing…</span>}
+        {!running && failed > 0 && (
+          <span className="msg-moa-failed">
+            {failed} unavailable
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="msg-moa-body">
+          {references.map((ref) => (
+            <div key={ref.index} className={`msg-moa-ref msg-moa-ref-${ref.status}`}>
+              <div className="msg-moa-ref-head">
+                <span className="msg-moa-ref-label">{ref.label}</span>
+                {ref.status === 'running' && (
+                  <span className="msg-moa-ref-status">analyzing…</span>
+                )}
+                {ref.status === 'error' && <span className="badge msg-error-code">unavailable</span>}
+              </div>
+              {ref.status === 'error' ? (
+                <div className="msg-moa-ref-error">
+                  {ref.error?.message ?? 'This advisor was unavailable.'}
+                </div>
+              ) : ref.text ? (
+                <Markdown content={ref.text} />
+              ) : ref.status === 'running' ? (
+                <span className="chat-cursor" aria-hidden />
+              ) : (
+                <div className="msg-moa-ref-empty">(no output)</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   const regenerate = useChatStore((s) => s.regenerate)
   const streaming = useChatStore((s) => s.streaming)
@@ -167,6 +224,10 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   return (
     <div className="msg-row msg-row-assistant">
       <div className={`msg-card msg-card-assistant${isError ? ' msg-card-error' : ''}`}>
+        {message.moaReferences && message.moaReferences.length > 0 && (
+          <MoaReferences references={message.moaReferences} />
+        )}
+
         {message.reasoning && (
           <div className="msg-reasoning">
             <button
@@ -220,6 +281,11 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
             usage.totalTokens != null) && (
             <div className="msg-usage">
               {usage.promptTokens != null && <span>↑ {usage.promptTokens}</span>}
+              {usage.cachedInputTokens != null && usage.cachedInputTokens > 0 && (
+                <span title="Prompt tokens served from the provider's prompt cache (cheaper)">
+                  {usage.cachedInputTokens} cached
+                </span>
+              )}
               {usage.completionTokens != null && <span>↓ {usage.completionTokens}</span>}
               {usage.totalTokens != null && <span>{usage.totalTokens} total</span>}
               {cost != null && (

@@ -6,7 +6,6 @@ import CoworkView from '@/components/cowork/CoworkView'
 import WriteView from '@/components/write/WriteView'
 import DesignView from '@/components/design/DesignView'
 import WorkflowsView from '@/components/workflows/WorkflowsView'
-import ProjectsView from '@/components/projects/ProjectsView'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 import Onboarding from '@/components/onboarding/Onboarding'
 import CommandPalette from '@/components/CommandPalette'
@@ -48,7 +47,6 @@ export default function App(): React.JSX.Element {
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
   const workflowsOpen = useUiStore((s) => s.workflowsOpen)
-  const projectsOpen = useUiStore((s) => s.projectsOpen)
 
   useKeyboardShortcuts()
 
@@ -148,14 +146,9 @@ export default function App(): React.JSX.Element {
     <>
       <div className="app-layout">
         <Sidebar />
-        <main
-          className="app-main"
-          aria-label={workflowsOpen ? 'Workflows' : projectsOpen ? 'Projects' : 'Conversation'}
-        >
+        <main className="app-main" aria-label={workflowsOpen ? 'Workflows' : 'Conversation'}>
           {workflowsOpen ? (
             <WorkflowsView />
-          ) : projectsOpen ? (
-            <ProjectsView />
           ) : activeId ? (
             <ModeView mode={mode} />
           ) : (

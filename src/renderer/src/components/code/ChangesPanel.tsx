@@ -14,12 +14,15 @@ function ChangeItem({ change }: { change: CodeChange }): ReactElement {
   const busyChangeId = useCodeStore((s) => s.busyChangeId)
   const applyChange = useCodeStore((s) => s.applyChange)
   const rejectChange = useCodeStore((s) => s.rejectChange)
+  const revertChange = useCodeStore((s) => s.revertChange)
 
   const [expanded, setExpanded] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [confirmingRevert, setConfirmingRevert] = useState(false)
 
   const busy = busyChangeId === change.id
   const proposed = change.status === 'proposed'
+  const applied = change.status === 'applied'
 
   return (
     <div className={`code-change card ${proposed ? '' : 'code-change-past'}`}>
@@ -95,6 +98,49 @@ function ChangeItem({ change }: { change: CodeChange }): ReactElement {
               className="btn btn-ghost code-change-btn"
               disabled={busy}
               onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {applied && !confirmingRevert && (
+        <div className="code-change-actions">
+          <button
+            type="button"
+            className="btn btn-ghost code-change-btn"
+            title="Restore the file to its pre-change content (refused if the file changed since)"
+            disabled={busy}
+            onClick={() => setConfirmingRevert(true)}
+          >
+            Revert
+          </button>
+        </div>
+      )}
+
+      {applied && confirmingRevert && (
+        <div className="code-change-confirm" role="alertdialog" aria-label="Confirm revert">
+          <span className="code-change-confirm-text">
+            Restore <strong>{change.filePath}</strong> to its pre-change content?
+          </span>
+          <div className="code-change-actions">
+            <button
+              type="button"
+              className="btn btn-primary code-change-btn"
+              disabled={busy}
+              onClick={() => {
+                setConfirmingRevert(false)
+                void revertChange(change.id)
+              }}
+            >
+              {busy ? 'Reverting…' : 'Yes, revert'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost code-change-btn"
+              disabled={busy}
+              onClick={() => setConfirmingRevert(false)}
             >
               Cancel
             </button>

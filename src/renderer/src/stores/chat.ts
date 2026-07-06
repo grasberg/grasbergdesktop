@@ -4,6 +4,7 @@ import { toNormalized, unwrap } from '@/api/uld'
 import type { ChatStoreState } from './contracts'
 import { useConversationsStore } from './conversations'
 import { useSettingsStore } from './settings'
+import { useUiStore } from './ui'
 
 /** Guards openConversation against out-of-order responses when switching fast. */
 let openToken = 0
@@ -87,7 +88,63 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       const { conversation, streaming } = get()
       if (!conversation || streaming) return
       const settings = useSettingsStore.getState().settings
-      if (!settings?.defaultProviderId && !conversation.providerId) {
+
+      // "/compact" summarizes older messages now, without sending anything.
+      const bare = content.trim()
+      if (bare === '/compact') {
+        try {
+          const result = await unwrap(window.uld.chat.compact(conversation.id))
+          useUiStore
+            .getState()
+            .toast(
+              result.compacted
+                ? 'Older messages were summarized to free up context.'
+                : 'Nothing to compact yet — the conversation is still short.',
+              'info'
+            )
+          refreshOpenConversation(conversation.id)
+        } catch (e) {
+          set({ error: toNormalized(e) })
+        }
+        return
+      }
+
+      // One-shot Mixture of Agents: "/moa <prompt>" runs a single message through
+      // the default preset without changing the conversation's model.
+      let outgoing = content
+      let overrides: { moaPresetId: string } | undefined
+      const trimmed = content.trimStart()
+      if (trimmed === '/moa' || trimmed.slice(0, 5).toLowerCase() === '/moa ') {
+        const presetId = settings?.defaultMoaPresetId ?? null
+        if (!presetId) {
+          set({
+            error: {
+              code: 'invalid_request',
+              message:
+                'No default Mixture-of-Agents preset is set. Configure one in Settings → Mixture of Agents.',
+              retryable: false,
+            },
+          })
+          return
+        }
+        outgoing = trimmed.slice(4).trim()
+        if (!outgoing) {
+          set({
+            error: {
+              code: 'invalid_request',
+              message: 'Usage: /moa <your prompt> — runs one message through the default MoA preset.',
+              retryable: false,
+            },
+          })
+          return
+        }
+        overrides = { moaPresetId: presetId }
+      }
+
+      // A MoA run supplies its own aggregator provider, so it doesn't need a
+      // default/override single-model provider to be configured.
+      const usingMoa = !!overrides || !!conversation.moaPresetId
+      if (!usingMoa && !settings?.defaultProviderId && !conversation.providerId) {
         set({
           error: {
             code: 'invalid_request',
@@ -100,7 +157,12 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       set({ error: null })
       try {
         const result = await unwrap(
-          window.uld.chat.send({ conversationId: conversation.id, content, attachments })
+          window.uld.chat.send({
+            conversationId: conversation.id,
+            content: outgoing,
+            attachments,
+            ...(overrides ? { overrides } : {}),
+          })
         )
         set((s) => ({
           messages: [
@@ -232,6 +294,31 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               ...(m.toolCalls ?? []).filter((tc) => tc.id !== event.toolCall.id),
               event.toolCall,
             ],
+          }))
+          return
+        }
+        case 'tool-output': {
+          if (!streaming) return
+          // Accumulate live output on the matching in-flight tool call; the
+          // final 'tool-call' event (with result) replaces the record.
+          patchMessage(streaming.assistantMessageId, (m) => ({
+            ...m,
+            toolCalls: (m.toolCalls ?? []).map((tc) =>
+              tc.id === event.toolCallId
+                ? { ...tc, liveOutput: (tc.liveOutput ?? '') + event.chunk }
+                : tc
+            ),
+          }))
+          return
+        }
+        case 'moa-reference': {
+          if (!streaming) return
+          patchMessage(streaming.assistantMessageId, (m) => ({
+            ...m,
+            moaReferences: [
+              ...(m.moaReferences ?? []).filter((r) => r.index !== event.reference.index),
+              event.reference,
+            ].sort((a, b) => a.index - b.index),
           }))
           return
         }

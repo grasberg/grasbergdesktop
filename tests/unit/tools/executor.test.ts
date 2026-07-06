@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Conversation, ToolCallRecord } from '@shared/types'
+import type { Conversation, ToolApprovalAnswer, ToolCallRecord } from '@shared/types'
 import { openDatabase, type AppDatabase } from '../../../src/main/db/database'
 import {
   createToolSystem,
@@ -51,6 +51,8 @@ function conv(withProject: boolean): Conversation {
     params: {},
     workspaceId: null,
     projectId: withProject ? projectId : null,
+    projectRef: null,
+    moaPresetId: null,
     createdAt: 0,
     updatedAt: 0,
   }
@@ -65,7 +67,10 @@ function call(name: string, args: unknown = {}): ToolCallRecord {
   }
 }
 
-const approveAll = vi.fn(async () => true)
+const APPROVE: ToolApprovalAnswer = { approved: true, scope: 'once' }
+const DECLINE: ToolApprovalAnswer = { approved: false, scope: 'once' }
+
+const approveAll = vi.fn(async () => APPROVE)
 
 describe('ToolExecutor — resolution and validation', () => {
   it('returns an error string (never throws) for unknown tools', async () => {
@@ -111,7 +116,7 @@ describe('ToolExecutor — permissions', () => {
   it("'deny' short-circuits without asking or running", async () => {
     const { registry, executor } = createToolSystem(db)
     registry.setPermission('file_search', 'deny')
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(call('file_search', { query: 'needle' }), {
       conversation: conv(true),
       approval,
@@ -123,7 +128,7 @@ describe('ToolExecutor — permissions', () => {
 
   it("'ask' + declined returns the standard decline note", async () => {
     const { executor } = createToolSystem(db)
-    const approval = vi.fn(async () => false)
+    const approval = vi.fn(async () => DECLINE)
     const result = await executor.execute(call('file_search', { query: 'needle' }), {
       conversation: conv(true),
       approval,
@@ -134,7 +139,7 @@ describe('ToolExecutor — permissions', () => {
 
   it("'ask' + approved runs the tool and passes risk/conversation to the approval request", async () => {
     const { executor } = createToolSystem(db)
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(call('file_search', { query: 'needle' }), {
       conversation: conv(true),
       streamId: 'stream-9',
@@ -155,7 +160,7 @@ describe('ToolExecutor — permissions', () => {
 describe('propose_shell_command — never executes anything', () => {
   it("runs without approval (risk 'safe') and only returns a suggestion note", async () => {
     const { executor } = createToolSystem(db)
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(
       call('propose_shell_command', { command: 'rm -rf build', explanation: 'clean build dir' }),
       { conversation: conv(false), approval }
@@ -353,7 +358,7 @@ describe('custom HTTP tools', () => {
       paramsSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
     })
 
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(call('echo_tool', { q: 'hi there' }), {
       conversation: conv(false),
       approval,
@@ -442,7 +447,7 @@ describe('MCP tools', () => {
     const { executor } = createToolSystem(db, null, {
       mcp: { listToolDefinitions: () => [mcpDef], callTool },
     })
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(call('mcp__srv1__lookup', { q: 'x' }), {
       conversation: conv(false),
       approval,
@@ -469,7 +474,7 @@ describe('browser + computer tools (opt-in)', () => {
     db.settings.update({ browserToolsEnabled: true })
     const browser = fakeBrowser()
     const { executor } = createToolSystem(db, null, { browserEnabled: () => true, browser })
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(
       call('browser', { action: 'navigate', url: 'https://example.com' }),
       { conversation: conv(false), approval }
@@ -513,7 +518,7 @@ describe('run_shell_command tool (opt-in)', () => {
   it('executes a command in the project root when enabled and approved', async () => {
     db.settings.update({ shellExecutionEnabled: true })
     const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
-    const approval = vi.fn(async () => true)
+    const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(
       call('run_shell_command', { command: 'echo shellok123' }),
       { conversation: conv(true), approval }
@@ -559,6 +564,105 @@ describe('repo_map tool', () => {
       approval: approveAll,
     })
     expect(result).toMatch(/no project folder/i)
+  })
+})
+
+describe('standing approval grants', () => {
+  it("scope 'conversation' auto-approves later calls of the same tool there only", async () => {
+    const { executor } = createToolSystem(db)
+    const approval = vi.fn(async () => ({ approved: true, scope: 'conversation' as const }))
+
+    const first = await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: conv(true),
+      approval,
+    })
+    expect(first).toContain('needle is here')
+    const second = await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: conv(true),
+      approval,
+    })
+    expect(second).toContain('needle is here')
+    // Only the first call reached the dialog.
+    expect(approval).toHaveBeenCalledTimes(1)
+
+    // A different conversation does not inherit the grant.
+    await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: { ...conv(true), id: 'conv-2' },
+      approval,
+    })
+    expect(approval).toHaveBeenCalledTimes(2)
+  })
+
+  it("scope 'once' keeps asking on every call", async () => {
+    const { executor } = createToolSystem(db)
+    const approval = vi.fn(async () => APPROVE)
+    await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: conv(true),
+      approval,
+    })
+    await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: conv(true),
+      approval,
+    })
+    expect(approval).toHaveBeenCalledTimes(2)
+  })
+
+  it('autoAcceptEdits runs write_file without asking but other tools still ask', async () => {
+    const codeService: ToolCodeService = {
+      readFile: () => {
+        throw new Error('not needed for a new file')
+      },
+    }
+    const proposed: unknown[][] = []
+    const { executor } = createToolSystem(db, codeService, {
+      codeChanges: {
+        propose: (...args) => {
+          proposed.push(args)
+          return { id: 'ch-1' }
+        },
+        apply: () => undefined,
+      },
+    })
+    const approval = vi.fn(async () => APPROVE)
+
+    const result = await executor.execute(
+      call('write_file', { path: 'new.txt', content: 'x' }),
+      { conversation: conv(true), approval, autoAcceptEdits: true }
+    )
+    expect(result).toContain('Created new.txt')
+    expect(proposed).toHaveLength(1)
+    expect(approval).not.toHaveBeenCalled()
+
+    // Not a blanket bypass: a sensitive read tool still asks.
+    await executor.execute(call('file_search', { query: 'needle' }), {
+      conversation: conv(true),
+      approval,
+      autoAcceptEdits: true,
+    })
+    expect(approval).toHaveBeenCalledTimes(1)
+  })
+
+  it('the shell allowlist skips the dialog for covered commands only', async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, {
+      shellEnabled: () => true,
+      shellAllowlist: () => ['echo'],
+    })
+    const approval = vi.fn(async () => APPROVE)
+
+    const allowed = await executor.execute(
+      call('run_shell_command', { command: 'echo allowlisted123' }),
+      { conversation: conv(true), approval }
+    )
+    expect(allowed).toContain('allowlisted123')
+    expect(approval).not.toHaveBeenCalled()
+
+    // Chaining characters defeat the prefix — the dialog comes back.
+    await executor.execute(
+      call('run_shell_command', { command: 'echo hi && echo smuggled' }),
+      { conversation: conv(true), approval }
+    )
+    expect(approval).toHaveBeenCalledTimes(1)
   })
 })
 

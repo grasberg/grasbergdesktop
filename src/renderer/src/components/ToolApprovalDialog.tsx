@@ -110,6 +110,14 @@ export default function ToolApprovalDialog(): ReactElement | null {
           </button>
           <button
             type="button"
+            className="btn"
+            title="Also auto-approve future calls of this tool in this conversation (until the app restarts)"
+            onClick={() => void useToolsStore.getState().respond(true, 'conversation')}
+          >
+            Allow for this conversation
+          </button>
+          <button
+            type="button"
             className="btn btn-primary"
             onClick={() => void useToolsStore.getState().respond(true)}
           >
