@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Grasberg Desktop — a local-first Electron desktop client for multiple LLM providers (DeepSeek, GLM/Zhipu, MiniMax, OpenAI, Anthropic, Google Gemini, Amazon Bedrock, plus 120+ OpenAI-compatible presets). TypeScript end-to-end; React 19 + Zustand renderer; SQLite storage; safeStorage-encrypted keys.
+Grasberg — a local-first Electron desktop client for multiple LLM providers (DeepSeek, GLM/Zhipu, MiniMax, OpenAI, Anthropic, Google Gemini, Amazon Bedrock, plus 120+ OpenAI-compatible presets). TypeScript end-to-end; React 19 + Zustand renderer; SQLite storage; safeStorage-encrypted keys.
 
-Naming note: the product was rebranded from "Universal LLM Desktop" to "Grasberg Desktop", but internal identifiers deliberately kept the old `uld` naming — the renderer API is `window.uld`, its type is `UldApi`, and the DB file is `uld.sqlite3`. Do not "fix" these.
+Naming note: the product was rebranded (Universal LLM Desktop → Grasberg Desktop → **Grasberg**), but internal identifiers deliberately kept the old `uld` naming — the renderer API is `window.uld`, its type is `UldApi`, and the DB file is `uld.sqlite3`. Do not "fix" these. The current backup marker is `grasberg-backup`; the pre-rebrand `grasberg-desktop-backup` is still accepted on import (`LEGACY_BACKUP_FORMAT`).
 
 ## Commands
 

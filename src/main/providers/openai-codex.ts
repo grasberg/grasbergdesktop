@@ -49,7 +49,7 @@ const CHATGPT_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
  * The conversation's own system prompt is appended so app behavior is honored.
  */
 const BASE_INSTRUCTIONS =
-  'You are a coding and general-purpose assistant operating through the Grasberg Desktop client.'
+  'You are a coding and general-purpose assistant operating through the Grasberg client.'
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)

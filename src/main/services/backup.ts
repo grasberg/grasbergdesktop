@@ -26,7 +26,9 @@ import {
 import { chatParamsSchema, settingsPatchSchema } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 
-export const BACKUP_FORMAT = 'grasberg-desktop-backup'
+export const BACKUP_FORMAT = 'grasberg-backup'
+/** Pre-rebrand marker ("Grasberg"); still accepted on import. */
+export const LEGACY_BACKUP_FORMAT = 'grasberg-desktop-backup'
 export const BACKUP_VERSION = 2
 
 /** A conversation with its transcript, as exported. */
@@ -89,7 +91,7 @@ export function buildBackup(db: AppDatabase): BackupFile {
 /** Envelope: only the format marker is strict; sections are optional. */
 const envelopeSchema = z
   .object({
-    format: z.literal(BACKUP_FORMAT),
+    format: z.union([z.literal(BACKUP_FORMAT), z.literal(LEGACY_BACKUP_FORMAT)]),
     version: z.number().int().min(1),
     settings: z.record(z.unknown()).optional(),
     memories: z.array(z.unknown()).max(100_000).optional(),
@@ -228,7 +230,7 @@ function parseObjectOf<T>(schema: z.ZodType<T>, value: unknown): T | undefined {
 export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
   const envelope = envelopeSchema.safeParse(raw)
   if (!envelope.success) {
-    throw new Error('Not a Grasberg Desktop backup file.')
+    throw new Error('Not a Grasberg backup file.')
   }
   const data = envelope.data
   const summary: BackupSummary = {

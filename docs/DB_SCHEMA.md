@@ -1,6 +1,6 @@
 # Database schema
 
-Grasberg Desktop stores everything in a single SQLite database (driver:
+Grasberg stores everything in a single SQLite database (driver:
 `node-sqlite3-wasm`) in Electron's `userData` directory. The single source of
 truth for the schema is [`src/main/db/migrations.ts`](../src/main/db/migrations.ts);
 this document explains it. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the

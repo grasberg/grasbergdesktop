@@ -1,4 +1,4 @@
-# Grasberg Desktop — Architecture
+# Grasberg — Architecture
 
 ## Stack decision: Electron (over Tauri)
 

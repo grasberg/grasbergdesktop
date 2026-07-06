@@ -159,7 +159,7 @@ function installQuickAccess(): void {
     const iconPath = appIconPath()
     if (existsSync(iconPath)) {
       tray = new Tray(iconPath)
-      tray.setToolTip('Grasberg Desktop')
+      tray.setToolTip('Grasberg')
       tray.setContextMenu(
         Menu.buildFromTemplate([
           { label: 'Open Grasberg', click: () => summonWindow() },

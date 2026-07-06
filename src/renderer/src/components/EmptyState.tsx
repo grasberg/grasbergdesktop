@@ -18,7 +18,7 @@ export default function EmptyState(): React.JSX.Element {
         draggable={false}
         style={{ display: 'block' }}
       />
-      <h1 className="empty-title">Grasberg Desktop</h1>
+      <h1 className="empty-title">Grasberg</h1>
       <p className="empty-subtitle">
         One local-first home for DeepSeek, GLM, MiniMax and any OpenAI-compatible model.
       </p>

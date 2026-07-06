@@ -569,7 +569,7 @@ export default function Sidebar(): React.JSX.Element {
     <nav className="sidebar" aria-label="Conversations">
       <div className="sidebar-brand">
         <Logo />
-        <span className="sidebar-wordmark">Grasberg Desktop</span>
+        <span className="sidebar-wordmark">Grasberg</span>
       </div>
 
       <div className="sidebar-controls">

@@ -1,5 +1,5 @@
 /**
- * Shared domain types for Grasberg Desktop.
+ * Shared domain types for Grasberg.
  * This file is the contract between main process, preload and renderer.
  * It must not import from any runtime module (types only + pure constants).
  */

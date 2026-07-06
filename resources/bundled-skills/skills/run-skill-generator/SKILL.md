@@ -91,7 +91,7 @@ The skill lives at `<unit>/.grasberg/skills/run-<unit-name>/`, where
 `<unit>` is the directory for **one deployable thing** — an app, a
 service, a library.
 
-Grasberg Desktop **natively discovers** skills from nested `.grasberg/skills/`
+Grasberg **natively discovers** skills from nested `.grasberg/skills/`
 directories: an agent working anywhere inside `<unit>` will see
 `/run-<unit-name>` as an available skill, and it auto-loads when the
 request matches its description (e.g. "run the desktop app," "take a

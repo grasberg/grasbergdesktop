@@ -1,6 +1,6 @@
-# Grasberg Desktop
+# Grasberg
 
-**Grasberg Desktop** is a local-first, cross-platform desktop client for working with multiple large-language-model providers — DeepSeek, GLM / Zhipu AI, MiniMax, and any OpenAI-compatible API (Ollama, vLLM, LM Studio, OpenRouter, …) — behind one polished interface. Your conversations live in a local SQLite database, your API keys are encrypted with your operating system's own key store, and nothing leaves your machine except the requests you send to the providers you configure. It offers three modes: **Chat** (streaming conversations with Markdown, reasoning display and model switching), **Cowork** (goal-oriented workspaces with notes, plans and checklists), and **Code** (ask questions about a local project and review diff proposals before anything touches disk).
+**Grasberg** is a local-first, cross-platform desktop client for working with multiple large-language-model providers — DeepSeek, GLM / Zhipu AI, MiniMax, and any OpenAI-compatible API (Ollama, vLLM, LM Studio, OpenRouter, …) — behind one polished interface. Your conversations live in a local SQLite database, your API keys are encrypted with your operating system's own key store, and nothing leaves your machine except the requests you send to the providers you configure. It offers three modes: **Chat** (streaming conversations with Markdown, reasoning display and model switching), **Cowork** (goal-oriented workspaces with notes, plans and checklists), and **Code** (ask questions about a local project and review diff proposals before anything touches disk).
 
 > **Screenshots** — placeholder: add screenshots of Chat mode (light + dark), the model selector, and Settings → Providers here once the UI is finalized.
 
@@ -100,9 +100,9 @@ Notes:
 - **Provider base URLs must use `https://`** (plain `http://` is allowed only for `localhost`/`127.0.0.1`), so your Bearer key is never sent in cleartext to a remote host.
 - No telemetry, no analytics, no phone-home. The only network traffic is to the provider endpoints you configure.
 - Everything is stored locally in SQLite under Electron's per-user data directory:
-  - Windows: `%APPDATA%\Grasberg Desktop`
-  - macOS: `~/Library/Application Support/Grasberg Desktop`
-  - Linux: `~/.config/Grasberg Desktop`
+  - Windows: `%APPDATA%\Grasberg`
+  - macOS: `~/Library/Application Support/Grasberg`
+  - Linux: `~/.config/Grasberg`
 - The renderer is fully sandboxed (`contextIsolation: true`, `sandbox: true`, no Node integration) and talks to the main process only through a typed, validated IPC surface.
 
 ## Project structure
@@ -157,4 +157,4 @@ The most common contribution is a new provider adapter — see [docs/ADDING_A_PR
 
 ## License
 
-[MIT](LICENSE) © 2026 Grasberg Desktop contributors.
+[MIT](LICENSE) © 2026 Grasberg contributors.

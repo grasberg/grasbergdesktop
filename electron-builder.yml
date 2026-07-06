@@ -1,7 +1,7 @@
-# electron-builder configuration for Grasberg Desktop.
+# electron-builder configuration for Grasberg.
 # Code signing is intentionally unconfigured — see README "Building installers".
-appId: com.grasberg.desktop
-productName: Grasberg Desktop
+appId: com.grasberg.app
+productName: Grasberg
 
 directories:
   output: release

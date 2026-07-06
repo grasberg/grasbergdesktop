@@ -2,7 +2,7 @@
 name: init
 description: Initialize a new AGENTS.md file with codebase documentation (commands, architecture, conventions) so future sessions are productive quickly.
 ---
-Please analyze this codebase and create a AGENTS.md file, which will be given to future instances of Grasberg Desktop to operate in this repository.
+Please analyze this codebase and create a AGENTS.md file, which will be given to future instances of Grasberg to operate in this repository.
 
 What to add:
 1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
@@ -21,5 +21,5 @@ Usage notes:
 ```
 # AGENTS.md
 
-This file provides guidance to Grasberg Desktop when working with code in this repository.
+This file provides guidance to Grasberg when working with code in this repository.
 ```

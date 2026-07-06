@@ -137,7 +137,7 @@ export default function AboutTab() {
       </dl>
 
       <p className="field-hint about-licenses">
-        Grasberg Desktop is released under the MIT license. It is built with open-source
+        Grasberg is released under the MIT license. It is built with open-source
         software, including Electron, React, zustand and node-sqlite3-wasm — each distributed under
         its own permissive license.
       </p>

@@ -1,5 +1,5 @@
 /*
- * Design tokens for Grasberg Desktop.
+ * Design tokens for Grasberg.
  * The resolved theme is applied by App.tsx as <html data-theme="light|dark">.
  * :root carries the dark values as a fallback so first paint (before settings
  * load) matches the near-black background set inline in index.html.

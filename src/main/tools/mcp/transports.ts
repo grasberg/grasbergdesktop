@@ -28,7 +28,7 @@ export type McpConnector = (
   secrets: Record<string, string>
 ) => Promise<McpConnection>
 
-const CLIENT_INFO = { name: 'grasberg-desktop', version: '0.1.0' }
+const CLIENT_INFO = { name: 'grasberg', version: '0.1.0' }
 const CONNECT_TIMEOUT_MS = 15_000
 
 function flattenContent(result: unknown): { content: string; isError: boolean } {

@@ -150,9 +150,9 @@ The reference files mentioned in this skill are included below.
 
 ## Appendix: code-review/README.md
 
-# Grasberg Desktop `/code-review` slash command
+# Grasberg `/code-review` slash command
 
-The prompt templates behind Grasberg Desktop's built-in `/code-review` skill (v2.1.198). There is no skill.md on disk for this command — the text is compiled into the Grasberg Desktop binary and injected into the conversation as a user-message block when the command runs. Content here was extracted from the binary and byte-verified against live API captures (MITM proxy, 2026-07-02).
+The prompt templates behind Grasberg's built-in `/code-review` skill (v2.1.198). There is no skill.md on disk for this command — the text is compiled into the Grasberg binary and injected into the conversation as a user-message block when the command runs. Content here was extracted from the binary and byte-verified against live API captures (MITM proxy, 2026-07-02).
 
 ## Usage
 
@@ -175,7 +175,7 @@ The finder angles: A line-by-line diff scan, B removed-behavior auditor, C cross
 
 The binary also contains sibling variants not reproduced here: an output mode that reports via a `ReportFindings` tool call instead of a JSON array, an artifact-publishing step (findings rendered to a shareable HTML page), and a workflow-backed orchestration used at high/xhigh/max when workflows are enabled (one finder per correctness angle, one merged cleanup finder, a verifier per distinct file:line, then synthesis).
 
-Current canonical copy: `Anthropic/Grasberg Desktop/bundled-skills/code-review.md` (high variant with frontmatter).
+Current canonical copy: `Anthropic/Grasberg/bundled-skills/code-review.md` (high variant with frontmatter).
 
 ---
 

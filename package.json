@@ -1,10 +1,10 @@
 {
-  "name": "grasberg-desktop",
-  "productName": "Grasberg Desktop",
+  "name": "grasberg",
+  "productName": "Grasberg",
   "version": "0.1.0",
   "description": "Local-first desktop client for multiple LLM providers (DeepSeek, GLM/Zhipu AI, MiniMax, and any OpenAI-compatible API). Chat, Cowork and Code modes with secure key storage and SQLite-backed history.",
   "main": "./out/main/index.js",
-  "author": "Grasberg Desktop contributors",
+  "author": "Grasberg contributors",
   "license": "MIT",
   "private": true,
   "scripts": {

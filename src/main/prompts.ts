@@ -30,7 +30,7 @@ export interface ModePromptOptions {
 }
 
 const BASE_PERSONA =
-  'You are the assistant inside Grasberg Desktop, a local-first desktop app. ' +
+  'You are the assistant inside Grasberg, a local-first desktop app. ' +
   'Be concise and helpful: give direct answers first, add detail only when it earns its place, ' +
   'and use Markdown formatting when it improves readability.'
 

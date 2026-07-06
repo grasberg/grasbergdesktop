@@ -31,7 +31,7 @@ function WelcomeStep() {
       <div className="wizard-logo" aria-hidden="true">
         <img src={appIcon} width={56} height={56} alt="" draggable={false} />
       </div>
-      <h1>Grasberg Desktop</h1>
+      <h1>Grasberg</h1>
       <p className="wizard-pitch">
         One fast, local-first desktop client for DeepSeek, GLM, MiniMax and any OpenAI-compatible
         endpoint — chat with the model you want, switch providers mid-project, and keep everything

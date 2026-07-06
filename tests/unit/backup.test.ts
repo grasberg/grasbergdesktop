@@ -92,6 +92,16 @@ describe('applyBackup', () => {
     )
   })
 
+  it('still imports pre-rebrand backups (legacy "grasberg-desktop-backup" marker)', () => {
+    const summary = applyBackup(target, {
+      format: 'grasberg-desktop-backup',
+      version: 1,
+      memories: [{ title: 'lang', content: 'Swedish' }],
+    })
+    expect(summary.memoriesImported).toBe(1)
+    expect(target.memories.list()).toHaveLength(1)
+  })
+
   it('skips invalid entries and unknown/bad settings keys without failing', () => {
     const summary = applyBackup(target, {
       format: BACKUP_FORMAT,
