@@ -24,7 +24,10 @@ win:
   target:
     - nsis
 
+# Dash-separated artifact names (no spaces) matching the website's download
+# URLs: Grasberg-Setup-1.0.0.exe, Grasberg-1.0.0.dmg, Grasberg-1.0.0.AppImage.
 nsis:
+  artifactName: ${productName}-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -33,6 +36,7 @@ nsis:
 
 mac:
   icon: build/icon.png
+  artifactName: ${productName}-${version}-${arch}.${ext}
   target:
     - dmg
     - zip
@@ -41,6 +45,7 @@ mac:
 
 linux:
   icon: build/icon.png
+  artifactName: ${productName}-${version}.${ext}
   target:
     - AppImage
     - deb
