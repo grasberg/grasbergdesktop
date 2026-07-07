@@ -14,7 +14,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](package.json)
 [![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-0a1a14.svg)](#building-installers)
 
-[Features](#features) · [Screenshots](#screenshots) · [Getting started](#getting-started) · [Provider setup](#provider-setup) · [Security](#security--privacy) · [Docs](docs/ARCHITECTURE.md)
+**[grasberg.com](https://grasberg.com/)** · [Features](#features) · [Screenshots](#screenshots) · [Getting started](#getting-started) · [Provider setup](#provider-setup) · [Security](#security--privacy) · [Docs](docs/ARCHITECTURE.md)
 
 <img src="docs/screenshots/chat-code.png" alt="Grasberg chat: syntax-highlighted code, conversation sidebar, per-message token usage and cost estimate" width="850" />
 
