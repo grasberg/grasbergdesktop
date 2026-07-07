@@ -27,3 +27,6 @@ coverage/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Marketing site (deployed separately, not part of the app)
+website/

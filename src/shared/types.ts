@@ -494,6 +494,12 @@ export interface AppSettings {
    */
   memoryEnabled: boolean
   /**
+   * Dreaming: periodically consolidate saved memories with the default model
+   * (merge duplicates, rewrite stale entries, drop obsolete ones). On by
+   * default; only runs automatically while `memoryEnabled` is also on.
+   */
+  dreamingEnabled: boolean
+  /**
    * Opt-in: allow the run_shell_command tool to actually execute commands
    * (still gated by per-call approval). Off by default — the app otherwise
    * only ever *suggests* shell commands.
@@ -551,6 +557,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   compactionEnabled: false,
   compactionThresholdRatio: 0.75,
   memoryEnabled: true,
+  dreamingEnabled: true,
   shellExecutionEnabled: false,
   shellCommandAllowlist: [],
   browserToolsEnabled: false,
@@ -1148,6 +1155,18 @@ export interface MemoryInput {
 export interface MemoryPatch {
   title?: string
   content?: string
+}
+
+/** Outcome of a memory-consolidation ("dreaming") run. */
+export interface DreamResult {
+  /** False when the run was skipped (disabled, too few memories, nothing new). */
+  ran: boolean
+  /** Memory count before/after (equal when the model changed nothing). */
+  before: number
+  after: number
+  updated: number
+  removed: number
+  created: number
 }
 
 // ---------------------------------------------------------------------------

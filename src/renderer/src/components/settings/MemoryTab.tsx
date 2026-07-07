@@ -85,10 +85,26 @@ export default function MemoryTab(): ReactElement {
   const loaded = useMemoriesStore((s) => s.loaded)
   const load = useMemoriesStore((s) => s.load)
   const remove = useMemoriesStore((s) => s.remove)
+  const dream = useMemoriesStore((s) => s.dream)
+  const toast = useUiStore((s) => s.toast)
   const persist = usePersistSettings()
   const [, run] = useAsyncAction()
+  const [dreamBusy, runDream] = useAsyncAction()
 
   const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<Memory>()
+
+  const consolidateNow = (): void => {
+    void runDream(async () => {
+      const result = await dream()
+      if (!result.ran) {
+        toast('Not enough memories to consolidate yet.')
+      } else if (result.updated + result.removed + result.created === 0) {
+        toast('Memories are already well consolidated.', 'success')
+      } else {
+        toast(`Dreaming done: ${result.before} → ${result.after} memories.`, 'success')
+      }
+    })
+  }
 
   useEffect(() => {
     void load()
@@ -109,9 +125,16 @@ export default function MemoryTab(): ReactElement {
           </p>
         </div>
         {!formOpen ? (
-          <button type="button" className="btn" onClick={openAdd}>
-            + New memory
-          </button>
+          <div className="prompt-form-actions">
+            {memories.length >= 2 ? (
+              <button type="button" className="btn btn-ghost" disabled={dreamBusy} onClick={consolidateNow}>
+                {dreamBusy ? 'Dreaming…' : 'Consolidate now'}
+              </button>
+            ) : null}
+            <button type="button" className="btn" onClick={openAdd}>
+              + New memory
+            </button>
+          </div>
         ) : null}
       </header>
 
@@ -127,6 +150,22 @@ export default function MemoryTab(): ReactElement {
           checked={settings.memoryEnabled}
           onChange={(v) => void persist({ memoryEnabled: v })}
           label="Enable memory"
+        />
+      </div>
+
+      <div className="toggle-row">
+        <div className="toggle-row-text">
+          <span className="toggle-row-title">Dreaming</span>
+          <span className="field-hint">
+            Once a day, your default model tidies the saved memories: merges duplicates, rewrites
+            stale entries and removes obsolete ones. Use “Consolidate now” above to run it
+            immediately.
+          </span>
+        </div>
+        <Switch
+          checked={settings.dreamingEnabled}
+          onChange={(v) => void persist({ dreamingEnabled: v })}
+          label="Dreaming"
         />
       </div>
 

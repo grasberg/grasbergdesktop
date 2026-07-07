@@ -30,6 +30,7 @@ import type {
 import { runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
 import type { KnowledgeService } from '../services/knowledge'
+import type { DreamingService } from '../services/dreaming'
 import {
   CHATGPT_OAUTH_DEFAULT_MODEL,
   PROVIDER_TYPES,
@@ -91,6 +92,8 @@ export interface RegisterIpcDeps {
   oauthManager: OpenAiOAuthManager
   /** Runs saved workflows and records their run history. */
   workflowRunner: WorkflowRunner
+  /** Memory consolidation ("dreaming") — the manual Consolidate-now action. */
+  dreamingService: DreamingService
   /** Knowledge-base chunking/embedding/retrieval. */
   knowledgeService: KnowledgeService
   /** Directory where image attachments are stored on disk. */
@@ -961,6 +964,9 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     db.memories.remove(requireString(id, 'Memory id'))
     return undefined
   })
+
+  // Manual "Consolidate now": forced dream, bypassing the auto-run gates.
+  register(CHANNELS.memoriesDream, () => deps.dreamingService.dreamNow(true))
 
   // -- skills -------------------------------------------------------------------
 

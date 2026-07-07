@@ -18,6 +18,7 @@ import { seedBundledSkills } from './services/bundled-skills'
 import { registerCompletionHook } from './services/completion-hooks'
 import { createArtifactCompletionHook } from './services/artifact-hooks'
 import { createMemoryCompletionHook } from './services/memory-hook'
+import { DreamingService } from './services/dreaming'
 import { CodeService } from './code/code-service'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
@@ -41,6 +42,7 @@ let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let workflowScheduler: WorkflowScheduler | null = null
+let dreamingService: DreamingService | null = null
 let workflowRunnerRef: WorkflowRunner | null = null
 /**
  * The app's main window. getAllWindows() must NOT be used to find it — the
@@ -80,6 +82,7 @@ async function cleanup(): Promise<void> {
   questionBroker?.stopAll()
   imBridgeManager?.stopAll()
   workflowScheduler?.stop()
+  dreamingService?.stop()
   workflowRunnerRef?.stopAll()
   oauthManager?.stopAll()
   try {
@@ -381,6 +384,14 @@ function bootstrap(): void {
   workflowScheduler = scheduler
   workflowRunnerRef = workflowRunner
 
+  // Dreaming: daily memory consolidation on the default model (settings-gated
+  // inside the service; the manual Settings → Memory action bypasses gates).
+  const dreaming = new DreamingService({
+    db: database,
+    generate: (prompt, opts) => chatService!.generateForWorkflow(prompt, undefined, undefined, opts),
+  })
+  dreamingService = dreaming
+
   // Mode-independent: persists ```uld-memory directives from every completed
   // assistant message (gated on settings.memoryEnabled inside the hook).
   registerCompletionHook(createMemoryCompletionHook(database))
@@ -401,6 +412,7 @@ function bootstrap(): void {
     imBridgeManager: imBridge,
     oauthManager: oauth,
     workflowRunner,
+    dreamingService: dreaming,
     knowledgeService,
     attachmentsDir,
     getWindows: () => BrowserWindow.getAllWindows(),
@@ -409,7 +421,10 @@ function bootstrap(): void {
   // Connect enabled MCP servers + IM bridge in the background (no-op under SMOKE_TEST).
   void mcp.start()
   imBridge.start()
-  if (process.env.SMOKE_TEST !== '1') scheduler.start()
+  if (process.env.SMOKE_TEST !== '1') {
+    scheduler.start()
+    dreaming.start()
+  }
 
   createWindow()
   installQuickAccess()

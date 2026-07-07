@@ -1,38 +1,103 @@
+<div align="center">
+
+<img src="build/icon.png" alt="Grasberg" width="96" height="96" />
+
 # Grasberg
 
-**Grasberg** is a local-first, cross-platform desktop client for working with multiple large-language-model providers — DeepSeek, GLM / Zhipu AI, MiniMax, and any OpenAI-compatible API (Ollama, vLLM, LM Studio, OpenRouter, …) — behind one polished interface. Your conversations live in a local SQLite database, your API keys are encrypted with your operating system's own key store, and nothing leaves your machine except the requests you send to the providers you configure. It offers three modes: **Chat** (streaming conversations with Markdown, reasoning display and model switching), **Cowork** (goal-oriented workspaces with notes, plans and checklists), and **Code** (ask questions about a local project and review diff proposals before anything touches disk).
+**Every AI model. One private desktop app.**
 
-> **Screenshots** — placeholder: add screenshots of Chat mode (light + dark), the model selector, and Settings → Providers here once the UI is finalized.
+A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedrock, DeepSeek, GLM/Zhipu, MiniMax — and **120+ OpenAI-compatible providers** — behind one polished interface. Your keys are encrypted on your machine. Your conversations never leave it.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-end--to--end-3178c6.svg)](tsconfig.json)
+[![Electron](https://img.shields.io/badge/Electron-37-47848f.svg)](package.json)
+[![React](https://img.shields.io/badge/React-19-61dafb.svg)](package.json)
+[![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-0a1a14.svg)](#building-installers)
+
+[Features](#features) · [Screenshots](#screenshots) · [Getting started](#getting-started) · [Provider setup](#provider-setup) · [Security](#security--privacy) · [Docs](docs/ARCHITECTURE.md)
+
+<img src="docs/screenshots/chat-code.png" alt="Grasberg chat: syntax-highlighted code, conversation sidebar, per-message token usage and cost estimate" width="850" />
+
+</div>
+
+---
+
+## Why Grasberg?
+
+- 🔐 **Local-first & private** — history in a local SQLite database, API keys encrypted with your OS key store (DPAPI / Keychain / libsecret). No account, no cloud sync, no telemetry.
+- 🧩 **Every provider, one app** — native adapters for OpenAI, Anthropic, Gemini and Bedrock; battle-tested OpenAI-compatible base for DeepSeek, GLM/Zhipu, MiniMax, Z.ai — plus **120+ one-click presets** (OpenRouter, Groq, xAI, Mistral, Together, Ollama, LM Studio, …) generated from the [models.dev](https://models.dev) catalog.
+- 🛠️ **A real agent loop** — streaming tool calls with per-tool permissions: built-in tools, custom HTTP tools, **MCP servers** (stdio + HTTP), sub-agents, an opt-in sandboxed browser, and an opt-in approval-gated shell.
+- 🖥️ **Five modes, one window** — Chat, Cowork, Code, Write and Design, each shaped for a different kind of work.
 
 ## Features
 
-- **Multi-provider** — native adapters for OpenAI, **Anthropic (Claude)**, **Google Gemini** and **Amazon Bedrock**, plus DeepSeek, GLM / Zhipu AI and MiniMax — and **120+ one-click presets** for OpenAI-compatible providers (OpenRouter, Groq, xAI, Mistral, Together, Fireworks, DeepInfra, Perplexity, Cerebras, Moonshot/Kimi, Nvidia, Qwen, Ollama, LM Studio, …), generated from the [models.dev](https://models.dev) catalog. Anything else works via the generic OpenAI-compatible type.
-- **Subscription & login auth** — use a subscription/coding-plan key (Z.ai Coding Plan, MiniMax) at the right endpoint, or **Sign in with ChatGPT** (experimental OAuth) to run OpenAI models on your ChatGPT subscription instead of a platform API key.
-- **Streaming chat** — token-by-token streaming with stop, regenerate, and edit-and-rerun; reasoning/thinking output shown separately for models that emit it (e.g. `deepseek-reasoner`).
-- **Secure key storage** — API keys are encrypted at rest with Electron `safeStorage` (Windows DPAPI, macOS Keychain, Linux libsecret) and never leave the main process.
-- **Local-first** — all history, settings and provider config in a local SQLite database. No accounts, no cloud sync, no telemetry.
-- **Model catalog + live listing** — known models with capability badges (tools, vision, reasoning, context length); live `/models` listing where the provider supports it, with catalog fallback.
-- **Markdown rendering** — GitHub-flavored Markdown with syntax-highlighted code blocks.
-- **Per-conversation overrides** — provider, model, system prompt and sampling parameters per conversation, with sensible global defaults.
-- **Five modes** — **Chat** (streaming conversations), **Cowork** (goal-oriented workspaces with notes, plans, checklists and progress summaries), **Code** (open a local folder only with explicit permission, browse the file tree, review proposed changes as diffs applied only on click), **Write** (a Markdown document alongside the chat, editable and exportable to Markdown/HTML), and **Design** (interactive HTML prototypes rendered in a sandboxed preview).
-- **Tool system with real MCP, sub-agents and (opt-in) shell** — built-in tools (file search, a BM25 `repo_map` code locator, read file, list directory, fetch URL, a `delegate` sub-agent, shell-command *suggestions*), an **opt-in `run_shell_command`** that actually executes (approval-gated, project-scoped, with a timeout), user-defined **custom HTTP tools**, and connections to external **MCP (Model Context Protocol) servers** over stdio or HTTP. Every tool goes through the same per-tool permission model; sensitive tools require explicit approval.
-- **Browser & computer use** — an opt-in, embedded, **sandboxed browser** the assistant can drive: a `browser` tool (navigate, read, click, type) and an Anthropic-style `computer` tool (coordinate clicks, type, key, scroll, screenshot). It is isolated from your machine (http/https only, no OS access); vision models also receive screenshots after each action.
-- **Visual workflow builder** — a React Flow canvas to wire nodes (input, template, AI agent, HTTP request, output) into a graph that runs in the main process, passing each node's output to the next.
-- **IM bridge** — run the assistant from a Telegram bot bound to a conversation, plus a generic outbound webhook on each reply (opt-in, your own credentials).
-- **Vision / image input** — attach images to vision-capable models (sent as OpenAI content parts; images are stored on disk, not inline in the database).
-- **Prompt library** — save reusable prompts and insert them into the composer or set one as a conversation's system prompt.
-- **Context compaction** — optionally auto-summarize long conversations so they stay within the model's context window.
-- **Cost estimate & export** — an approximate per-message cost next to token usage, and one-click export of a conversation to Markdown or JSON.
-- **Light / dark / system theme**, command palette, keyboard shortcuts, onboarding wizard.
+### Models & providers
 
-## Why Electron (not Tauri)?
+- **Native adapters** for the Anthropic Messages API (with **prompt caching**), Google Gemini, and Amazon Bedrock's Converse API (bearer token — no AWS SDK), plus a hardened OpenAI-compatible adapter that powers everything else.
+- **Sign in with ChatGPT** (experimental OAuth) — run OpenAI models on your ChatGPT subscription instead of a platform key. Subscription/coding-plan keys for **Z.ai (GLM)** and **MiniMax** hit the right endpoints out of the box.
+- **Model catalog + live listing** — capability badges (tools · vision · reasoning · context length), live `/models` where supported, catalog fallback where not.
+- **Per-conversation overrides** for provider, model, system prompt and sampling parameters — plus optional per-mode defaults.
 
-- **TypeScript end-to-end.** One language across main process, preload and renderer — no Rust core to maintain alongside the frontend.
-- **First-party encrypted key storage.** Electron's built-in [`safeStorage`](https://www.electronjs.org/docs/latest/api/safe-storage) uses DPAPI on Windows, the Keychain on macOS and libsecret on Linux, with no third-party plugin.
-- **Mature cross-platform packaging.** electron-builder produces NSIS installers, DMGs, AppImages and debs from one config.
-- **Zero native-toolchain friction for contributors.** `npm install && npm run dev` is all it takes — no Rust toolchain required.
+### Chat experience
 
-The trade-off is larger binaries (~90 MB). We consider that acceptable for a desktop power tool; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full decision matrix and process model.
+- **Token-by-token streaming** with stop, regenerate, and edit-and-rerun. Reasoning/thinking output is shown separately for models that emit it.
+- **Rich rendering** — GitHub-flavored Markdown, syntax-highlighted code, **KaTeX math** and **Mermaid diagrams**.
+- **Vision input** — attach images to vision-capable models; text files are inlined as context.
+- **Cost & usage** — per-message token counts with an approximate cost estimate.
+- **Context compaction** — `/compact` on demand, or automatic summarization when a conversation approaches the model's context window.
+- **Command palette, prompt library, conversation search, projects & tasks** to keep long-running work organized, and a **tray icon + global shortcut** (`Ctrl/Cmd+Shift+G`) to summon the window.
+
+### Multi-model workflows
+
+- **Mixture of Agents** — define presets where several *advisor* models answer in parallel and an *aggregator* model synthesizes the final reply (with the full tool loop intact). Trigger per conversation or one-shot with `/moa`.
+- **Arena compare** — run the same prompt across models side by side and pick the winner.
+- **Agent profiles** — named personas with their own system prompt, model and restricted toolset, usable by the `delegate` sub-agent and workflow nodes.
+
+### Tools, MCP & agents
+
+- **Built-in tools** — `web_search`, `fetch_url`, file search, `grep`/`glob`, `git`, a BM25 **`repo_map`** code locator, read/list/edit/write files (through an audited change pipeline), and a **`delegate` sub-agent** that can also run as a background task.
+- **MCP** — connect real [Model Context Protocol](https://modelcontextprotocol.io) servers over stdio or HTTP and manage them from Settings.
+- **Custom HTTP tools** — define your own JSON tools against any API, with encrypted secret headers.
+- **Opt-in shell execution** — off by default; when enabled, every command is approval-gated with a configurable allowlist. Otherwise shell commands are only ever *suggested*, never run.
+- **Browser & computer use** — an opt-in, embedded, **sandboxed** browser the assistant can drive (navigate, read, click, type, screenshot). Isolated from your OS; vision models receive screenshots after each action.
+- **One permission model** for all of it — per-tool allow/ask/deny, with approval dialogs scoped to a call or a conversation.
+
+### Memory, skills & knowledge
+
+- **Persistent memory** — the assistant saves durable facts across conversations (reviewable and editable in Settings), injected into the system prompt.
+- **Dreaming** — once a day, your default model automatically *consolidates* memory: merges duplicates, rewrites stale entries, deletes obsolete ones. On by default, one-click off, or run manually with **Consolidate now**.
+- **Skills** — a bundled skill library ships with the app; import your own skill folders (SKILL.md format) and the model loads them on demand via `use_skill`.
+- **Knowledge bases (RAG)** — import files into a knowledge base; they are chunked, embedded and searchable by the assistant through a retrieval tool.
+
+### Automation
+
+- **Visual workflow builder** — wire nodes (input, template, AI agent, HTTP request, output) on a React Flow canvas; runs in-process with run history.
+- **Scheduler** — run any saved workflow on an interval.
+- **Telegram bridge** — bind a bot to a conversation and chat with your assistant from your phone (trust-on-first-use pairing, single authorized chat).
+- **Outbound webhook** — POST every completed reply to your own endpoint (opt-in).
+
+### Everything a daily driver needs
+
+- Light / dark / system theme, adjustable font size, onboarding wizard.
+- Export conversations to **Markdown or JSON**; Write-mode documents export to **Markdown or HTML**.
+- **Backup & restore** — one file with settings, memories and skills. Secrets are never exported, and security-sensitive settings are never applied from an imported file.
+
+## Screenshots
+
+| | | |
+|---|---|---|
+| ![Markdown rendering with tables](docs/screenshots/chat-markdown.png) | ![Provider settings with encrypted keys](docs/screenshots/settings-providers.png) | ![Memory settings with Dreaming](docs/screenshots/settings-memory.png) |
+| Full GitHub-flavored Markdown | Every provider in one place, keys shown only masked | Persistent memory with Dreaming |
+
+## The five modes
+
+| Mode | What it's for |
+|---|---|
+| **Chat** | Fast streaming conversations — switch models mid-thread, see reasoning separately, attach images. |
+| **Cowork** | Goal-oriented workspaces with notes, plans, checklists, tasks and docs kept alongside the conversation, plus progress summaries. |
+| **Code** | Open a local folder (explicit permission required), browse the tree, ask questions, and review proposed changes as **diffs that apply only when you click**. A staleness guard prevents applying diffs over files that changed since. |
+| **Write** | A Markdown document lives next to the chat — editable, assistant-augmented, exportable to Markdown/HTML. |
+| **Design** | Interactive HTML prototypes rendered live in a fully sandboxed preview (no network, no OS access). |
 
 ## Getting started
 
@@ -43,86 +108,90 @@ npm install
 npm run dev
 ```
 
-### Scripts
-
 | Script | What it does |
 |---|---|
-| `npm run dev` | Start the app in development mode (electron-vite, hot reload) |
+| `npm run dev` | Start in development mode (electron-vite, hot reload) |
 | `npm run build` | Typecheck both tsconfig projects, then build main/preload/renderer to `out/` |
-| `npm start` | Preview the built app (`electron-vite preview`) |
 | `npm run typecheck` | `tsc --noEmit` against `tsconfig.node.json` and `tsconfig.web.json` |
 | `npm test` | Run the Vitest suite once (`npm run test:watch` for watch mode) |
-| `npm run package:win` | Build + package a Windows NSIS installer into `release/` |
-| `npm run package:mac` | Build + package macOS DMG + ZIP into `release/` |
-| `npm run package:linux` | Build + package Linux AppImage + deb into `release/` |
+| `npm run package:win` / `package:mac` / `package:linux` | Build + package installers into `release/` |
 
 ## Building installers
 
 Packaging is configured in [`electron-builder.yml`](electron-builder.yml); artifacts land in `release/`.
 
-- **Windows:** `npm run package:win` → NSIS installer (per-user, install location choosable).
-- **macOS:** `npm run package:mac` → DMG + ZIP.
-- **Linux:** `npm run package:linux` → AppImage + deb.
+- **Windows:** NSIS installer (per-user, choosable install location)
+- **macOS:** DMG + ZIP
+- **Linux:** AppImage + deb
 
-> **Note:** cross-OS packaging is generally not supported — build Windows installers on Windows, DMGs on macOS, and Linux packages on Linux (or use a CI matrix with one runner per OS). **Code signing is intentionally unconfigured**; add your own certificates/notarization config to `electron-builder.yml` before distributing builds publicly.
+> Cross-OS packaging is not supported — build each OS's installer on that OS (or use a CI matrix). **Code signing is intentionally unconfigured**; add your own certificate/notarization config before public distribution.
 
 ## Provider setup
 
-Add a provider in **Settings → Providers**, pick a type, and paste an API key. Keys are encrypted immediately and only a masked preview (like `sk-…4f2a`) is ever shown again.
+Add a provider in **Settings → Providers**, pick a type, and paste an API key. Keys are encrypted immediately; only a masked preview (like `sk-…4f2a`) is ever shown again.
 
 | Provider | Where to get a key | Default base URL |
 |---|---|---|
-| DeepSeek | <https://platform.deepseek.com> | `https://api.deepseek.com/v1` |
-| GLM / Zhipu AI | <https://open.bigmodel.cn> | `https://open.bigmodel.cn/api/paas/v4` |
-| MiniMax | <https://platform.minimax.io> | `https://api.minimax.io/v1` |
 | OpenAI | <https://platform.openai.com/api-keys> | `https://api.openai.com/v1` |
 | Anthropic (Claude) | <https://console.anthropic.com/settings/keys> | `https://api.anthropic.com/v1` |
 | Google Gemini | <https://aistudio.google.com/apikey> | `https://generativelanguage.googleapis.com/v1beta` |
 | Amazon Bedrock | AWS console (bearer token) | `https://bedrock-runtime.{region}.amazonaws.com` |
+| DeepSeek | <https://platform.deepseek.com> | `https://api.deepseek.com/v1` |
+| GLM / Zhipu AI | <https://open.bigmodel.cn> | `https://open.bigmodel.cn/api/paas/v4` |
+| MiniMax | <https://platform.minimax.io> | `https://api.minimax.io/v1` |
 | Z.ai GLM Coding Plan | <https://z.ai> (subscription) | `https://api.z.ai/api/coding/paas/v4` |
 | 120+ OpenAI-compatible presets | pick from the **Add provider** list | pre-filled per preset |
 | OpenAI-compatible (custom) | your server / vendor | — (you provide it) |
 
-Notes:
+<details>
+<summary><b>Provider notes</b> (presets, ChatGPT sign-in, Bedrock, local servers…)</summary>
 
-- **OpenAI-compatible presets:** the **Add provider** picker lists 120+ providers (from models.dev) under *OpenAI-compatible presets*. Choosing one pre-fills the base URL and model catalog — just paste the provider's key. Refresh the catalog with `scripts/generate-presets.ts`.
-- **Anthropic / Gemini:** native adapters (their own wire format); paste an API key.
-- **Amazon Bedrock:** uses a **bearer token** (`AWS_BEARER_TOKEN_BEDROCK`) via the Converse API — no AWS SigV4/SDK. Set your **region in the base-URL host**. Streaming is non-incremental in this version (one Converse response per turn).
-- **Z.ai Coding Plan:** pick the **Z.ai Coding Plan (GLM)** provider type and paste your subscription key. It targets the coding-only endpoint (`/api/coding/paas/v4`), which is **not** interchangeable with the general `/api/paas/v4` endpoint.
-- **MiniMax subscription:** a MiniMax subscription uses the same API key as pay-as-you-go — just paste the key. (China mainland: use `api.minimaxi.com` via an **OpenAI-compatible (custom)** provider.)
-- **Sign in with ChatGPT (experimental):** choose the **OpenAI** provider type and set Authentication to *Sign in with ChatGPT*. This runs an OAuth login (opening your browser) so requests are billed to your ChatGPT subscription via the ChatGPT backend. It is **reverse-engineered and unofficial** — it can stop working without notice and may be unavailable in some regions. Tokens are encrypted on-device and never leave the main process. If it stops working, add an OpenAI **API key** instead.
-- **Zhipu international:** users on the international platform (<https://api.z.ai>) can also add an **OpenAI-compatible (custom)** provider with their z.ai base URL.
-- **Anything else:** any OpenAI-compatible server works via the custom type — Ollama, vLLM, LM Studio, OpenRouter, and so on. Point it at the server's `/v1` base URL.
+- **OpenAI-compatible presets:** the Add-provider picker lists 120+ providers (from models.dev). Choosing one pre-fills the base URL and model catalog — just paste the key. Regenerate the catalog with `scripts/generate-presets.ts`.
+- **Sign in with ChatGPT (experimental):** choose the OpenAI provider type and set Authentication to *Sign in with ChatGPT*. Requests are billed to your ChatGPT subscription via the ChatGPT backend. It is **reverse-engineered and unofficial** — it can stop working without notice. Tokens are encrypted on-device. If it breaks, use an OpenAI API key instead.
+- **Amazon Bedrock:** uses a **bearer token** (`AWS_BEARER_TOKEN_BEDROCK`) via the Converse API — no SigV4/AWS SDK. Set your region in the base-URL host. Streaming is non-incremental (one Converse response per turn).
+- **Z.ai Coding Plan:** targets the coding-only endpoint (`/api/coding/paas/v4`), which is **not** interchangeable with the general `/api/paas/v4` endpoint.
+- **MiniMax subscription:** the same API key as pay-as-you-go. (China mainland: use `api.minimaxi.com` via a custom OpenAI-compatible provider.)
+- **Local & self-hosted:** Ollama, vLLM, LM Studio, or any OpenAI-compatible server — point the custom type at its `/v1` base URL. Plain `http://` is allowed for localhost only.
+
+</details>
 
 ## Security & privacy
 
-- API keys are encrypted at rest via Electron `safeStorage` (OS keychain-backed) and stored only as ciphertext in SQLite. They are never sent to the renderer, never logged, and error messages pass through a redaction step before being persisted or displayed. If OS encryption is unavailable at first launch (e.g. a locked Linux keyring), keys are held in a clearly-marked reversible fallback and automatically re-encrypted once the key store becomes available.
-- **Provider base URLs must use `https://`** (plain `http://` is allowed only for `localhost`/`127.0.0.1`), so your Bearer key is never sent in cleartext to a remote host.
-- No telemetry, no analytics, no phone-home. The only network traffic is to the provider endpoints you configure.
-- Everything is stored locally in SQLite under Electron's per-user data directory:
-  - Windows: `%APPDATA%\Grasberg`
-  - macOS: `~/Library/Application Support/Grasberg`
-  - Linux: `~/.config/Grasberg`
-- The renderer is fully sandboxed (`contextIsolation: true`, `sandbox: true`, no Node integration) and talks to the main process only through a typed, validated IPC surface.
+- **Keys never leave the main process.** They're encrypted at rest with Electron [`safeStorage`](https://www.electronjs.org/docs/latest/api/safe-storage) (Windows DPAPI, macOS Keychain, Linux libsecret), stored only as ciphertext in SQLite, never sent to the renderer, and never logged — error messages pass through a redaction step first. If OS encryption is unavailable at first launch (e.g. a locked Linux keyring), keys are held in a clearly-marked reversible fallback and re-encrypted automatically once the key store is available.
+- **HTTPS-only providers** — plain `http://` is allowed only for localhost, so a bearer key is never sent in cleartext to a remote host.
+- **Sandboxed renderer** — `contextIsolation: true`, `sandbox: true`, no Node integration; the UI talks to the main process only through a typed, zod-validated IPC surface.
+- **Safe by default** — shell execution, browser/computer tools and the Telegram bridge are all opt-in, and dangerous operations are approval-gated per call. Code mode never writes to disk without an explicit click.
+- **No telemetry, no analytics, no phone-home.** The only network traffic is to the providers you configure. Everything is stored locally:
+  - Windows: `%APPDATA%\Grasberg` · macOS: `~/Library/Application Support/Grasberg` · Linux: `~/.config/Grasberg`
 
-## Project structure
+## Architecture
+
+TypeScript end-to-end across three electron-vite targets — **main** (Node), **preload** (contextBridge), **renderer** (sandboxed React 19 + Zustand). SQLite via `node-sqlite3-wasm` (real SQLite, zero native compilation — the test suite runs in plain Node on any OS).
+
+<details>
+<summary><b>Project structure</b></summary>
 
 ```
 src/
   shared/      types.ts ipc.ts schemas.ts catalog.ts   ← the contract (no runtime deps)
   main/        Electron main process
     db/          SQLite (node-sqlite3-wasm), migrations, repositories
-    providers/   adapter interface + per-provider adapters + registry
+    providers/   ProviderAdapter interface + per-provider adapters + registry
     keys/        safeStorage-backed keystore
-    services/    chat orchestration (streams, stop, regenerate, tool loop)
+    services/    chat orchestration, MoA, memory + dreaming, compaction, backup
     code/        Code-mode project access, file tree, diff apply gate
-    tools/       MCP-style tool registry, executor, permissions
+    tools/       tool registry, executor, permissions, MCP manager
+    browser/     embedded sandboxed browser session
+    workflows/   workflow engine, runner, scheduler
+    im/          Telegram bridge + outbound webhook
     ipc/         zod-validated IPC handlers
   preload/     contextBridge implementation of window.uld
-  renderer/    React 19 + Zustand UI (Chat, Cowork, Code, Settings)
-tests/         Vitest unit + integration tests
+  renderer/    React 19 + Zustand UI
+tests/         Vitest unit + integration tests (real temp SQLite, mocked fetch)
 docs/          ARCHITECTURE.md · DB_SCHEMA.md · ADDING_A_PROVIDER.md
 ```
+
+</details>
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the process model and streaming pipeline, and [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) for the database schema.
 
@@ -132,28 +201,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the process model and strea
 npm test
 ```
 
-Unit tests cover the provider adapters (mocked `fetch`: SSE parsing, error normalization, retries, key redaction), the database repositories and migrations, the unified-diff and change-block parsers, Code-mode path-traversal / symlink-escape guards, and the tool registry, executor and approval broker. Integration tests cover the chat flow and the multi-round tool-call loop. The suite runs with `node-sqlite3-wasm` against real temp databases (no Electron required).
-
-## Status
-
-All three modes and the tool system are implemented and covered by the test suite:
-
-1. **Chat mode** — multi-provider streaming chat, secure keys, SQLite history, settings, onboarding, themes, command palette.
-2. **Code mode** — explicit folder grant, file tree, project Q&A, diff proposals with apply/reject gates, staleness guard, and change history. The app never writes to a project file or executes a command without an explicit click; terminal commands are only ever presented as copyable suggestions.
-3. **Cowork mode + tool system** — workspaces with notes/plans/checklists/tasks/docs and progress summaries, plus a tool registry (built-ins, custom HTTP tools and real MCP servers) with per-tool permissions and graceful fallback for non-tool-calling models.
-4. **Beyond the MVP** — vision/image input, a `repo_map` code locator, custom-HTTP-tool and MCP-server management UIs, a prompt library, context compaction, cost estimates, and conversation export.
-5. **Agentic & integration features** — Write and Design modes, opt-in shell execution, browser & computer use (embedded sandboxed browser), a `delegate` sub-agent, a Telegram bridge + outbound webhook, and a visual workflow builder are all implemented.
-
-### Possible next steps
-
-- Richer diff viewer and multi-file change sets.
-- MCP OAuth transports and a "search mode" for servers exposing very many tools.
-- More workflow node types (branch/loop/schedule) and additional IM platforms.
-- Image generation and speech (input/output).
+400+ tests cover the provider adapters (mocked `fetch`: SSE parsing, error normalization, retries, proof that keys never appear in errors), database repositories and migrations, diff/change-block parsers, path-traversal and symlink-escape guards, the tool registry/executor/approval broker, memory consolidation, and the multi-round tool-call loop — all against real temp SQLite databases, no Electron required.
 
 ## Contributing
 
-The most common contribution is a new provider adapter — see [docs/ADDING_A_PROVIDER.md](docs/ADDING_A_PROVIDER.md) for a step-by-step walkthrough. Bug reports and PRs welcome.
+The most common contribution is a new provider adapter — [docs/ADDING_A_PROVIDER.md](docs/ADDING_A_PROVIDER.md) is a step-by-step walkthrough with a PR checklist (streaming, abort, error normalization, redaction, mocked-fetch tests). Bug reports and PRs welcome.
 
 ## License
 

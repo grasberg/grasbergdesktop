@@ -42,6 +42,7 @@ import type {
   Memory,
   MemoryInput,
   MemoryPatch,
+  DreamResult,
   BackupSummary,
   SetTelegramBridgeInput,
   Skill,
@@ -193,6 +194,7 @@ export const CHANNELS = {
   memoriesCreate: 'memories:create',
   memoriesUpdate: 'memories:update',
   memoriesDelete: 'memories:delete',
+  memoriesDream: 'memories:dream',
 
   // skills
   skillsList: 'skills:list',
@@ -576,6 +578,8 @@ export interface UldApi {
     create(input: MemoryInput): Promise<IpcResult<Memory>>
     update(id: string, patch: MemoryPatch): Promise<IpcResult<Memory>>
     delete(id: string): Promise<IpcResult<void>>
+    /** Manual "Consolidate now": runs a dream regardless of the auto toggle. */
+    dream(): Promise<IpcResult<DreamResult>>
   }
   skills: {
     list(): Promise<IpcResult<Skill[]>>

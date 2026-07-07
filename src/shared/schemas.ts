@@ -303,6 +303,7 @@ export const settingsPatchSchema = z
     compactionEnabled: z.boolean(),
     compactionThresholdRatio: z.number().min(0.1).max(0.95),
     memoryEnabled: z.boolean(),
+    dreamingEnabled: z.boolean(),
     shellExecutionEnabled: z.boolean(),
     shellCommandAllowlist: z.array(z.string().trim().min(1).max(200)).max(100),
     browserToolsEnabled: z.boolean(),

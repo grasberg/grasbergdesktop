@@ -127,6 +127,7 @@ const api: UldApi = {
     create: (input) => ipcRenderer.invoke(CHANNELS.memoriesCreate, input),
     update: (id, patch) => ipcRenderer.invoke(CHANNELS.memoriesUpdate, id, patch),
     delete: (id) => ipcRenderer.invoke(CHANNELS.memoriesDelete, id),
+    dream: () => ipcRenderer.invoke(CHANNELS.memoriesDream),
   },
   skills: {
     list: () => ipcRenderer.invoke(CHANNELS.skillsList),
