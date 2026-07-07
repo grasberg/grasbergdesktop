@@ -5,6 +5,21 @@ import type { ConversationsStoreState } from './contracts'
 import { useChatStore } from './chat'
 import { toastError } from './ui'
 
+/**
+ * Upper bound on the sidebar list so the (unindexed, leading-wildcard) search
+ * scan and snippet subquery can never run across an unbounded history. Far more
+ * than fits on screen; older tasks surface via search.
+ */
+const SIDEBAR_LIMIT = 300
+
+/** Renderer-side snippet: a short, single-line preview of a message. */
+function toSnippet(content: string | null): string | null {
+  if (!content) return null
+  const trimmed = content.replace(/\s+/g, ' ').trim()
+  if (!trimmed) return null
+  return trimmed.length > 140 ? `${trimmed.slice(0, 140)}…` : trimmed
+}
+
 export const useConversationsStore = create<ConversationsStoreState>()((set, get) => ({
   summaries: [],
   activeId: null,
@@ -15,18 +30,48 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   async load() {
     const { search, modeFilter } = get()
     try {
-      // Load every task in the mode; the sidebar groups them under their
-      // projects (and a "No project" group) client-side.
+      // Load the mode's most-recent tasks (bounded); the sidebar groups them
+      // under their projects (and a "No project" group) client-side.
       const summaries = await unwrap(
         window.uld.conversations.list({
           search: search.trim() ? search.trim() : undefined,
           mode: modeFilter,
+          limit: SIDEBAR_LIMIT,
         })
       )
       set({ summaries, loaded: true })
     } catch (e) {
       set({ loaded: true })
       toastError('Failed to load conversations', e)
+    }
+  },
+
+  async syncSummary(id, snippet) {
+    // While a search is active the result set must be re-evaluated server-side,
+    // so fall back to a full (bounded) reload; otherwise update just this row in
+    // place and float it to the top, avoiding the full list scan after every
+    // generation.
+    if (get().search.trim()) {
+      await get().load()
+      return
+    }
+    try {
+      const conv = await unwrap(window.uld.conversations.get(id))
+      if (conv.mode !== get().modeFilter) return
+      set((s) => {
+        const existing = s.summaries.find((x) => x.id === id)
+        const summary: ConversationSummary = {
+          id: conv.id,
+          mode: conv.mode,
+          title: conv.title,
+          updatedAt: conv.updatedAt,
+          projectRef: conv.projectRef,
+          snippet: snippet !== undefined ? toSnippet(snippet) : (existing?.snippet ?? null),
+        }
+        return { summaries: [summary, ...s.summaries.filter((x) => x.id !== id)] }
+      })
+    } catch {
+      // Non-fatal: a failed point refresh just leaves the stale row in place.
     }
   },
 

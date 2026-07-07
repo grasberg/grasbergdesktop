@@ -138,6 +138,26 @@ function UserMessage({ message }: { message: Message }): ReactElement {
  * Mixture of Agents transparency: the advisor (reference) model outputs that fed
  * the aggregator, as a collapsible section of labelled blocks above the answer.
  */
+/**
+ * The body of a single advisor/model reference: the same error → text →
+ * running → empty ladder shared by the MoA list and the compare columns (only
+ * the "unavailable" fallback wording differs).
+ */
+function ReferenceBody({
+  reference,
+  unavailableText,
+}: {
+  reference: MoaReferenceOutput
+  unavailableText: string
+}): ReactElement {
+  if (reference.status === 'error') {
+    return <div className="msg-moa-ref-error">{reference.error?.message ?? unavailableText}</div>
+  }
+  if (reference.text) return <Markdown content={reference.text} />
+  if (reference.status === 'running') return <span className="chat-cursor" aria-hidden />
+  return <div className="msg-moa-ref-empty">(no output)</div>
+}
+
 function MoaReferences({
   references,
   label = 'Advisor models',
@@ -178,17 +198,7 @@ function MoaReferences({
                 )}
                 {ref.status === 'error' && <span className="badge msg-error-code">unavailable</span>}
               </div>
-              {ref.status === 'error' ? (
-                <div className="msg-moa-ref-error">
-                  {ref.error?.message ?? 'This advisor was unavailable.'}
-                </div>
-              ) : ref.text ? (
-                <Markdown content={ref.text} />
-              ) : ref.status === 'running' ? (
-                <span className="chat-cursor" aria-hidden />
-              ) : (
-                <div className="msg-moa-ref-empty">(no output)</div>
-              )}
+              <ReferenceBody reference={ref} unavailableText="This advisor was unavailable." />
             </div>
           ))}
         </div>
@@ -225,17 +235,7 @@ function CompareColumns({
             {ref.status === 'error' && <span className="badge msg-error-code">unavailable</span>}
           </div>
           <div className="msg-compare-body">
-            {ref.status === 'error' ? (
-              <div className="msg-moa-ref-error">
-                {ref.error?.message ?? 'This model was unavailable.'}
-              </div>
-            ) : ref.text ? (
-              <Markdown content={ref.text} />
-            ) : ref.status === 'running' ? (
-              <span className="chat-cursor" aria-hidden />
-            ) : (
-              <div className="msg-moa-ref-empty">(no output)</div>
-            )}
+            <ReferenceBody reference={ref} unavailableText="This model was unavailable." />
           </div>
           {picked === null &&
             ref.status === 'done' &&

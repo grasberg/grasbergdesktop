@@ -204,6 +204,7 @@ export class GoogleAdapter implements ProviderAdapter {
       providerType: this.type,
       secrets: [ctx.apiKey],
       fetchImpl: ctx.fetchImpl,
+      honorRetryAfter: true,
     })
   }
 

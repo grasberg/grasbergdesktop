@@ -57,8 +57,15 @@ export interface ConversationsStoreState {
   /** The single current mode the sidebar is scoped to. */
   modeFilter: ConversationMode
   loaded: boolean
-  /** Loads every task for the current mode (grouped into the tree client-side). */
+  /** Loads the current mode's most-recent tasks (grouped into the tree client-side). */
   load(): Promise<void>
+  /**
+   * Refreshes a single conversation's summary in place (title/updatedAt/snippet)
+   * and floats it to the top, instead of reloading the whole list. Falls back to
+   * a full load while a search filter is active. `snippet` is the latest message
+   * text, if known.
+   */
+  syncSummary(id: string, snippet?: string): Promise<void>
   setSearch(q: string): void
   /** Switches the current mode and reloads. */
   setModeFilter(mode: ConversationMode): void

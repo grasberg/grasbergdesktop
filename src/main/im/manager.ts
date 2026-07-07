@@ -5,6 +5,7 @@
  * conversation and the reply is sent back.
  */
 
+import { randomInt } from 'node:crypto'
 import type { Conversation, ImBridgeStatus, Message } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import type { Keystore } from '../keys/keystore'
@@ -58,6 +59,11 @@ export class ImBridgeManager {
       telegramConversationId: settings.telegramBridgeConversationId,
       telegramConnected: this.bridge !== null,
       hasToken: this.hasToken(),
+      // Only surface a pairing code while actually waiting for the first chat.
+      telegramPairingCode:
+        settings.telegramBridgeAllowedChatId === null
+          ? settings.telegramBridgePairingCode
+          : null,
       webhookUrl: settings.outboundWebhookUrl,
     }
   }
@@ -85,19 +91,43 @@ export class ImBridgeManager {
 
   /**
    * Handles one inbound Telegram message. A Telegram bot is publicly
-   * addressable, so without a sender check ANY stranger could talk to the
+   * addressable, so without authentication ANY stranger could talk to the
    * user's bound conversation (leaking its history/memories and burning
-   * credits). We pin the FIRST chat that messages the bot as the authorized one
-   * (trust on first use) and refuse every other sender thereafter.
+   * credits). Pairing is therefore explicit: while unpaired, a sender must echo
+   * the one-time code the desktop app shows (telegramBridgePairingCode) before
+   * their chat id is pinned as the sole authorized chat. Only the code itself is
+   * ever processed pre-pairing — a stranger's message is never forwarded to the
+   * bound conversation or the model.
    */
   private async handleInbound(chatId: number, text: string, conversationId: string): Promise<string> {
-    const allowed = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    const settings = this.deps.db.settings.get()
+    const allowed = settings.telegramBridgeAllowedChatId
     if (allowed === null) {
-      this.deps.db.settings.update({ telegramBridgeAllowedChatId: chatId })
-    } else if (allowed !== chatId) {
+      const code = settings.telegramBridgePairingCode
+      if (!code) {
+        // No code provisioned (bridge misconfigured) — never auto-pair.
+        return 'This assistant is not accepting new chats right now.'
+      }
+      if (text.trim() !== code) {
+        return 'To link this chat, send the pairing code shown in the desktop app.'
+      }
+      // Correct code: pin this chat and consume the code. The pairing message
+      // itself is an ack, not a prompt — it is not forwarded to the model.
+      this.deps.db.settings.update({
+        telegramBridgeAllowedChatId: chatId,
+        telegramBridgePairingCode: null,
+      })
+      return 'This chat is now linked. Send a message to start.'
+    }
+    if (allowed !== chatId) {
       return 'This assistant is private and only responds to its owner.'
     }
     return this.deps.generateReply(conversationId, text)
+  }
+
+  /** Six-digit, zero-padded one-time pairing code. */
+  private static newPairingCode(): string {
+    return String(randomInt(0, 1_000_000)).padStart(6, '0')
   }
 
   /** Store/replace config and (re)start or stop the bridge. */
@@ -108,12 +138,19 @@ export class ImBridgeManager {
       const { encryptedBase64, preview } = this.deps.keystore.encryptKey(trimmedToken)
       this.deps.db.secrets.set('im_bridge', TELEGRAM_OWNER, TOKEN_NAME, encryptedBase64, preview)
     }
+    // A new bot token means a new bot: drop the old pinned chat so the next
+    // sender must re-pair, rather than leaving a stale authorization in place.
+    const current = this.deps.db.settings.get()
+    const pinnedChat = tokenChanged ? null : current.telegramBridgeAllowedChatId
+    // Provision a fresh pairing code whenever the bridge is (re)enabled without
+    // a pinned chat, so the UI always has a code to show and stale codes never
+    // linger. Clear it once a chat is pinned.
+    const needsPairing = input.enabled && pinnedChat === null
     this.deps.db.settings.update({
       telegramBridgeEnabled: input.enabled,
       telegramBridgeConversationId: input.conversationId,
-      // A new bot token means a new bot: drop the old pinned chat so the next
-      // sender re-pairs, rather than leaving a stale authorization in place.
       ...(tokenChanged ? { telegramBridgeAllowedChatId: null } : {}),
+      telegramBridgePairingCode: needsPairing ? ImBridgeManager.newPairingCode() : null,
     })
     this.startBridge()
     return this.status()

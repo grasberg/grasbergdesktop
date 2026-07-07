@@ -264,6 +264,100 @@ function resolveWithinRootOrRefuse(
 }
 
 /**
+ * Symlink-safe containment check. `resolveWithinRoot` only does string math, so
+ * an in-project symlink (e.g. `link -> /`) whose textual path stays under the
+ * root would still let `fs.readdir`/`fs.readFile` follow it OUT of the root.
+ * This re-asserts containment after canonicalising both the root and the target
+ * with `fs.realpath`, mirroring CodeService.realInsideRoot. Returns a refusal
+ * string when the resolved target escapes, or null when it is contained (or
+ * does not exist yet — the caller's fs op then surfaces the natural error; a
+ * non-existent path cannot be a traversal symlink).
+ */
+async function assertRealContained(
+  root: string,
+  absPath: string,
+  relPath: string
+): Promise<string | null> {
+  let real: string
+  try {
+    real = await fs.realpath(absPath)
+  } catch {
+    return null
+  }
+  let realRoot: string
+  try {
+    realRoot = await fs.realpath(path.resolve(root))
+  } catch {
+    realRoot = path.resolve(root)
+  }
+  const rel = path.relative(realRoot, real)
+  if (rel !== '' && (rel.startsWith('..') || path.isAbsolute(rel))) {
+    return `Error: '${relPath}' resolves (via a symlink) outside the granted project folder; access refused.`
+  }
+  return null
+}
+
+const MAX_FETCH_REDIRECTS = 5
+
+/** Parses a dotted-quad IPv4 literal, or null if `host` is not one. */
+function parseIpv4(host: string): [number, number, number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (!m) return null
+  const parts = m.slice(1, 5).map(Number) as [number, number, number, number]
+  if (parts.some((n) => n > 255)) return null
+  return parts
+}
+
+/** True for RFC1918 / loopback / link-local / CGNAT / unspecified IPv4. */
+function isPrivateIpv4([a, b]: [number, number, number, number]): boolean {
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  return false
+}
+
+/**
+ * True when `hostname` names an internal/loopback/link-local target that must
+ * not be fetched by model-driven network tools (SSRF guard). Covers literal
+ * IPv4/IPv6 (incl. IPv4-mapped IPv6) plus the common internal hostnames. This
+ * is a literal-host guard; DNS rebinding (a public name resolving to a private
+ * IP) is a documented residual accepted for this local-first, approval-gated,
+ * GET-only surface.
+ */
+function isBlockedHostname(hostnameRaw: string): boolean {
+  const host = hostnameRaw.replace(/^\[/, '').replace(/\]$/, '').toLowerCase()
+  if (!host) return true
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.home.arpa'))
+    return true
+  const v4 = parseIpv4(host)
+  if (v4) return isPrivateIpv4(v4)
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(host)
+  if (mapped) {
+    const m4 = parseIpv4(mapped[1])
+    if (m4) return isPrivateIpv4(m4)
+  }
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return true
+    if (/^fe[89ab]/.test(host)) return true // fe80::/10 link-local
+    if (/^f[cd]/.test(host)) return true // fc00::/7 unique-local
+  }
+  return false
+}
+
+function ssrfRefusal(parsed: URL): string | null {
+  if (isBlockedHostname(parsed.hostname)) {
+    return `Error: refusing to fetch internal/loopback/link-local address '${parsed.hostname}'.`
+  }
+  return null
+}
+
+/** Thrown inside guarded fetches; message is surfaced to the model verbatim. */
+class FetchGuardError extends Error {}
+
+/**
  * Converts a glob pattern to an anchored RegExp over forward-slash relative
  * paths. Supports '**' (any depth), '*' (within a segment) and '?'. A pattern
  * without '/' matches the basename at any depth.
@@ -839,6 +933,9 @@ export class ToolExecutor {
       }
     }
 
+    const escaped = await assertRealContained(root, absPath, relPath)
+    if (escaped) return escaped
+
     try {
       const stat = await fs.lstat(absPath)
       if (stat.isSymbolicLink()) {
@@ -867,6 +964,8 @@ export class ToolExecutor {
     const relPath = (getString(args, 'path') ?? '.').trim() || '.'
     const [absPath, refusal] = resolveWithinRootOrRefuse(root, relPath)
     if (refusal) return refusal
+    const escaped = await assertRealContained(root, absPath, relPath)
+    if (escaped) return escaped
 
     try {
       const entries = await fs.readdir(absPath, { withFileTypes: true })
@@ -1208,13 +1307,50 @@ export class ToolExecutor {
   private async fetchWithTimeout<T>(
     url: string,
     init: RequestInit,
-    consume: (res: Response) => Promise<T>
+    consume: (res: Response) => Promise<T>,
+    guard?: { blockInternal?: boolean; sameOriginRedirectsOnly?: boolean }
   ): Promise<T> {
     const fetchImpl = this.deps.fetchImpl ?? fetch
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
-      return await consume(await fetchImpl(url, { ...init, signal: controller.signal }))
+      if (!guard) {
+        return await consume(await fetchImpl(url, { ...init, signal: controller.signal }))
+      }
+      // Guarded mode: follow redirects manually so every hop can be
+      // re-validated. `redirect: 'follow'` would let a public URL 302 to an
+      // internal host, or bounce custom-tool secret headers to another origin
+      // (undici keeps custom headers across cross-origin redirects).
+      const origin = new URL(url).origin
+      let currentUrl = url
+      for (let hop = 0; hop <= MAX_FETCH_REDIRECTS; hop++) {
+        if (guard.blockInternal) {
+          const blocked = ssrfRefusal(new URL(currentUrl))
+          if (blocked) throw new FetchGuardError(blocked)
+        }
+        const res = await fetchImpl(currentUrl, {
+          ...init,
+          redirect: 'manual',
+          signal: controller.signal,
+        })
+        if (res.status < 300 || res.status >= 400) return await consume(res)
+        const location = res.headers.get('location')
+        if (!location) return await consume(res)
+        const next = new URL(location, currentUrl)
+        if (next.protocol !== 'https:') {
+          throw new FetchGuardError(
+            `Error: refusing to follow a redirect to a non-https URL ('${next.protocol}//…').`
+          )
+        }
+        if (guard.sameOriginRedirectsOnly && next.origin !== origin) {
+          throw new FetchGuardError(
+            `Error: refusing to follow a cross-origin redirect (${origin} → ${next.origin}); ` +
+              `secret headers are not forwarded off-origin.`
+          )
+        }
+        currentUrl = next.toString()
+      }
+      throw new FetchGuardError('Error: too many redirects.')
     } finally {
       clearTimeout(timer)
     }
@@ -1234,9 +1370,12 @@ export class ToolExecutor {
     if (parsed.username || parsed.password) {
       return 'Error: URLs with embedded credentials are not allowed.'
     }
+    const blocked = ssrfRefusal(parsed)
+    if (blocked) return blocked
 
     try {
       // GET only; no credentials, cookies or custom auth are ever attached.
+      // Guarded: internal/loopback targets are refused on every redirect hop.
       return await this.fetchWithTimeout(
         parsed.toString(),
         {
@@ -1250,9 +1389,11 @@ export class ToolExecutor {
           }
           const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
           return formatHttpResponse(res, text, truncated)
-        }
+        },
+        { blockInternal: true }
       )
     } catch (e) {
+      if (e instanceof FetchGuardError) return e.message
       return redactSecrets(`Error fetching URL: ${errorMessage(e)}`)
     }
   }
@@ -1458,18 +1599,26 @@ export class ToolExecutor {
     }
 
     try {
-      return await this.fetchWithTimeout(url.toString(), init, async (res) => {
-        const contentType = res.headers.get('content-type') ?? ''
-        if (!isTextualContentType(contentType)) {
-          return `Error: custom tool '${definition.name}' returned a non-textual response (content-type '${contentType || 'unknown'}').`
-        }
-        const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
-        // SUCCESS path: strip only the known header/secret values so legitimate
-        // hashes/ids in the response body survive intact (generic patterns would
-        // corrupt them). Error paths below still use full redactSecrets.
-        return redactKnownSecrets(formatHttpResponse(res, text, truncated), secrets)
-      })
+      // Guarded: secret headers are configured for this origin only, so a
+      // cross-origin redirect must not carry them to another host.
+      return await this.fetchWithTimeout(
+        url.toString(),
+        init,
+        async (res) => {
+          const contentType = res.headers.get('content-type') ?? ''
+          if (!isTextualContentType(contentType)) {
+            return `Error: custom tool '${definition.name}' returned a non-textual response (content-type '${contentType || 'unknown'}').`
+          }
+          const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
+          // SUCCESS path: strip only the known header/secret values so legitimate
+          // hashes/ids in the response body survive intact (generic patterns would
+          // corrupt them). Error paths below still use full redactSecrets.
+          return redactKnownSecrets(formatHttpResponse(res, text, truncated), secrets)
+        },
+        { sameOriginRedirectsOnly: true }
+      )
     } catch (e) {
+      if (e instanceof FetchGuardError) return redactSecrets(e.message, secrets)
       return redactSecrets(
         `Error calling custom tool '${definition.name}': ${errorMessage(e)}`,
         secrets

@@ -80,38 +80,57 @@ describe('ImBridgeManager', () => {
     })
   })
 
-  it('pins the first Telegram sender and refuses every other chat (trust on first use)', async () => {
+  it('pairs the first sender only with the one-time code and refuses everyone else', async () => {
     const generateReply = vi.fn(async () => 'reply')
     const manager = new ImBridgeManager({ db, keystore, generateReply })
     const conversation = conv()
+    // Enable the bridge to provision a pairing code (enabled:false in setTelegram
+    // would not need one; use enabled:true, poll loop is skipped under SMOKE, but
+    // here we call handleInbound directly regardless).
+    const status = manager.setTelegram({
+      token: 'bot-token',
+      conversationId: conversation.id,
+      enabled: true,
+    })
+    const code = status.telegramPairingCode
+    expect(code).toMatch(/^\d{6}$/)
+
     // Reach the private inbound handler without starting the poll loop.
-    const inbound = (chatId: number): Promise<string> =>
+    const inbound = (chatId: number, text: string): Promise<string> =>
       (
         manager as unknown as {
           handleInbound(chatId: number, text: string, conversationId: string): Promise<string>
         }
-      ).handleInbound(chatId, 'hi', conversation.id)
+      ).handleInbound(chatId, text, conversation.id)
 
-    // First message pins chat 100 and is answered.
-    expect(await inbound(100)).toBe('reply')
+    // A stranger who does not know the code cannot pair and is never forwarded.
+    const wrong = await inbound(999, 'let me in')
+    expect(wrong).toMatch(/pairing code/i)
+    expect(db.settings.get().telegramBridgeAllowedChatId).toBeNull()
+    expect(generateReply).not.toHaveBeenCalled()
+
+    // The owner echoes the code: their chat is pinned, code is consumed, and the
+    // pairing message is acked (not forwarded to the model).
+    const linked = await inbound(100, code!)
+    expect(linked).toMatch(/linked/i)
     expect(db.settings.get().telegramBridgeAllowedChatId).toBe(100)
-    expect(generateReply).toHaveBeenCalledTimes(1)
+    expect(db.settings.get().telegramBridgePairingCode).toBeNull()
+    expect(generateReply).not.toHaveBeenCalled()
 
-    // A different chat is refused without ever reaching generateReply.
-    const refusal = await inbound(200)
+    // The paired chat now works; other chats stay refused.
+    expect(await inbound(100, 'hi')).toBe('reply')
+    expect(generateReply).toHaveBeenCalledTimes(1)
+    const refusal = await inbound(200, 'hi')
     expect(refusal).toMatch(/private/i)
     expect(generateReply).toHaveBeenCalledTimes(1)
-
-    // The pinned chat still works.
-    expect(await inbound(100)).toBe('reply')
-    expect(generateReply).toHaveBeenCalledTimes(2)
   })
 
-  it('drops the pinned chat when a new bot token is set', () => {
+  it('drops the pinned chat and issues a new pairing code when a new bot token is set', () => {
     const manager = new ImBridgeManager({ db, keystore, generateReply: async () => 'ok' })
     db.settings.update({ telegramBridgeAllowedChatId: 100 })
-    manager.setTelegram({ token: 'new-token', conversationId: 'c1', enabled: false })
+    const status = manager.setTelegram({ token: 'new-token', conversationId: 'c1', enabled: true })
     expect(db.settings.get().telegramBridgeAllowedChatId).toBeNull()
+    expect(status.telegramPairingCode).toMatch(/^\d{6}$/)
   })
 
   it('does not post when no webhook is configured or for non-assistant messages', async () => {

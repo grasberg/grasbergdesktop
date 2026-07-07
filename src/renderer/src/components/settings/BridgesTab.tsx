@@ -123,6 +123,14 @@ export default function BridgesTab(): ReactElement {
           ) : null}
         </span>
       </label>
+      {status?.telegramPairingCode ? (
+        <p className="field-hint" role="status">
+          <strong>Pairing code: {status.telegramPairingCode}</strong>
+          <br />
+          Send this code as a message to your bot from Telegram to link your chat. Only the chat
+          that sends the correct code is authorized; everyone else is refused.
+        </p>
+      ) : null}
       <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void saveTelegram()}>
         Save Telegram settings
       </button>

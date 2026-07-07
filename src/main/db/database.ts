@@ -4,6 +4,7 @@
  * wires up the repositories.
  */
 
+import { existsSync, rmSync } from 'node:fs'
 import { MIGRATIONS } from './migrations'
 import { open, type SqliteDriver } from './driver'
 import { createProvidersRepository, type ProvidersRepository } from './repositories/providers'
@@ -68,7 +69,7 @@ function readSchemaVersion(driver: SqliteDriver): number {
   return Number.isFinite(version) && version > 0 ? version : 0
 }
 
-function applyMigrations(driver: SqliteDriver): void {
+function applyMigrations(driver: SqliteDriver, filePath: string): void {
   // The meta table must exist before we can read the version; this matches
   // the DDL in migration 1 and is idempotent.
   driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
@@ -82,6 +83,32 @@ function applyMigrations(driver: SqliteDriver): void {
       [SCHEMA_VERSION_KEY, String(version)]
     )
   }
+
+  // FK-safe table rebuilds (noTransaction migrations) toggle PRAGMA
+  // foreign_keys and DROP/RENAME tables outside a transaction, so a crash
+  // mid-rebuild cannot roll back and can leave the schema half-built. Before
+  // upgrading a NON-EMPTY database across any such migration, snapshot the file
+  // with VACUUM INTO so a corrupted rebuild is recoverable. A fresh DB
+  // (current === 0) has nothing to lose, so it is skipped (also keeps tests and
+  // in-memory DBs backup-free). The snapshot is removed once all migrations
+  // succeed.
+  const needsSnapshot =
+    current > 0 &&
+    filePath !== ':memory:' &&
+    pending.some((m) => m.version > current && m.noTransaction)
+  let snapshotPath: string | null = null
+  if (needsSnapshot) {
+    snapshotPath = `${filePath}.pre-v${current}.bak`
+    try {
+      if (existsSync(snapshotPath)) rmSync(snapshotPath, { force: true })
+      driver.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`)
+    } catch {
+      // If the snapshot cannot be written, proceed anyway — the migration is
+      // still the same operation it always was; we just lack the safety copy.
+      snapshotPath = null
+    }
+  }
+
   for (const migration of pending) {
     if (migration.version <= current) continue
     if (migration.noTransaction) {
@@ -97,12 +124,21 @@ function applyMigrations(driver: SqliteDriver): void {
     }
     current = migration.version
   }
+
+  // All migrations succeeded — the pre-migration snapshot is no longer needed.
+  if (snapshotPath) {
+    try {
+      rmSync(snapshotPath, { force: true })
+    } catch {
+      // Best-effort cleanup; a leftover .bak is harmless.
+    }
+  }
 }
 
 export function openDatabase(filePath: string): AppDatabase {
   const driver = open(filePath)
   try {
-    applyMigrations(driver)
+    applyMigrations(driver, filePath)
   } catch (error) {
     driver.close()
     throw error

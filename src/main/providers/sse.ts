@@ -10,6 +10,15 @@
 
 import { ProviderError, abortedError } from './errors'
 
+/**
+ * Hard cap on a single un-terminated line and on one event's accumulated
+ * `data:` payload. A hostile or broken endpoint that streams bytes without a
+ * newline (or an endless single event) would otherwise grow these buffers
+ * without limit and OOM the main process. 16 MB is far above any legitimate
+ * SSE line/event while still bounding the blast radius.
+ */
+const SSE_MAX_BUFFER_BYTES = 16 * 1024 * 1024
+
 export async function* parseSSE(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal
@@ -18,6 +27,7 @@ export async function* parseSSE(
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
   let dataLines: string[] = []
+  let dataLinesBytes = 0
 
   let onAbort: (() => void) | undefined
   const abortPromise = signal
@@ -37,6 +47,7 @@ export async function* parseSSE(
       if (dataLines.length === 0) return undefined
       const payload = dataLines.join('\n')
       dataLines = []
+      dataLinesBytes = 0
       return payload
     }
     if (line.startsWith(':')) return undefined // comment / keep-alive
@@ -44,7 +55,15 @@ export async function* parseSSE(
     const field = colon === -1 ? line : line.slice(0, colon)
     let value = colon === -1 ? '' : line.slice(colon + 1)
     if (value.startsWith(' ')) value = value.slice(1)
-    if (field === 'data') dataLines.push(value)
+    if (field === 'data') {
+      dataLinesBytes += value.length + 1
+      if (dataLinesBytes > SSE_MAX_BUFFER_BYTES) {
+        throw new ProviderError('server', 'Streaming response event exceeded the size limit.', {
+          retryable: false,
+        })
+      }
+      dataLines.push(value)
+    }
     // event:/id:/retry: fields are irrelevant for our providers.
     return undefined
   }
@@ -74,6 +93,11 @@ export async function* parseSSE(
       if (result.done) break
 
       buffer += decoder.decode(result.value, { stream: true })
+      if (buffer.length > SSE_MAX_BUFFER_BYTES) {
+        throw new ProviderError('server', 'Streaming response line exceeded the size limit.', {
+          retryable: false,
+        })
+      }
       let nl: number
       while ((nl = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, nl)

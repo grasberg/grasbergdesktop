@@ -524,11 +524,20 @@ export interface AppSettings {
   telegramBridgeConversationId: string | null
   /**
    * The single Telegram chat id authorized to use the bridge. Null means "not
-   * yet paired": the first chat that messages the bot is pinned here (trust on
-   * first use) and every other sender is refused thereafter. Reset to null when
-   * a new bot token is set.
+   * yet paired". Pairing is explicit: the app shows a one-time code
+   * (telegramBridgePairingCode) that the first sender must echo before their
+   * chat id is pinned here; every other sender is refused thereafter. Reset to
+   * null when a new bot token is set. A discoverable bot username means an
+   * unauthenticated stranger could otherwise win a trust-on-first-use race and
+   * capture the bound conversation.
    */
   telegramBridgeAllowedChatId: number | null
+  /**
+   * One-time code the first Telegram sender must send to pair. Set when the
+   * bridge is enabled with no pinned chat; cleared once a chat pairs. Shown in
+   * the desktop UI only — never accepted from the renderer or a backup.
+   */
+  telegramBridgePairingCode: string | null
   /** Generic outbound webhook posted on each assistant completion (opt-in). */
   outboundWebhookUrl: string | null
 }
@@ -564,6 +573,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   telegramBridgeEnabled: false,
   telegramBridgeConversationId: null,
   telegramBridgeAllowedChatId: null,
+  telegramBridgePairingCode: null,
   outboundWebhookUrl: null,
 }
 
@@ -583,6 +593,7 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'telegramBridgeEnabled',
   'telegramBridgeConversationId',
   'telegramBridgeAllowedChatId',
+  'telegramBridgePairingCode',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
@@ -1059,6 +1070,11 @@ export interface ImBridgeStatus {
   telegramConnected: boolean
   /** Whether a bot token is stored (value never returned). */
   hasToken: boolean
+  /**
+   * One-time pairing code to send from Telegram to link the first chat, or null
+   * when a chat is already paired (or the bridge is off). Shown in the UI.
+   */
+  telegramPairingCode: string | null
   webhookUrl: string | null
 }
 

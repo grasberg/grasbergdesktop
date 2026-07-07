@@ -278,6 +278,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       providerType: this.type,
       secrets: [ctx.apiKey],
       fetchImpl: ctx.fetchImpl,
+      honorRetryAfter: true,
     })
   }
 

@@ -59,6 +59,7 @@ import {
   providerTypeSchema,
   authModeSchema,
   settingsPatchSchema,
+  workflowGraphSchema,
   isValidStorageKey,
 } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
@@ -1123,13 +1124,8 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   // -- workflows --------------------------------------------------------------
 
-  const asGraph = (value: unknown): WorkflowGraph => {
-    const g = value as { nodes?: unknown; edges?: unknown }
-    if (!g || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) {
-      throw invalid('Invalid workflow graph.')
-    }
-    return value as WorkflowGraph
-  }
+  const asGraph = (value: unknown): WorkflowGraph =>
+    parseInput(workflowGraphSchema, value) as WorkflowGraph
   const asWorkflowInput = (value: unknown): WorkflowInput => {
     const o = value as {
       name?: unknown

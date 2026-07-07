@@ -363,7 +363,12 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               s.streaming?.streamId === envelope.streamId ? null : s.streaming,
             ...(event.type === 'error' ? { error: event.error } : {}),
           }))
-          void useConversationsStore.getState().load()
+          // Update just this conversation's sidebar row (title may have been
+          // auto-generated, updatedAt/snippet changed) instead of reloading the
+          // whole list on every generation.
+          void useConversationsStore
+            .getState()
+            .syncSummary(envelope.conversationId, event.message.content)
           refreshOpenConversation(envelope.conversationId)
           return
         }

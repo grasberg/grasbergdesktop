@@ -284,6 +284,47 @@ export const moaPresetSchema = z
   })
   .strict()
 
+// ---------------------------------------------------------------------------
+// Workflows (IPC boundary)
+// ---------------------------------------------------------------------------
+
+export const workflowNodeKindSchema = z.enum([
+  'manual',
+  'ai_agent',
+  'http_request',
+  'template',
+  'condition',
+  'notify',
+  'output',
+])
+
+export const workflowNodeSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    kind: workflowNodeKindSchema,
+    label: z.string().max(500),
+    position: z.object({ x: z.number(), y: z.number() }),
+    // Kind-specific config; values are consumed defensively by the engine.
+    config: z.record(z.unknown()),
+  })
+  .strict()
+
+export const workflowEdgeSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    source: z.string().min(1).max(200),
+    target: z.string().min(1).max(200),
+    sourceHandle: z.string().max(200).nullish(),
+  })
+  .strict()
+
+export const workflowGraphSchema = z
+  .object({
+    nodes: z.array(workflowNodeSchema).max(500),
+    edges: z.array(workflowEdgeSchema).max(2000),
+  })
+  .strict()
+
 export const settingsPatchSchema = z
   .object({
     theme: z.enum(['system', 'light', 'dark']),

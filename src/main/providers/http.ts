@@ -12,6 +12,37 @@ export function joinUrl(baseUrl: string, path: string): string {
   return baseUrl.trim().replace(/\/+$/, '') + path
 }
 
+/**
+ * Only the first ~200-300 chars of an error body are ever surfaced, so there is
+ * no reason to buffer a potentially huge error page in full. Read at most this
+ * many bytes before giving up on the rest.
+ */
+const ERROR_BODY_MAX_BYTES = 64 * 1024
+
+/** Reads at most `maxBytes` of a response body as UTF-8, then stops. */
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return await res.text()
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let out = ''
+  let total = 0
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      out += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Body may already be closed/errored — nothing to do.
+    }
+  }
+  return out + decoder.decode()
+}
+
 /** Retry-After is either delta-seconds or an HTTP date. */
 function parseRetryAfterSeconds(headerValue: string | null): number | undefined {
   if (!headerValue) return undefined
@@ -33,8 +64,10 @@ export interface CheckedFetchOptions {
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
   /**
-   * When true, a Retry-After header feeds the normalized rate-limit error.
-   * Only the OpenAI-compatible base honors it; the native adapters do not.
+   * When true, a Retry-After header feeds the normalized rate-limit error so
+   * the retry/backoff can honor the server-instructed wait. Enabled by the
+   * OpenAI-compatible base and the native adapters (Anthropic/Google both send
+   * it on 429).
    */
   honorRetryAfter?: boolean
 }
@@ -59,7 +92,7 @@ export async function checkedFetch(url: string, opts: CheckedFetchOptions): Prom
   if (!res.ok) {
     let bodyText = ''
     try {
-      bodyText = await res.text()
+      bodyText = await readCapped(res, ERROR_BODY_MAX_BYTES)
     } catch {
       // Body unavailable — normalize from status alone.
     }

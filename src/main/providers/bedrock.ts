@@ -285,6 +285,7 @@ export class BedrockAdapter implements ProviderAdapter {
       providerType: this.type,
       secrets: [ctx.apiKey],
       fetchImpl: ctx.fetchImpl,
+      honorRetryAfter: true,
     })
     let json: unknown
     try {
@@ -326,6 +327,7 @@ export class BedrockAdapter implements ProviderAdapter {
           providerType: this.type,
           secrets: [ctx.apiKey],
           fetchImpl: ctx.fetchImpl,
+          honorRetryAfter: true,
         }),
       { signal: ctx.signal }
     )

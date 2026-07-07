@@ -149,6 +149,13 @@ export function isExpandingSlashCommand(content: string, mode: ConversationMode)
 
 /** Concurrent background tasks (delegate/shell background=true). */
 const MAX_BACKGROUND_TASKS = 8
+/**
+ * How many terminal (done/error/stopped) background-task records to retain so
+ * the model can still poll a recently finished task. Records past this cap are
+ * evicted oldest-first; without this the registry grew unbounded for the whole
+ * process lifetime (each record pinning its result string + AbortController).
+ */
+const MAX_RETAINED_TERMINAL_TASKS = 32
 /** Hard runtime cap for a background shell job. */
 const SHELL_BACKGROUND_TIMEOUT_MS = 30 * 60_000
 
@@ -1449,7 +1456,23 @@ export class ChatService {
    * task-id note for the model. The task runs the same bounded delegate loop
    * with its own AbortController; task_stop / app teardown abort it.
    */
+  /**
+   * Evicts terminal background-task records beyond MAX_RETAINED_TERMINAL_TASKS,
+   * oldest first (Map preserves insertion order). Running tasks are never
+   * evicted. Called whenever a new task is registered so the registry stays
+   * bounded regardless of how many tasks the model spawns over a session.
+   */
+  private pruneTerminalBackgroundTasks(): void {
+    const terminal: string[] = []
+    for (const [id, task] of this.backgroundTasks) {
+      if (task.status !== 'running') terminal.push(id)
+    }
+    const excess = terminal.length - MAX_RETAINED_TERMINAL_TASKS
+    for (let i = 0; i < excess; i++) this.backgroundTasks.delete(terminal[i])
+  }
+
   startDelegateBackground(task: string, ctx: ToolExecuteContext, agentName?: string): string {
+    this.pruneTerminalBackgroundTasks()
     const running = [...this.backgroundTasks.values()].filter(
       (t) => t.status === 'running'
     ).length
@@ -1484,6 +1507,7 @@ export class ChatService {
    * work on it; task_output additionally shows its output so far.
    */
   startShellBackground(command: string, cwd: string): string {
+    this.pruneTerminalBackgroundTasks()
     const running = [...this.backgroundTasks.values()].filter(
       (t) => t.status === 'running'
     ).length
