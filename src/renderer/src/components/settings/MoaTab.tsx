@@ -3,10 +3,11 @@ import type { MoaModelRef, MoaPreset, ProviderConfig } from '@shared/types'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
+import { providerUsable } from '@/lib/providers'
 
-/** Providers that can actually be called (enabled + a stored key). */
+/** Providers that can actually be called (enabled + key, or connected OAuth). */
 function usableProviders(providers: ProviderConfig[]): ProviderConfig[] {
-  return providers.filter((p) => p.enabled && p.hasKey)
+  return providers.filter(providerUsable)
 }
 
 /** A never-empty model id for a provider, so a new preset is always valid. */

@@ -11,12 +11,13 @@ import { ConfirmButton } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
+import { providerUsable } from '@/lib/providers'
 import './settings.css'
 
 function CreateForm({ onDone }: { onDone: () => void }): ReactElement {
   const providers = useProvidersStore((s) => s.providers)
   const toast = useUiStore((s) => s.toast)
-  const usable = providers.filter((p) => p.enabled && p.hasKey)
+  const usable = providers.filter(providerUsable)
   const [name, setName] = useState('')
   const [providerId, setProviderId] = useState(usable[0]?.id ?? '')
   const [modelId, setModelId] = useState('')

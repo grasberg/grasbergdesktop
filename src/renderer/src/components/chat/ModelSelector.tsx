@@ -3,6 +3,7 @@ import type { ModelInfo, ProviderConfig } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
+import { providerUsable } from '@/lib/providers'
 import './chat.css'
 
 function formatContext(n: number | undefined): string | null {
@@ -41,7 +42,7 @@ export default function ModelSelector(): ReactElement {
   const popRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
 
-  const usableProviders = providers.filter((p) => p.enabled && p.hasKey)
+  const usableProviders = providers.filter(providerUsable)
 
   const isOverride = !!conversation && (conversation.providerId !== null || conversation.modelId !== null)
   const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null

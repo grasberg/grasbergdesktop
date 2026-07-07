@@ -99,9 +99,9 @@ export class KnowledgeService {
       }
     }
     // Replace an existing document of the same name rather than duplicating —
-    // only now that the new version is fully embedded (all-or-nothing swap).
-    this.deps.db.knowledge.removeSource(kbId, source)
-    this.deps.db.knowledge.insertChunks(kbId, rows)
+    // only now that the new version is fully embedded, and atomically (one
+    // transaction) so a failure can't strand the source half-replaced.
+    this.deps.db.knowledge.replaceSourceChunks(kbId, source, rows)
     return { chunks: chunks.length }
   }
 

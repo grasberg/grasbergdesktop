@@ -31,6 +31,12 @@ export interface KnowledgeRepository {
   /** Distinct source names with their chunk counts. */
   listSources(kbId: string): Array<{ source: string; chunks: number }>
   removeSource(kbId: string, source: string): number
+  /**
+   * Atomically swaps one source's chunks for `chunks` in a single transaction:
+   * a mid-write failure (SQLite error, disk, crash) rolls back, so the source
+   * is never left with the old chunks deleted and the new ones half-written.
+   */
+  replaceSourceChunks(kbId: string, source: string, chunks: KnowledgeChunkInput[]): void
 }
 
 interface BaseRow {
@@ -77,6 +83,30 @@ export function createKnowledgeRepository(driver: SqliteDriver): KnowledgeReposi
     return row ? toBase(row) : null
   }
 
+  const deleteSource = (kbId: string, source: string): number =>
+    driver.run('DELETE FROM knowledge_chunks WHERE kb_id = ? AND source = ?', [kbId, source])
+      .changes
+
+  const writeChunks = (kbId: string, chunks: KnowledgeChunkInput[]): void => {
+    const now = Date.now()
+    for (const chunk of chunks) {
+      driver.run(
+        `INSERT INTO knowledge_chunks (id, kb_id, source, seq, content, embedding, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          randomUUID(),
+          kbId,
+          chunk.source,
+          chunk.seq,
+          chunk.content,
+          new Uint8Array(chunk.embedding.buffer.slice(0)),
+          now,
+        ]
+      )
+    }
+    driver.run('UPDATE knowledge_bases SET updated_at = ? WHERE id = ?', [now, kbId])
+  }
+
   return {
     list() {
       return driver.all<BaseRow>(`${BASE_SELECT} ORDER BY kb.name COLLATE NOCASE`).map(toBase)
@@ -100,23 +130,17 @@ export function createKnowledgeRepository(driver: SqliteDriver): KnowledgeReposi
     },
 
     insertChunks(kbId, chunks) {
-      const now = Date.now()
-      for (const chunk of chunks) {
-        driver.run(
-          `INSERT INTO knowledge_chunks (id, kb_id, source, seq, content, embedding, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [
-            randomUUID(),
-            kbId,
-            chunk.source,
-            chunk.seq,
-            chunk.content,
-            new Uint8Array(chunk.embedding.buffer.slice(0)),
-            now,
-          ]
-        )
-      }
-      driver.run('UPDATE knowledge_bases SET updated_at = ? WHERE id = ?', [now, kbId])
+      writeChunks(kbId, chunks)
+    },
+
+    replaceSourceChunks(kbId, source, chunks) {
+      // One transaction: the delete and every insert commit together or not at
+      // all, so a failure never strands the source with old chunks removed and
+      // new ones half-written.
+      driver.transaction(() => {
+        deleteSource(kbId, source)
+        writeChunks(kbId, chunks)
+      })
     },
 
     listChunks(kbId) {
@@ -141,11 +165,7 @@ export function createKnowledgeRepository(driver: SqliteDriver): KnowledgeReposi
     },
 
     removeSource(kbId, source) {
-      const result = driver.run(
-        'DELETE FROM knowledge_chunks WHERE kb_id = ? AND source = ?',
-        [kbId, source]
-      )
-      return result.changes
+      return deleteSource(kbId, source)
     },
   }
 }

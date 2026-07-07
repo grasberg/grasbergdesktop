@@ -97,6 +97,33 @@ describe('KnowledgeService over the real db', () => {
     db.knowledge.remove(kb.id)
     expect(db.knowledge.list()).toEqual([])
   })
+
+  it('replaceSourceChunks is atomic: a mid-write failure keeps the old chunks', () => {
+    const kb = db.knowledge.create({ name: 'K', providerId: 'p1', modelId: 'e' })
+    const emb = (): Float32Array => Float32Array.from([1, 2, 3])
+    db.knowledge.insertChunks(kb.id, [
+      { source: 'doc', seq: 0, content: 'OLD-0', embedding: emb() },
+      { source: 'doc', seq: 1, content: 'OLD-1', embedding: emb() },
+    ])
+    expect(db.knowledge.listChunks(kb.id)).toHaveLength(2)
+
+    // The second chunk has a broken embedding (no .buffer), so writeChunks
+    // throws AFTER the delete and the first insert have run inside the
+    // transaction — the whole swap must roll back.
+    const bad = [
+      { source: 'doc', seq: 0, content: 'NEW-0', embedding: emb() },
+      { source: 'doc', seq: 1, content: 'NEW-1', embedding: undefined as unknown as Float32Array },
+    ]
+    expect(() => db.knowledge.replaceSourceChunks(kb.id, 'doc', bad)).toThrow()
+
+    // Rolled back: original chunks intact, no NEW-* partially written.
+    expect(
+      db.knowledge
+        .listChunks(kb.id)
+        .map((c) => c.content)
+        .sort()
+    ).toEqual(['OLD-0', 'OLD-1'])
+  })
 })
 
 describe('OpenAI-compatible /embeddings', () => {

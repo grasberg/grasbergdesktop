@@ -100,6 +100,34 @@ function toolDef(id: string): ToolDefinition {
   }
 }
 
+/** Emits a single tool call by the given WIRE name, then finishes with text. */
+class CallNamedToolAdapter implements ProviderAdapter {
+  readonly type = 'openai-compatible' as const
+  readonly chatRequests: AdapterChatRequest[] = []
+  constructor(private readonly wireName: string) {}
+  async chat(req: AdapterChatRequest): Promise<AdapterChatResult> {
+    this.chatRequests.push({ ...req, messages: req.messages.map((m) => ({ ...m })) })
+    if (this.chatRequests.length === 1) {
+      return {
+        text: '',
+        toolCalls: [{ id: 't1', name: this.wireName, arguments: '{}', status: 'proposed' }],
+        finishReason: 'tool_calls',
+      }
+    }
+    return { text: 'Done.', toolCalls: [], finishReason: 'stop' }
+  }
+  // eslint-disable-next-line require-yield
+  async *chatStream(): AsyncGenerator<AdapterStreamEvent> {
+    throw new Error('not used')
+  }
+  async listModels(): Promise<ModelInfo[]> {
+    return []
+  }
+  async testConnection(): Promise<TestConnectionResult> {
+    return { ok: true, message: 'ok' }
+  }
+}
+
 it('runDelegate(agent=…) uses the profile persona, model and restricted toolset', async () => {
   const provider = db.providers.create({
     id: randomUUID(),
@@ -161,6 +189,65 @@ it('runDelegate(agent=…) uses the profile persona, model and restricted toolse
   expect(toolMsgs).toHaveLength(2)
   expect(toolMsgs[0].content).toBe('SEARCH RESULT')
   expect(toolMsgs[1].content).toContain('not available')
+})
+
+it('runDelegate offers AND executes a profile custom tool whose id differs from its name', async () => {
+  const provider = db.providers.create({
+    id: randomUUID(),
+    type: 'openai-compatible',
+    label: 'P',
+    baseUrl: 'https://x.example/v1',
+    defaultModelId: 'm',
+    enabled: true,
+  })
+  db.providers.setKeyRow(
+    provider.id,
+    'insecure:' + Buffer.from('sk-c', 'utf8').toString('base64'),
+    'sk-…c'
+  )
+  const conversation = db.conversations.create({
+    mode: 'chat',
+    title: 'T',
+    providerId: provider.id,
+    modelId: 'm',
+  })
+  // The profile grants the custom tool by DEFINITION id; the model will call it
+  // by its user-chosen WIRE name.
+  db.agents.create({ name: 'apibot', systemPrompt: 'PERSONA', toolIds: ['custom:abc'] })
+
+  const adapter = new CallNamedToolAdapter('my_api')
+  const execute = vi.fn(async () => 'API OK')
+  const customTool: ToolDefinition = {
+    id: 'custom:abc',
+    name: 'my_api',
+    description: 'my api',
+    parameters: { type: 'object', properties: {} },
+    risk: 'safe',
+    builtin: false,
+    enabled: true,
+  }
+  const tools: ChatToolSystem = {
+    registry: { listEnabledDefinitions: () => [customTool] },
+    executor: { execute },
+    broker: { request: vi.fn(async () => ({ approved: true, scope: 'once' as const })) },
+  }
+  const service = new ChatService(db, () => undefined, { tools, resolveAdapter: () => adapter })
+
+  const result = await service.runDelegate(
+    'do it',
+    { conversation, approval: async () => ({ approved: true, scope: 'once' }) },
+    undefined,
+    'apibot'
+  )
+
+  expect(result).toContain('Done.')
+  // Offered on the wire under its name…
+  expect(adapter.chatRequests[0].tools?.map((t) => t.name)).toEqual(['my_api'])
+  // …and actually executed rather than denied (the regression).
+  expect(execute).toHaveBeenCalledTimes(1)
+  const toolMsg = adapter.chatRequests[1].messages.find((m) => m.role === 'tool')
+  expect(toolMsg?.content).toBe('API OK')
+  expect(toolMsg?.content).not.toContain('not available')
 })
 
 it('runDelegate with an unknown agent name lists the available agents', async () => {

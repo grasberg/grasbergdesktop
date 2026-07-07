@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import type { Attachment } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
+import { providerUsable as isProviderUsable } from '@/lib/providers'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
@@ -87,7 +88,7 @@ export default function Composer(): ReactElement {
   const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null
   const effectiveProvider =
     (effectiveProviderId ? providers.find((p) => p.id === effectiveProviderId) : undefined) ??
-    providers.find((p) => p.enabled && p.hasKey) ??
+    providers.find(isProviderUsable) ??
     null
 
   const providerUsable = (() => {
@@ -97,13 +98,13 @@ export default function Composer(): ReactElement {
     // would fail against the stale override, so surface the banner instead.
     if (conversation?.providerId) {
       const p = providers.find((x) => x.id === conversation.providerId)
-      return !!p && p.enabled && p.hasKey
+      return !!p && isProviderUsable(p)
     }
     if (settings?.defaultProviderId) {
       const p = providers.find((x) => x.id === settings.defaultProviderId)
-      if (p) return p.enabled && p.hasKey
+      if (p) return isProviderUsable(p)
     }
-    return providers.some((p) => p.enabled && p.hasKey)
+    return providers.some(isProviderUsable)
   })()
 
   // Mixture of Agents: the composer toggle + preset dropdown. An active preset
@@ -117,7 +118,7 @@ export default function Composer(): ReactElement {
   const moaUsable = activePreset
     ? (() => {
         const p = providers.find((x) => x.id === activePreset.aggregator.providerId)
-        return !!p && p.enabled && p.hasKey
+        return !!p && isProviderUsable(p)
       })()
     : false
   const usable = activePreset ? moaUsable : providerUsable

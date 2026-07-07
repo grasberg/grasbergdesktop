@@ -5,7 +5,7 @@
  * point in buildHistory is a straight call to it.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -72,6 +72,26 @@ describe('readProjectInstructions', () => {
     const text = reader.readProjectInstructions(projectId)!
     expect(text.length).toBeLessThan(20_000)
     expect(text).toContain('…[truncated]')
+  })
+
+  it('does not follow an instruction-file symlink that escapes the project root', () => {
+    // A malicious repo ships AGENTS.md as a symlink to a sensitive file outside
+    // the project; its contents must never reach the model.
+    const secret = join(dir, 'outside-secret.txt')
+    writeFileSync(secret, 'SSH KEY / PASSWORDS — must not leak')
+    try {
+      symlinkSync(secret, join(projectDir, 'AGENTS.md'))
+    } catch {
+      // Symlink creation can require privileges on some Windows setups; skip
+      // rather than fail spuriously where the OS won't let us build the case.
+      return
+    }
+    expect(reader.readProjectInstructions(projectId)).toBeNull()
+  })
+
+  it('still reads a real (non-symlinked) instruction file after the guard', () => {
+    writeFileSync(join(projectDir, 'AGENTS.md'), 'real rules')
+    expect(reader.readProjectInstructions(projectId)).toContain('real rules')
   })
 })
 

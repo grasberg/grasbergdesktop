@@ -7,8 +7,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
 import type {
   AppSettings,
   AuthMode,
@@ -1412,10 +1412,21 @@ export class ChatService {
     try {
       const project = this.db.code.projectGetById(projectId)
       if (!project) return null
+      // SECURITY: canonicalize the project root once so the per-file symlink
+      // check below can re-assert containment. Mirrors CodeService's root jail
+      // (code-service.ts realInsideRoot) — the canonical guard for reading
+      // inside a granted project.
+      const realRoot = realpathSync.native(resolve(project.path))
+      const rootPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep
       for (const name of PROJECT_INSTRUCTION_FILES) {
         let raw: string
         try {
-          raw = readFileSync(join(project.path, name), 'utf8')
+          // SECURITY: realpath resolves every symlink; reject an instruction
+          // file that a repo has pointed outside the project root (e.g.
+          // AGENTS.md -> ~/.ssh/id_rsa) so its contents never reach the model.
+          const real = realpathSync.native(join(project.path, name))
+          if (real !== realRoot && !real.startsWith(rootPrefix)) continue
+          raw = readFileSync(real, 'utf8')
         } catch {
           continue
         }
@@ -1605,12 +1616,14 @@ export class ChatService {
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
 
-      const toolDefs: AdapterToolDef[] = tools
-        ? tools.registry
-            .listEnabledDefinitions()
-            .filter((d) => allowedToolIds.has(d.id))
-            .map(toAdapterToolDef)
-        : []
+      // The profile's allow-list holds definition ids (e.g. 'custom:<uuid>'),
+      // but the model calls a tool by its WIRE name (== id for builtins, but
+      // the user-chosen name for custom tools). Keep the enabled defs so we can
+      // map a call's name back to its id before the allow-check below.
+      const enabledDefs = tools ? tools.registry.listEnabledDefinitions() : []
+      const toolDefs: AdapterToolDef[] = enabledDefs
+        .filter((d) => allowedToolIds.has(d.id))
+        .map(toAdapterToolDef)
 
       const messages: AdapterMessage[] = [
         { role: 'system', content: persona },
@@ -1633,17 +1646,22 @@ export class ChatService {
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
         messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
         for (const call of result.toolCalls) {
-          const out = allowedToolIds.has(call.name)
-            ? await tools.executor.execute(call, {
-                conversation: parent,
-                streamId: ctx.streamId,
-                approval: ctx.approval,
-                // Inherit the parent's mode gates: plan mode still blocks
-                // mutations, auto-accept edits still skips the edit dialog.
-                planMode: ctx.planMode,
-                autoAcceptEdits: ctx.autoAcceptEdits,
-              })
-            : `Tool '${call.name}' is not available to the sub-agent.`
+          // Resolve the wire name back to a definition id, then gate on the id
+          // — otherwise a custom tool (id 'custom:<uuid>', name '<userName>')
+          // is offered above but wrongly denied here.
+          const def = enabledDefs.find((d) => d.id === call.name || d.name === call.name)
+          const out =
+            def && allowedToolIds.has(def.id)
+              ? await tools.executor.execute(call, {
+                  conversation: parent,
+                  streamId: ctx.streamId,
+                  approval: ctx.approval,
+                  // Inherit the parent's mode gates: plan mode still blocks
+                  // mutations, auto-accept edits still skips the edit dialog.
+                  planMode: ctx.planMode,
+                  autoAcceptEdits: ctx.autoAcceptEdits,
+                })
+              : `Tool '${call.name}' is not available to the sub-agent.`
           messages.push({ role: 'tool', content: out, toolCallId: call.id })
         }
       }
