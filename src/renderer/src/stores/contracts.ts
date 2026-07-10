@@ -162,6 +162,11 @@ export interface UiStoreState {
   shortcutsOpen: boolean
   /** The Workflows builder surface replaces the main area when true. */
   workflowsOpen: boolean
+  /**
+   * Workflow the builder should open with (sidebar "Scheduled tasks" deep
+   * link). Set by openWorkflows(open, workflowId); cleared by the next call.
+   */
+  workflowsInitialId: string | null
   /** Non-null shows the sandboxed artifact preview drawer over the chat. */
   artifactPreview: ArtifactPreview | null
   toasts: Toast[]
@@ -169,7 +174,7 @@ export interface UiStoreState {
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
-  openWorkflows(open: boolean): void
+  openWorkflows(open: boolean, workflowId?: string | null): void
   openArtifactPreview(preview: ArtifactPreview | null): void
   toast(message: string, kind?: ToastKind): void
   dismissToast(id: string): void

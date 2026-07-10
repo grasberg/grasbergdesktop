@@ -140,6 +140,17 @@ export default function WorkflowsView(): ReactElement {
     })
   }, [loadList])
 
+  // Deep link from the sidebar's "Scheduled tasks" section: open that
+  // workflow, then clear the pointer (openWorkflows without an id) so
+  // clicking the same row again re-triggers this effect.
+  const initialWorkflowId = useUiStore((s) => s.workflowsInitialId)
+  useEffect(() => {
+    if (!initialWorkflowId) return
+    void openWorkflow(initialWorkflowId)
+    useUiStore.getState().openWorkflows(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialWorkflowId])
+
   const onNodesChange = useCallback(
     (changes: NodeChange<FlowNode>[]) => setNodes((ns) => applyNodeChanges(changes, ns)),
     []

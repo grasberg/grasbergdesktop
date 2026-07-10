@@ -10,6 +10,7 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   paletteOpen: false,
   shortcutsOpen: false,
   workflowsOpen: false,
+  workflowsInitialId: null,
   artifactPreview: null,
   toasts: [],
 
@@ -17,9 +18,11 @@ export const useUiStore = create<UiStoreState>()((set) => ({
     set({ resolvedTheme: t })
   },
 
-  // The Workflows builder replaces the main area when open.
-  openWorkflows(open) {
-    set({ workflowsOpen: open })
+  // The Workflows builder replaces the main area when open. An optional
+  // workflow id deep-links the builder to that workflow (and is cleared by
+  // any call without one, so it is consumed exactly once).
+  openWorkflows(open, workflowId) {
+    set({ workflowsOpen: open, workflowsInitialId: workflowId ?? null })
   },
 
   openSettings(open) {

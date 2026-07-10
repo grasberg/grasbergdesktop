@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ConversationMode, ConversationSummary, Project } from '@shared/types'
 import { newConversation, newTaskInActiveMode } from '@/lib/new-conversation'
 import { groupTasks } from '@shared/task-groups'
+import { relativeTime } from '@/lib/format'
 import { modKeyLabel } from '@/lib/platform'
+import ScheduledTasks from '@/components/ScheduledTasks'
 import { useConversationsStore } from '@/stores/conversations'
 import { useProjectsStore } from '@/stores/projects'
 import { toastError, useUiStore } from '@/stores/ui'
@@ -41,18 +43,6 @@ function Logo({ size = 22 }: { size?: number }): React.JSX.Element {
       style={{ display: 'block' }}
     />
   )
-}
-
-function relativeTime(ts: number): string {
-  const diffMs = Date.now() - ts
-  const min = Math.floor(diffMs / 60_000)
-  if (min < 1) return 'now'
-  if (min < 60) return `${min}m`
-  const hours = Math.floor(min / 60)
-  if (hours < 24) return `${hours}h`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d`
-  return new Date(ts).toLocaleDateString()
 }
 
 const PlusIcon = (
@@ -712,6 +702,8 @@ export default function Sidebar(): React.JSX.Element {
           <li className="conv-empty">No conversations yet. Start one with “New task”.</li>
         ) : null}
       </ul>
+
+      <ScheduledTasks />
 
       <div className="sidebar-footer">
         <button

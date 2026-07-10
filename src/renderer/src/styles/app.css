@@ -660,6 +660,72 @@ kbd {
   text-align: center;
 }
 
+/* --- Scheduled tasks (sidebar section above the footer) --- */
+
+.sched-section {
+  border-top: 1px solid var(--border);
+  padding-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.sched-empty {
+  padding: 2px 14px 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.sched-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.sched-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: var(--radius-md, 8px);
+}
+
+.sched-item:hover {
+  background: var(--bg-panel);
+}
+
+.sched-item-paused .sched-item-name {
+  color: var(--text-muted);
+}
+
+.sched-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 3px 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sched-item-name {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.sched-item-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
