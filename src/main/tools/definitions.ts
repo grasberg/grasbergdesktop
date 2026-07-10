@@ -282,6 +282,83 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'generate_image',
+    name: 'generate_image',
+    description:
+      'Generate an image from a text prompt with the image model the user configured ' +
+      '(Settings → Defaults → Image generation). The image is saved locally and shown to ' +
+      'the user inside your reply — never describe it as a link or fabricate a URL. It ' +
+      'costs API credits and each call needs approval, so call it only when the user asks ' +
+      'for an image. Write the prompt as a complete visual description (subject, style, ' +
+      'composition, lighting).',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Complete visual description of the image to generate.',
+        },
+        size: {
+          type: 'string',
+          enum: ['auto', 'square', 'landscape', 'portrait'],
+          description: 'Aspect ratio (default auto = provider default).',
+        },
+        count: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 4,
+          description: 'Number of images (default 1; some providers cap at 1).',
+        },
+      },
+      required: ['prompt'],
+    },
+    // 'sensitive' => per-call approval by default, which doubles as the
+    // cost-consent gate. Not 'mutating': plan mode may still illustrate.
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'git_write',
+    name: 'git_write',
+    description:
+      'Perform ONE local git write operation in the granted project: "stage" (git add the ' +
+      'given relative paths), "commit" (commit what is staged with the given message), or ' +
+      '"create_branch" (create and switch to a new branch). EVERY call requires the user\'s ' +
+      'explicit approval — there are no standing grants. Committing on the repository\'s ' +
+      'default branch additionally requires confirm_default_branch: true, and you should ' +
+      'prefer creating a branch instead. This tool can NEVER push, pull, merge, rebase or ' +
+      'switch to an existing branch.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['stage', 'commit', 'create_branch'],
+          description: 'The single git operation to perform.',
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'For "stage": file paths relative to the project root.',
+        },
+        message: { type: 'string', description: 'For "commit": the commit message.' },
+        branch: { type: 'string', description: 'For "create_branch": the new branch name.' },
+        confirm_default_branch: {
+          type: 'boolean',
+          description:
+            'Set true ONLY when the user explicitly asked to commit on the default branch.',
+        },
+      },
+      required: ['action'],
+    },
+    risk: 'dangerous',
+    builtin: true,
+    enabled: true,
+    mutating: true,
+    noStandingApproval: true,
+  },
+  {
     id: 'propose_shell_command',
     name: 'propose_shell_command',
     description:

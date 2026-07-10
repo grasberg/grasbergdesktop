@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Message, StartStreamResult } from '@shared/types'
+import type { Message, ResearchDepth, ResearchRunInfo, StartStreamResult } from '@shared/types'
 import { toNormalized, unwrap } from '@/api/uld'
 import type { ChatStoreState } from './contracts'
 import { useConversationsStore } from './conversations'
@@ -112,14 +112,38 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       // One-shot Mixture of Agents: "/moa <prompt>" runs a single message through
       // the default preset without changing the conversation's model. "/compare
       // <prompt>" fans the same preset out side by side instead of aggregating.
+      // "/research [quick|standard|deep] <question>" runs the deep-research
+      // pipeline (the composer toggle does the same via opts.research).
       let outgoing = content
-      let overrides: { moaPresetId: string; compare?: boolean } | undefined
+      let overrides:
+        | { moaPresetId?: string; compare?: boolean; research?: { depth?: ResearchDepth } }
+        | undefined
       const trimmed = content.trimStart()
-      const slash = ['/moa', '/compare'].find(
-        (cmd) =>
-          trimmed === cmd || trimmed.slice(0, cmd.length + 1).toLowerCase() === `${cmd} `
+      const researchMatch = /^\/research(?:\s+(quick|standard|deep))?\b\s*([\s\S]*)$/i.exec(
+        trimmed
       )
-      if (slash) {
+      const slash = researchMatch
+        ? undefined
+        : ['/moa', '/compare'].find(
+            (cmd) =>
+              trimmed === cmd || trimmed.slice(0, cmd.length + 1).toLowerCase() === `${cmd} `
+          )
+      if (researchMatch) {
+        const depth = researchMatch[1]?.toLowerCase() as ResearchDepth | undefined
+        outgoing = researchMatch[2].trim()
+        if (!outgoing) {
+          set({
+            error: {
+              code: 'invalid_request',
+              message:
+                'Usage: /research [quick|standard|deep] <your question> — searches the web and writes a cited report.',
+              retryable: false,
+            },
+          })
+          return
+        }
+        overrides = { research: depth ? { depth } : {} }
+      } else if (slash) {
         const presetId = settings?.defaultMoaPresetId ?? null
         if (!presetId) {
           set({
@@ -144,13 +168,18 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
           return
         }
         overrides = { moaPresetId: presetId, ...(slash === '/compare' ? { compare: true } : {}) }
+      } else if (opts?.research) {
+        overrides = { research: opts.research }
       } else if (opts?.comparePresetId) {
         overrides = { moaPresetId: opts.comparePresetId, compare: true }
       }
 
       // A MoA run supplies its own aggregator provider, so it doesn't need a
-      // default/override single-model provider to be configured.
-      const usingMoa = !!overrides || !!conversation.moaPresetId
+      // default/override single-model provider to be configured. A research
+      // run does NOT — its synthesizer is the ordinary acting model.
+      const usingResearch = !!overrides?.research
+      const usingMoa =
+        !usingResearch && (!!overrides?.moaPresetId || !!conversation.moaPresetId)
       if (!usingMoa && !settings?.defaultProviderId && !conversation.providerId) {
         set({
           error: {
@@ -353,6 +382,44 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               event.reference,
             ].sort((a, b) => a.index - b.index),
           }))
+          return
+        }
+        case 'attachment': {
+          if (!streaming) return
+          // A generated image was stored: attach it to the streaming message
+          // (upsert by id; the final 'done' message carries them persisted).
+          patchMessage(streaming.assistantMessageId, (m) => ({
+            ...m,
+            attachments: [
+              ...(m.attachments ?? []).filter((a) => a.id !== event.attachment.id),
+              event.attachment,
+            ],
+          }))
+          return
+        }
+        case 'research-activity': {
+          if (!streaming) return
+          // Accumulate live activities on a transient research shell; the
+          // final 'done' message replaces it with the persisted run info.
+          patchMessage(streaming.assistantMessageId, (m) => {
+            const research: ResearchRunInfo = m.research ?? {
+              depth: 'standard',
+              plan: [],
+              sources: [],
+              searches: 0,
+              pagesRead: 0,
+            }
+            return {
+              ...m,
+              research: {
+                ...research,
+                activities: [
+                  ...(research.activities ?? []).filter((a) => a.id !== event.activity.id),
+                  event.activity,
+                ],
+              },
+            }
+          })
           return
         }
         case 'done':

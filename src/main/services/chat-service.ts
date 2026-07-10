@@ -11,6 +11,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type {
   AppSettings,
+  Attachment,
   AuthMode,
   ChatParams,
   Conversation,
@@ -22,6 +23,8 @@ import type {
   NormalizedError,
   ProviderConfig,
   ProviderType,
+  ResearchDepth,
+  ResearchRunInfo,
   StartStreamResult,
   StreamEvent,
   StreamEventEnvelope,
@@ -44,6 +47,8 @@ import {
   PROVIDER_TYPES,
   modelSupportsTools,
   modelSupportsVision,
+  providerSupportsImageOutput,
+  resolveImageModelCatalog,
   resolveModelCatalog,
   resolveModelInfo,
 } from '@shared/catalog'
@@ -51,6 +56,7 @@ import type { AppDatabase } from '../db/database'
 import type { MessagePatch } from '../db/repositories/messages'
 import type {
   AdapterContext,
+  AdapterImageRequest,
   AdapterMessage,
   AdapterToolDef,
   ContentPart,
@@ -65,7 +71,10 @@ import { USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
 import { redactSecrets } from '../providers/redact'
 import { isValidStorageKey } from '@shared/schemas'
+import { formatSourcesSection } from '@shared/citations'
+import { storeGeneratedImage } from '../ipc/attachments'
 import { runCompletionHooks } from './completion-hooks'
+import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
 
 const DEFAULT_TITLE = 'New chat'
 const TITLE_MAX_CHARS = 60
@@ -159,6 +168,9 @@ const MAX_RETAINED_TERMINAL_TASKS = 32
 /** Hard runtime cap for a background shell job. */
 const SHELL_BACKGROUND_TIMEOUT_MS = 30 * 60_000
 
+/** Hard cap for one generate_image call (providers can take tens of seconds). */
+const IMAGE_GENERATION_TIMEOUT_MS = 180_000
+
 interface BackgroundTask {
   status: 'running' | 'done' | 'error' | 'stopped'
   result: string
@@ -238,6 +250,13 @@ interface ActiveStream {
   conversationId: string
   /** Resolves when the detached runStream loop has fully settled (persisted). */
   done: Promise<void>
+}
+
+/** One send's resolved deep-research request (the /research command/toggle). */
+interface ResearchRunRequest {
+  depth: ResearchDepth
+  /** The user's question, fed to the planner and workers. */
+  question: string
 }
 
 /** How the tool system participates in one generation. */
@@ -482,7 +501,15 @@ export class ChatService {
   async send(req: ChatSendRequest): Promise<StartStreamResult> {
     return this.withReservation(req.conversationId, async (conversation) => {
       const settings = this.db.settings.get()
-      const moa = this.resolveMoaPreset(conversation, settings, req.overrides)
+      // Deep research (the /research command/toggle) wins over MoA and
+      // compare for this send: the acting model synthesizes the report.
+      const research: ResearchRunRequest | null = req.overrides?.research
+        ? {
+            depth: req.overrides.research.depth ?? settings.researchDefaultDepth,
+            question: req.content.trim(),
+          }
+        : null
+      const moa = research ? null : this.resolveMoaPreset(conversation, settings, req.overrides)
       // Compare needs a preset to fan out; without one it degrades to a
       // normal single-model send. Its acting target is the first RESOLVABLE
       // advisor (no aggregator runs), so no single-model default is required
@@ -497,7 +524,7 @@ export class ChatService {
               moa ? this.aggregatorOverrides(moa, req.overrides) : req.overrides
             )
       const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
-      return this.start(conversation, settings, resolved, userMessage, moa, compare)
+      return this.start(conversation, settings, resolved, userMessage, moa, compare, research)
     })
   }
 
@@ -880,7 +907,8 @@ export class ChatService {
     resolved: ResolvedTarget,
     userMessage: Message | null,
     moa?: MoaPreset | null,
-    compare = false
+    compare = false,
+    research: ResearchRunRequest | null = null
   ): StartStreamResult {
     const assistantMessage: Message = {
       id: randomUUID(),
@@ -911,11 +939,21 @@ export class ChatService {
     }
 
     // Track the detached loop so stopAll() can await its persistence on quit.
-    // A MoA preset first fans out its advisor models, then delegates to the same
-    // streaming core with the aggregator as the acting model. A compare run is
+    // A research run gathers web findings first, then delegates to the same
+    // streaming core. A MoA preset first fans out its advisor models, then
+    // delegates with the aggregator as the acting model. A compare run is
     // the fan-out alone — the advisors ARE the result, no aggregator.
-    active.done =
-      compare && moa
+    active.done = research
+      ? this.runResearchStream(
+          streamId,
+          conversation,
+          resolved,
+          research,
+          buildOpts,
+          assistantMessage,
+          controller
+        )
+      : compare && moa
         ? this.runCompareStream(streamId, conversation, moa, buildOpts, assistantMessage, controller)
         : moa
           ? this.runMoaStream(
@@ -1411,6 +1449,102 @@ export class ChatService {
   }
 
   /**
+   * Text-to-image for the generate_image tool: resolves the configured (or
+   * auto-picked) image provider, decrypts its key (never leaves main), calls
+   * the adapter and stores the results as image attachments on disk. Mirrors
+   * embedTexts' stub-conversation resolution.
+   */
+  async generateImage(req: {
+    prompt: string
+    count?: number
+    size?: AdapterImageRequest['size']
+  }): Promise<Attachment[]> {
+    const imageDir = this.options.imageDir
+    if (!imageDir) {
+      throw new ProviderError('not_supported', 'Image storage is unavailable in this context.')
+    }
+    const settings = this.db.settings.get()
+    const providerId = settings.defaultImageProviderId ?? this.autoPickImageProviderId()
+    if (!providerId) {
+      throw new ProviderError(
+        'invalid_request',
+        'No image-capable provider is configured — pick one in Settings → Defaults → Image generation.'
+      )
+    }
+    const provider = this.db.providers.getById(providerId)
+    if (!provider) {
+      throw new ProviderError(
+        'invalid_request',
+        'The configured image provider no longer exists — pick another in Settings.'
+      )
+    }
+    if (provider.authMode === 'chatgpt_oauth') {
+      throw new ProviderError(
+        'not_supported',
+        'Image generation needs an OpenAI API key — ChatGPT sign-in has no image endpoint.'
+      )
+    }
+    const modelId =
+      (settings.defaultImageProviderId === providerId ? settings.defaultImageModelId : null) ??
+      resolveImageModelCatalog(provider).defaultImageModelId
+    if (!modelId) {
+      throw new ProviderError(
+        'not_supported',
+        `${provider.label} has no image-generation model — pick an image-capable provider in Settings.`
+      )
+    }
+    const stub: Conversation = {
+      id: 'image',
+      mode: 'chat',
+      title: '',
+      providerId: null,
+      modelId: null,
+      systemPrompt: null,
+      params: {},
+      workspaceId: null,
+      projectId: null,
+      projectRef: null,
+      moaPresetId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    }
+    const resolved = await this.resolveTarget(stub, settings, { providerId, modelId })
+    const adapter = this.adapterFor(resolved)
+    if (!adapter.generateImage) {
+      throw new ProviderError('not_supported', `${provider.label} cannot generate images.`)
+    }
+    const count = Math.min(Math.max(Math.floor(req.count ?? 1), 1), 4)
+    // Image generation is slow (tens of seconds); executor calls are not
+    // stream-abortable today, so a hard timeout bounds the worst case.
+    const signal = AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS)
+    const images = await adapter.generateImage(
+      { modelId: resolved.modelId, prompt: req.prompt, count, size: req.size },
+      this.adapterCtx(resolved, signal)
+    )
+    const attachments: Attachment[] = []
+    for (const image of images) {
+      attachments.push(
+        await storeGeneratedImage(imageDir, image.bytes, image.mimeType, {
+          prompt: req.prompt,
+          modelId: resolved.modelId,
+          ...(req.size && req.size !== 'auto' ? { size: req.size } : {}),
+        })
+      )
+    }
+    return attachments
+  }
+
+  /** First enabled, keyed, image-capable provider (chatgpt-oauth excluded). */
+  private autoPickImageProviderId(): string | null {
+    for (const provider of this.db.providers.list()) {
+      if (!provider.enabled || !provider.hasKey) continue
+      if (provider.authMode === 'chatgpt_oauth') continue
+      if (providerSupportsImageOutput(provider)) return provider.id
+    }
+    return null
+  }
+
+  /**
    * Reads the project's assistant-instruction file (GRASBERG.md, or the
    * AGENTS.md / CLAUDE.md conventions), capped. Null when none exists —
    * always best-effort, never throws.
@@ -1787,6 +1921,119 @@ export class ChatService {
     return references
   }
 
+  /**
+   * Deep Research: plan → parallel web workers (web_search/fetch_url through
+   * the real executor, so its deny/SSRF/https/size guards all apply) → then
+   * delegate to the same runStream with the findings + numbered sources
+   * injected into the last user turn (the MoA seam), keeping streaming,
+   * abort and persistence unchanged. The pipeline never throws; a total
+   * failure degrades to an answer-from-knowledge instruction.
+   */
+  private async runResearchStream(
+    streamId: string,
+    conversation: Conversation,
+    resolved: ResolvedTarget,
+    research: ResearchRunRequest,
+    buildOpts: HistoryBuildOptions,
+    placeholder: Message,
+    controller: AbortController
+  ): Promise<void> {
+    const conversationId = conversation.id
+    const emit = (event: StreamEvent): void => {
+      try {
+        this.broadcast(CHANNELS.streamEvent, { streamId, conversationId, event })
+      } catch {
+        // A window can be torn down mid-broadcast; persistence still happens.
+      }
+    }
+    let outcome: ResearchOutcome
+    try {
+      const workerTarget = await this.resolveResearchWorkerTarget(
+        conversation,
+        buildOpts.settings,
+        resolved
+      )
+      const tools = this.options.tools
+      const researchToolDefs = tools
+        ? tools.registry
+            .listEnabledDefinitions()
+            .filter((d) => d.id === 'web_search' || d.id === 'fetch_url')
+            .map(toAdapterToolDef)
+        : []
+      // The explicit /research send is the user's consent for the run's
+      // read-only web activity, so ONLY web_search/fetch_url are offered and
+      // auto-approved (mirrors generateForWorkflow's headless callback, with
+      // the opposite default). A 'deny' permission still refuses inside the
+      // executor, and the pipeline declines every other tool name itself.
+      const researchApproval = async (): Promise<ToolApprovalAnswer> => ({
+        approved: true,
+        scope: 'once',
+      })
+      const deps: ResearchDeps = {
+        chat: (opts) =>
+          this.adapterFor(workerTarget).chat(
+            {
+              modelId: workerTarget.modelId,
+              messages: opts.messages,
+              params: { ...workerTarget.params, ...opts.params },
+              ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+              stream: false,
+            },
+            this.adapterCtx(workerTarget, controller.signal)
+          ),
+        executeTool: (call) =>
+          tools
+            ? tools.executor.execute(call, { conversation, streamId, approval: researchApproval })
+            : Promise.resolve('Error: tools are unavailable in this context.'),
+        listToolDefs: () => researchToolDefs,
+        emit: (activity) => emit({ type: 'research-activity', activity }),
+        signal: controller.signal,
+      }
+      outcome = await runResearchPipeline(research.question, research.depth, deps)
+    } catch {
+      // Defensive (the pipeline itself never throws): never wedge the stream.
+      outcome = {
+        injectedContext:
+          'Web research failed to run. Answer from your own knowledge, clearly state that ' +
+          'live research was unavailable, and do not fabricate sources or citations.',
+        research: { depth: research.depth, plan: [], sources: [], searches: 0, pagesRead: 0 },
+      }
+    }
+    // Synthesis runs tool-free with a plain mode prompt: report writing must
+    // not wander into more tool rounds.
+    return this.runStream(
+      streamId,
+      conversation,
+      resolved,
+      { ...buildOpts, promptOpts: {} },
+      placeholder,
+      controller,
+      undefined,
+      { injectedContext: outcome.injectedContext, research: outcome.research }
+    )
+  }
+
+  /**
+   * Worker model for research planning/gathering: the settings override when
+   * resolvable, else the conversation's acting model. A broken override
+   * degrades silently (never fatal) — the run just uses the acting model.
+   */
+  private async resolveResearchWorkerTarget(
+    conversation: Conversation,
+    settings: AppSettings,
+    fallback: ResolvedTarget
+  ): Promise<ResolvedTarget> {
+    if (!settings.researchWorkerProviderId) return fallback
+    try {
+      return await this.resolveTarget(conversation, settings, {
+        providerId: settings.researchWorkerProviderId,
+        ...(settings.researchWorkerModelId ? { modelId: settings.researchWorkerModelId } : {}),
+      })
+    } catch {
+      return fallback
+    }
+  }
+
   private async runMoaStream(
     streamId: string,
     conversation: Conversation,
@@ -1976,12 +2223,17 @@ export class ChatService {
     controller: AbortController,
     adapterTools?: AdapterToolDef[],
     /**
-     * Mixture-of-Agents seam: `injectedContext` is appended to the last user
-     * turn (the advisor analyses the aggregator synthesizes), and
-     * `moaReferences` are persisted on the final message so the labelled blocks
-     * survive a reload. Both undefined on the ordinary single-model path.
+     * Fan-out seam (MoA + Deep Research): `injectedContext` is appended to
+     * the last user turn (advisor analyses / research findings the acting
+     * model synthesizes); `moaReferences`/`research` are persisted on the
+     * final message so the labelled blocks survive a reload. All undefined on
+     * the ordinary single-model path.
      */
-    moaOpts?: { injectedContext?: string; moaReferences?: MoaReferenceOutput[] }
+    extraOpts?: {
+      injectedContext?: string
+      moaReferences?: MoaReferenceOutput[]
+      research?: ResearchRunInfo
+    }
   ): Promise<void> {
     const conversationId = conversation.id
     const emit = (event: StreamEvent): void => {
@@ -1996,6 +2248,9 @@ export class ChatService {
     let text = ''
     let reasoning = ''
     const toolCalls: ToolCallRecord[] = []
+    // Images the generate_image tool produced this generation: streamed live
+    // via 'attachment' events and persisted on the final assistant message.
+    const generatedAttachments: Attachment[] = []
     let usage: TokenUsage | undefined
     let finishReason: 'stop' | 'length' | 'tool_calls' = 'stop'
 
@@ -2010,7 +2265,9 @@ export class ChatService {
         usage: usage ?? null,
         toolCalls: toolCalls.length > 0 ? toolCalls : null,
         error: error ?? null,
-        ...(moaOpts?.moaReferences ? { moaReferences: moaOpts.moaReferences } : {}),
+        ...(generatedAttachments.length > 0 ? { attachments: generatedAttachments } : {}),
+        ...(extraOpts?.moaReferences ? { moaReferences: extraOpts.moaReferences } : {}),
+        ...(extraOpts?.research ? { research: extraOpts.research } : {}),
       }
       try {
         const updated = this.db.messages.update(placeholder.id, patch)
@@ -2027,6 +2284,7 @@ export class ChatService {
         if (reasoning.length > 0) fallback.reasoning = reasoning
         if (usage) fallback.usage = usage
         if (toolCalls.length > 0) fallback.toolCalls = toolCalls
+        if (generatedAttachments.length > 0) fallback.attachments = generatedAttachments
         if (error) fallback.error = error
         return fallback
       }
@@ -2051,8 +2309,8 @@ export class ChatService {
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
       const messages: AdapterMessage[] = [...history]
-      // MoA: fold the advisor analyses into the aggregator's latest user turn.
-      if (moaOpts?.injectedContext) appendContextToLastUser(messages, moaOpts.injectedContext)
+      // MoA/research: fold the injected context into the latest user turn.
+      if (extraOpts?.injectedContext) appendContextToLastUser(messages, extraOpts.injectedContext)
 
       const appendText = (chunk: string): void => {
         if (chunk.length === 0) return
@@ -2156,6 +2414,11 @@ export class ChatService {
         // channel so the renderer can show it while the tool runs.
         const onToolOutput = (toolCallId: string, chunk: string): void =>
           emit({ type: 'tool-output', toolCallId, chunk })
+        // Generated images: collected for the final message and streamed live.
+        const onAttachment = (attachment: Attachment): void => {
+          generatedAttachments.push(attachment)
+          emit({ type: 'attachment', attachment })
+        }
         for (const call of roundCalls) {
           if (controller.signal.aborted) {
             throw new ProviderError('aborted', 'Generation stopped.')
@@ -2169,6 +2432,7 @@ export class ChatService {
             planMode,
             autoAcceptEdits,
             onToolOutput,
+            onAttachment,
           })
           call.result = result
           call.status = toolCallStatus(result)
@@ -2203,6 +2467,13 @@ export class ChatService {
         if (controller.signal.aborted) {
           throw new ProviderError('aborted', 'Generation stopped.')
         }
+      }
+
+      // Research report: append the deterministic Sources section (built from
+      // the app-collected registry, never model output) to the content itself,
+      // so copy/export/bridges carry the sources with zero further changes.
+      if (extraOpts?.research && extraOpts.research.sources.length > 0) {
+        appendText(`\n\n${formatSourcesSection(extraOpts.research.sources)}`)
       }
 
       const finalMessage = finalize('complete')

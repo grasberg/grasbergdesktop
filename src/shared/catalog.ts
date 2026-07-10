@@ -57,6 +57,11 @@ export const PROVIDER_TYPES: Record<ProviderType, ProviderTypeMeta> = {
       model('glm-4.5v', 'GLM-4.5V (vision)', 64000, caps({ vision: true })),
       model('glm-4-plus', 'GLM-4 Plus', 128000, caps({ tools: true })),
     ],
+    defaultImageModelId: 'cogview-4-250304',
+    imageModels: [
+      model('cogview-4-250304', 'CogView-4', 0, caps({ imageOutput: true })),
+      model('cogview-3-flash', 'CogView-3 Flash (free)', 0, caps({ imageOutput: true })),
+    ],
   },
   minimax: {
     type: 'minimax',
@@ -91,6 +96,13 @@ export const PROVIDER_TYPES: Record<ProviderType, ProviderTypeMeta> = {
       model('gpt-4o', 'GPT-4o', 128000, caps({ tools: true, vision: true })),
       model('gpt-4o-mini', 'GPT-4o mini', 128000, caps({ tools: true, vision: true })),
       model('o4-mini', 'o4-mini (reasoning)', 200000, caps({ tools: true, reasoning: true })),
+    ],
+    defaultImageModelId: 'gpt-image-2',
+    imageModels: [
+      model('gpt-image-2', 'GPT Image 2', 0, caps({ imageOutput: true })),
+      model('gpt-image-1.5', 'GPT Image 1.5', 0, caps({ imageOutput: true })),
+      model('gpt-image-1', 'GPT Image 1', 0, caps({ imageOutput: true })),
+      model('gpt-image-1-mini', 'GPT Image 1 mini', 0, caps({ imageOutput: true })),
     ],
   },
   'zai-coding': {
@@ -148,6 +160,12 @@ export const PROVIDER_TYPES: Record<ProviderType, ProviderTypeMeta> = {
       model('gemini-3.1-flash-lite', 'Gemini 3.1 Flash-Lite', 1048576, caps({ tools: true, vision: true, reasoning: true })),
       model('gemini-2.5-pro', 'Gemini 2.5 Pro', 1048576, caps({ tools: true, vision: true, reasoning: true })),
       model('gemini-2.5-flash', 'Gemini 2.5 Flash', 1048576, caps({ tools: true, vision: true, reasoning: true })),
+    ],
+    defaultImageModelId: 'gemini-3.1-flash-image',
+    imageModels: [
+      model('gemini-3.1-flash-image', 'Gemini 3.1 Flash Image (Nano Banana 2)', 0, caps({ imageOutput: true })),
+      model('gemini-3-pro-image', 'Gemini 3 Pro Image (Nano Banana Pro)', 0, caps({ imageOutput: true })),
+      model('gemini-2.5-flash-image', 'Gemini 2.5 Flash Image', 0, caps({ imageOutput: true })),
     ],
   },
   bedrock: {
@@ -275,4 +293,26 @@ export function modelSupportsVision(p: ProviderCatalogRef, modelId: string): boo
 /** Whether a model can call tools (unknown models per UNKNOWN_MODEL_CAPS). */
 export function modelSupportsTools(p: ProviderCatalogRef, modelId: string): boolean {
   return resolveModelInfo(p, modelId)?.capabilities.tools ?? UNKNOWN_MODEL_CAPS.tools
+}
+
+/**
+ * Image-generation catalog for a configured provider: the family's
+ * imageModels list (presets have none in v1 — their generated catalog does
+ * not carry output modalities yet). An explicitly typed custom image model id
+ * is still honored at call time — convenience, not a cage.
+ */
+export function resolveImageModelCatalog(p: ProviderCatalogRef): {
+  imageModels: ModelInfo[]
+  defaultImageModelId: string | null
+} {
+  const meta = PROVIDER_TYPES[p.type]
+  return {
+    imageModels: meta.imageModels ?? [],
+    defaultImageModelId: meta.defaultImageModelId ?? null,
+  }
+}
+
+/** Whether a configured provider's family can generate images at all. */
+export function providerSupportsImageOutput(p: ProviderCatalogRef): boolean {
+  return (PROVIDER_TYPES[p.type].imageModels?.length ?? 0) > 0
 }

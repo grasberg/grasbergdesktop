@@ -285,6 +285,12 @@ export const moaPresetSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Deep Research
+// ---------------------------------------------------------------------------
+
+export const researchDepthSchema = z.enum(['quick', 'standard', 'deep'])
+
+// ---------------------------------------------------------------------------
 // Workflows (IPC boundary)
 // ---------------------------------------------------------------------------
 
@@ -355,6 +361,11 @@ export const settingsPatchSchema = z
     // via the settings repo). Accepting it here would let the renderer — or a
     // tampered backup — pre-authorize an arbitrary Telegram sender.
     outboundWebhookUrl: z.string().max(2000).nullable(),
+    researchWorkerProviderId: z.string().nullable(),
+    researchWorkerModelId: z.string().max(200).nullable(),
+    researchDefaultDepth: researchDepthSchema,
+    defaultImageProviderId: z.string().nullable(),
+    defaultImageModelId: z.string().max(200).nullable(),
   })
   .partial()
   .strict()
@@ -450,6 +461,24 @@ export const oaiChatChunkSchema = z
 export const oaiModelsListSchema = z
   .object({
     data: z.array(z.object({ id: z.string() }).passthrough()),
+  })
+  .passthrough()
+
+/** POST /images/generations response (OpenAI images API + compatibles). */
+export const oaiImagesResponseSchema = z
+  .object({
+    created: z.number().optional(),
+    data: z
+      .array(
+        z
+          .object({
+            b64_json: z.string().optional(),
+            url: z.string().optional(),
+            revised_prompt: z.string().optional(),
+          })
+          .passthrough()
+      )
+      .min(1),
   })
   .passthrough()
 

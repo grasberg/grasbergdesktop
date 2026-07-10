@@ -115,6 +115,23 @@ export interface AdapterEmbedRequest {
   input: string[]
 }
 
+export interface AdapterImageRequest {
+  modelId: string
+  prompt: string
+  /** 1-4; adapters clamp to what the provider supports. */
+  count: number
+  /** Abstract size; each adapter maps it to its dialect. Default 'auto'. */
+  size?: 'auto' | 'square' | 'landscape' | 'portrait'
+}
+
+export interface AdapterGeneratedImage {
+  /** Raw image bytes (decoded base64, or downloaded from a result URL). */
+  bytes: Uint8Array
+  mimeType: string
+  /** Provider-rewritten prompt, when reported. */
+  revisedPrompt?: string
+}
+
 export interface ProviderAdapter {
   readonly type: ProviderType
   /** Live model listing; throw ProviderError('not_supported') when unavailable. */
@@ -130,4 +147,10 @@ export interface ProviderAdapter {
    * Absent = the provider family has no embeddings endpoint.
    */
   embed?(req: AdapterEmbedRequest, ctx: AdapterContext): Promise<number[][]>
+  /**
+   * Text-to-image generation, non-streaming (the generate_image tool).
+   * Absent = the provider family has no image endpoint; callers surface
+   * ProviderError('not_supported').
+   */
+  generateImage?(req: AdapterImageRequest, ctx: AdapterContext): Promise<AdapterGeneratedImage[]>
 }

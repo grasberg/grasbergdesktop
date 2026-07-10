@@ -20,6 +20,7 @@ import { createArtifactCompletionHook } from './services/artifact-hooks'
 import { createMemoryCompletionHook } from './services/memory-hook'
 import { DreamingService } from './services/dreaming'
 import { CodeService } from './code/code-service'
+import { GitService } from './code/git-service'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
 import { ImBridgeManager } from './im/manager'
@@ -273,7 +274,17 @@ function bootstrap(): void {
   // safeStorage encryption now that Electron's crypto is available.
   keystore.reencryptInsecureKeys(database)
 
-  const codeService = new CodeService(database)
+  const codeService = new CodeService(database, (projectId) =>
+    broadcast(CHANNELS.codeChangesChanged, { projectId })
+  )
+  // Mutating git lives ONLY in GitService; commit-message suggestions reuse
+  // the headless one-shot generation path (default model, no tools).
+  const gitService = new GitService({
+    generateText: (prompt) =>
+      chatService
+        ? chatService.generateForWorkflow(prompt)
+        : Promise.reject(new Error('Generation unavailable during startup.')),
+  })
   // MCP manager: connects to user-configured MCP servers and exposes their
   // tools to the registry/executor. Connections open only on explicit enable
   // (and never under SMOKE_TEST).
@@ -318,6 +329,18 @@ function bootstrap(): void {
       chatService
         ? chatService.runDelegate(task, ctx, undefined, agentName)
         : Promise.resolve('Error: delegation unavailable.'),
+    imageGeneration: {
+      generate: (req) =>
+        chatService
+          ? chatService.generateImage(req)
+          : Promise.reject(new Error('Image generation unavailable during startup.')),
+    },
+    gitWrite: {
+      status: (root) => gitService.status(root),
+      stage: (root, paths) => gitService.stage(root, paths),
+      commit: (root, message) => gitService.commit(root, message),
+      createBranch: (root, name) => gitService.createBranch(root, name),
+    },
     delegateBackground: {
       start: (task, ctx, agentName) =>
         chatService
@@ -404,6 +427,7 @@ function bootstrap(): void {
     db: database,
     chatService,
     codeService,
+    gitService,
     keystore,
     toolSystem,
     approvalBroker: broker,

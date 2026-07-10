@@ -22,6 +22,7 @@ import type {
   ChatParams,
   CodeChange,
   CodeProject,
+  GitStatus,
   Conversation,
   ConversationMode,
   ProviderType,
@@ -64,6 +65,7 @@ import type {
   ProviderConfigInput,
   ProviderConfigPatch,
   ProviderTypeMeta,
+  ResearchDepth,
   PromptTemplate,
   PromptTemplateInput,
   PromptTemplatePatch,
@@ -100,6 +102,8 @@ export const CHANNELS = {
   appPickFolder: 'app:pickFolder',
   appPickFiles: 'app:pickFiles',
   appReadAttachment: 'app:readAttachment',
+  /** Save a stored (generated) image to a user-chosen path. */
+  appSaveAttachmentAs: 'app:saveAttachmentAs',
 
   // settings
   settingsGet: 'settings:get',
@@ -168,8 +172,17 @@ export const CHANNELS = {
   codeChangeApply: 'code:changes:apply',
   codeChangeReject: 'code:changes:reject',
   codeChangeRevert: 'code:changes:revert',
+  /** Project-wide change list with conversation titles (the review queue). */
+  codeChangesListAll: 'code:changes:listAll',
   /** Path autocomplete for @-file mentions in the composer. */
   codeSuggestFiles: 'code:suggestFiles',
+  // git (commit bar + git_write plumbing; every handler is click-consented)
+  codeGitStatus: 'code:git:status',
+  codeGitStage: 'code:git:stage',
+  codeGitUnstage: 'code:git:unstage',
+  codeGitCommit: 'code:git:commit',
+  codeGitCreateBranch: 'code:git:createBranch',
+  codeGitGenerateCommitMessage: 'code:git:generateCommitMessage',
 
   // tools
   toolsList: 'tools:list',
@@ -262,6 +275,12 @@ export const CHANNELS = {
   conversationsChanged: 'push:conversationsChanged',
   /** Sent with McpServerRuntime[] whenever MCP connection state changes. */
   mcpServersChanged: 'push:mcpServersChanged',
+  /**
+   * Sent with { projectId } whenever a code change row is created or changes
+   * status — lets every window's review queue refresh live, including for
+   * changes proposed by OTHER conversations.
+   */
+  codeChangesChanged: 'push:codeChangesChanged',
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
@@ -364,6 +383,13 @@ export interface ChatSendRequest {
      * preset (via `moaPresetId` or the conversation's stored preset).
      */
     compare?: boolean
+    /**
+     * Deep Research run (the /research command or composer toggle): plan →
+     * parallel web workers → synthesized report with cited sources. Presence
+     * of the object activates it; depth defaults to settings. Wins over MoA
+     * and compare for this send.
+     */
+    research?: { depth?: ResearchDepth }
   }
 }
 
@@ -421,6 +447,11 @@ export interface CodeReadFileResult {
   sizeBytes: number
 }
 
+/** A code change joined with its conversation's title (the review queue). */
+export interface CodeChangeWithContext extends CodeChange {
+  conversationTitle: string | null
+}
+
 export interface PickFilesResult {
   attachments: Attachment[]
 }
@@ -438,6 +469,11 @@ export interface UldApi {
     pickFiles(): Promise<IpcResult<PickFilesResult>>
     /** Reads a stored image attachment as a data URL (null when missing). */
     readAttachment(storageKey: string): Promise<IpcResult<{ dataUrl: string } | null>>
+    /** Copies a stored image attachment to a user-picked path (save dialog). */
+    saveAttachmentAs(
+      storageKey: string,
+      suggestedName?: string
+    ): Promise<IpcResult<{ canceled: boolean; path?: string }>>
   }
   settings: {
     get(): Promise<IpcResult<AppSettings>>
@@ -539,8 +575,23 @@ export interface UldApi {
     changeReject(changeId: string): Promise<IpcResult<CodeChange>>
     /** Restores the pre-change content of an APPLIED change (explicit click). */
     changeRevert(changeId: string): Promise<IpcResult<CodeChange>>
+    /** Project-wide changes with conversation titles (the review queue). */
+    changesListAll(projectId: string): Promise<IpcResult<CodeChangeWithContext[]>>
     /** Relative-path suggestions for @-file mentions in the composer. */
     suggestFiles(req: CodeSuggestFilesRequest): Promise<IpcResult<string[]>>
+    /** Live review-queue refresh: fires whenever any change row mutates. */
+    onChangesChanged(cb: (payload: { projectId: string }) => void): () => void
+    // git — every call below is an explicit user click (the click IS the consent)
+    gitStatus(projectId: string): Promise<IpcResult<GitStatus>>
+    gitStage(projectId: string, paths: string[]): Promise<IpcResult<GitStatus>>
+    gitUnstage(projectId: string, paths: string[]): Promise<IpcResult<GitStatus>>
+    gitCommit(
+      projectId: string,
+      message: string
+    ): Promise<IpcResult<{ sha: string; branch: string | null }>>
+    gitCreateBranch(projectId: string, name: string): Promise<IpcResult<GitStatus>>
+    /** Suggests a commit message from the staged diff (default model). */
+    gitGenerateCommitMessage(projectId: string): Promise<IpcResult<{ message: string }>>
   }
   tools: {
     list(): Promise<IpcResult<ToolDefinition[]>>

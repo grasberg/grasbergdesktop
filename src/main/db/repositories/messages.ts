@@ -10,6 +10,7 @@ import type {
   MessageStatus,
   MoaReferenceOutput,
   NormalizedError,
+  ResearchRunInfo,
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
@@ -20,6 +21,8 @@ export interface MessagePatch {
   content?: string
   /** null clears the column. */
   reasoning?: string | null
+  /** Generated-image attachments on an assistant message; null clears. */
+  attachments?: Attachment[] | null
   status?: MessageStatus
   error?: NormalizedError | null
   usage?: TokenUsage | null
@@ -28,6 +31,8 @@ export interface MessagePatch {
   moaReferences?: MoaReferenceOutput[] | null
   /** Compare-run marker/winner; null clears the column. */
   compare?: Message['compare'] | null
+  /** Deep-research run info; null clears the column. */
+  research?: ResearchRunInfo | null
   /** Re-attribute the message (compare winner pick). */
   providerId?: string
   modelId?: string
@@ -66,6 +71,7 @@ interface MessageRow {
   usage_json: string | null
   moa_references_json: string | null
   compare_json: string | null
+  research_json: string | null
   seq: number
   created_at: number
 }
@@ -90,6 +96,7 @@ function toMessage(row: MessageRow): Message {
     usage: parseJsonColumn<TokenUsage>(row.usage_json),
     moaReferences: parseJsonColumn<MoaReferenceOutput[]>(row.moa_references_json),
     compare: parseJsonColumn<Message['compare']>(row.compare_json),
+    research: parseJsonColumn<ResearchRunInfo>(row.research_json),
     seq: row.seq,
     createdAt: row.created_at,
   }
@@ -115,8 +122,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         `INSERT INTO messages
            (id, conversation_id, role, content, reasoning, attachments_json,
             tool_calls_json, status, error_json, provider_id, model_id,
-            usage_json, moa_references_json, compare_json, seq, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            usage_json, moa_references_json, compare_json, research_json, seq, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           message.id,
           message.conversationId,
@@ -132,6 +139,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           message.usage ? JSON.stringify(message.usage) : null,
           message.moaReferences ? JSON.stringify(message.moaReferences) : null,
           message.compare ? JSON.stringify(message.compare) : null,
+          message.research ? JSON.stringify(message.research) : null,
           message.seq,
           message.createdAt,
         ]
@@ -143,6 +151,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
       updateById(driver, 'messages', id, {
         content: patch.content,
         reasoning: patch.reasoning,
+        attachments_json:
+          patch.attachments == null ? patch.attachments : JSON.stringify(patch.attachments),
         status: patch.status,
         error_json: patch.error == null ? patch.error : JSON.stringify(patch.error),
         usage_json: patch.usage == null ? patch.usage : JSON.stringify(patch.usage),
@@ -150,6 +160,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         moa_references_json:
           patch.moaReferences == null ? patch.moaReferences : JSON.stringify(patch.moaReferences),
         compare_json: patch.compare == null ? patch.compare : JSON.stringify(patch.compare),
+        research_json: patch.research == null ? patch.research : JSON.stringify(patch.research),
         provider_id: patch.providerId,
         model_id: patch.modelId,
       })

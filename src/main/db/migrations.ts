@@ -590,4 +590,14 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE conversations ADD COLUMN knowledge_base_id TEXT`,
     ],
   },
+  {
+    version: 23,
+    name: 'message-research-run',
+    // Deep Research: persists the run's plan + consulted sources on the
+    // assistant message it produced (JSON ResearchRunInfo), the exact
+    // moa_references_json pattern from v17. NULL for ordinary messages; a
+    // plain nullable ALTER — no FK-safe rebuild (that pattern is only for
+    // widening a CHECK constraint).
+    statements: [`ALTER TABLE messages ADD COLUMN research_json TEXT`],
+  },
 ]

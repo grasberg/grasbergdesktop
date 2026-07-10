@@ -53,6 +53,17 @@ export function toMarkdown(conversation: Conversation, messages: Message[]): str
       out.push(message.content.trim())
       out.push('')
     }
+    // Generated images live on disk (storageKey), so the transcript carries an
+    // honest text reference rather than a broken inline image link.
+    for (const attachment of message.attachments ?? []) {
+      if (message.role === 'assistant' && attachment.kind === 'image' && attachment.generatedBy) {
+        const size = attachment.generatedBy.size ? `, ${attachment.generatedBy.size}` : ''
+        out.push(
+          `> **Generated image:** ${attachment.name} (${attachment.generatedBy.modelId}${size})`
+        )
+        out.push('')
+      }
+    }
     for (const call of message.toolCalls ?? []) {
       out.push(`> **Tool call:** \`${call.name}\` (${call.status})`)
       out.push('')

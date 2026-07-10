@@ -11,6 +11,8 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
 import rehypeKatex from 'rehype-katex'
+import type { ResearchSource } from '@shared/types'
+import { linkifyCitations } from '@shared/citations'
 import { useCopied } from '@/hooks/useCopied'
 import { useUiStore } from '@/stores/ui'
 import 'katex/dist/katex.min.css'
@@ -18,6 +20,8 @@ import './chat.css'
 
 interface MarkdownProps {
   content: string
+  /** Deep-research sources: bare [n] markers become clickable citation chips. */
+  citations?: ResearchSource[]
 }
 
 /** Recursively flattens a React node tree to plain text (for copy buttons). */
@@ -150,10 +154,27 @@ function CodeBlock({ children }: { children?: ReactNode }): ReactElement {
 
 const components: Components = {
   pre: ({ node, ...rest }) => <CodeBlock>{rest.children}</CodeBlock>,
-  a: ({ node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer" />,
+  a: ({ node, ...rest }) => {
+    // Linkified deep-research citations carry "[n]" as their link text —
+    // render them as superscript chips (href still opens externally).
+    if (/^\[\d+\]$/.test(extractText(rest.children))) {
+      return (
+        <a
+          {...rest}
+          className="chat-citation"
+          target="_blank"
+          rel="noreferrer"
+          title={typeof rest.href === 'string' ? rest.href : undefined}
+        />
+      )
+    }
+    return <a {...rest} target="_blank" rel="noreferrer" />
+  },
 }
 
-function Markdown({ content }: MarkdownProps): ReactElement {
+function Markdown({ content, citations }: MarkdownProps): ReactElement {
+  const prepared =
+    citations && citations.length > 0 ? linkifyCitations(content, citations) : content
   return (
     <div className="chat-md">
       <ReactMarkdown
@@ -161,7 +182,7 @@ function Markdown({ content }: MarkdownProps): ReactElement {
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
         components={components}
       >
-        {normalizeMathDelimiters(content)}
+        {normalizeMathDelimiters(prepared)}
       </ReactMarkdown>
     </div>
   )

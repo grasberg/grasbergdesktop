@@ -26,7 +26,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import type { CodeChange, CodeProject, FileTreeNode } from '@shared/types'
-import type { CodeReadFileResult } from '@shared/ipc'
+import type { CodeChangeWithContext, CodeReadFileResult } from '@shared/ipc'
 import type { AppDatabase } from '../db/database'
 import { ProviderError } from '../providers/errors'
 import { diffLines, isProbablyBinary } from '../utils/diff'
@@ -67,7 +67,46 @@ function normalizeRel(relPath: string): string {
 }
 
 export class CodeService {
-  constructor(private readonly db: AppDatabase) {}
+  constructor(
+    private readonly db: AppDatabase,
+    /**
+     * Called with the projectId whenever a change row is created or changes
+     * status, so every window's review queue can refresh live — including for
+     * changes proposed by OTHER conversations or background work. Best-effort.
+     */
+    private readonly onChangesChanged?: (projectId: string) => void
+  ) {}
+
+  /** Best-effort review-queue nudge; a broken renderer must never break IO. */
+  private notifyChanges(projectId: string): void {
+    try {
+      this.onChangesChanged?.(projectId)
+    } catch {
+      // Broadcast failures are cosmetic.
+    }
+  }
+
+  /**
+   * Project-wide changes with their conversation titles — the cross-
+   * conversation review queue ("All chats" scope in the Changes panel).
+   */
+  listChangesWithContext(projectId: string): CodeChangeWithContext[] {
+    const titles = new Map<string, string | null>()
+    return this.db.code.changesList(projectId).map((change) => {
+      if (change.conversationId && !titles.has(change.conversationId)) {
+        titles.set(
+          change.conversationId,
+          this.db.conversations.getById(change.conversationId)?.title ?? null
+        )
+      }
+      return {
+        ...change,
+        conversationTitle: change.conversationId
+          ? (titles.get(change.conversationId) ?? null)
+          : null,
+      }
+    })
+  }
 
   /**
    * Registers a project folder. The path always comes from the OS folder
@@ -256,6 +295,7 @@ export class CodeService {
 
     const updated = this.db.code.changeSetStatus(changeId, 'applied')
     if (!updated) throw invalid('Change not found.')
+    this.notifyChanges(updated.projectId)
     return updated
   }
 
@@ -266,6 +306,7 @@ export class CodeService {
     }
     const updated = this.db.code.changeSetStatus(changeId, 'rejected')
     if (!updated) throw invalid('Change not found.')
+    this.notifyChanges(updated.projectId)
     return updated
   }
 
@@ -322,6 +363,7 @@ export class CodeService {
 
     const updated = this.db.code.changeSetStatus(changeId, 'reverted')
     if (!updated) throw invalid('Change not found.')
+    this.notifyChanges(updated.projectId)
     return updated
   }
 
@@ -392,7 +434,7 @@ export class CodeService {
       changeType === 'create' ? '/dev/null' : `a/${rel}`,
       changeType === 'delete' ? '/dev/null' : `b/${rel}`
     )
-    return this.db.code.changeCreate({
+    const created = this.db.code.changeCreate({
       projectId,
       conversationId,
       filePath: rel,
@@ -401,6 +443,8 @@ export class CodeService {
       newContent,
       oldContent,
     })
+    this.notifyChanges(projectId)
+    return created
   }
 
   /**

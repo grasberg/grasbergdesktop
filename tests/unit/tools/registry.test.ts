@@ -46,6 +46,7 @@ describe('ToolRegistry.listDefinitions', () => {
       'git',
       'fetch_url',
       'web_search',
+      'git_write',
       'propose_shell_command',
       'edit_file',
       'write_file',
@@ -101,9 +102,14 @@ describe('ToolRegistry.listDefinitions', () => {
 
 describe('ToolRegistry permissions', () => {
   it("defaults to 'ask' for sensitive tools and 'always_allow' for safe tools", () => {
-    // Enable shell/browser and seed a skill so every builtin is listed
-    // (run_shell_command, browser/computer and use_skill are hidden otherwise).
-    db!.settings.update({ shellExecutionEnabled: true, browserToolsEnabled: true })
+    // Enable shell/browser, seed a skill and point at an image provider so
+    // every builtin is listed (run_shell_command, browser/computer, use_skill
+    // and generate_image are hidden otherwise).
+    db!.settings.update({
+      shellExecutionEnabled: true,
+      browserToolsEnabled: true,
+      defaultImageProviderId: 'img-provider',
+    })
     db!.skills.create({ name: 'demo', content: 'Demo instructions.' })
     const registry = new ToolRegistry(db!)
     const permissions = new Map(registry.listPermissions().map((p) => [p.toolId, p]))
@@ -133,7 +139,11 @@ describe('ToolRegistry permissions', () => {
 
 describe('ToolRegistry custom tools', () => {
   it('add/list/resolve/remove roundtrip with the fixed mapping', () => {
-    db!.settings.update({ shellExecutionEnabled: true, browserToolsEnabled: true })
+    db!.settings.update({
+      shellExecutionEnabled: true,
+      browserToolsEnabled: true,
+      defaultImageProviderId: 'img-provider',
+    })
     db!.skills.create({ name: 'demo', content: 'Demo instructions.' })
     const registry = new ToolRegistry(db!)
     const definition = registry.addCustomTool({

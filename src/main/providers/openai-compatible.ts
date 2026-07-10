@@ -17,6 +17,7 @@ import type { ProviderModelCatalog } from '@shared/catalog'
 import {
   oaiChatChunkSchema,
   oaiChatCompletionSchema,
+  oaiImagesResponseSchema,
   oaiModelsListSchema,
   oaiToolCallSchema,
   type OaiChatCompletion,
@@ -25,6 +26,8 @@ import type {
   AdapterChatRequest,
   AdapterChatResult,
   AdapterContext,
+  AdapterGeneratedImage,
+  AdapterImageRequest,
   AdapterMessage,
   AdapterStreamEvent,
   ProviderAdapter,
@@ -179,6 +182,32 @@ function toToolCallRecord(index: number, acc: ToolCallAccum): ToolCallRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Image generation (POST /images/generations)
+// ---------------------------------------------------------------------------
+
+/** Hard cap per generated image (decoded bytes). */
+export const GENERATED_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+/**
+ * Maps the abstract size to the OpenAI images dialect. gpt-image models take
+ * 1024/1536 rectangles; dall-e-3 takes 1024/1792; everything else only gets
+ * the safe square. 'auto'/unset stays off the wire (provider default).
+ */
+export function mapOpenAiImageSize(
+  modelId: string,
+  size: AdapterImageRequest['size']
+): string | undefined {
+  if (!size || size === 'auto') return undefined
+  if (/^gpt-image/i.test(modelId)) {
+    return size === 'square' ? '1024x1024' : size === 'landscape' ? '1536x1024' : '1024x1536'
+  }
+  if (/^dall-e-3/i.test(modelId)) {
+    return size === 'square' ? '1024x1024' : size === 'landscape' ? '1792x1024' : '1024x1792'
+  }
+  return size === 'square' ? '1024x1024' : undefined
+}
+
+// ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
@@ -278,6 +307,121 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       })
     }
     return parsed.data
+  }
+
+  /**
+   * Request body for POST /images/generations. Overridable per family:
+   * Zhipu's CogView prunes n/response_format and uses its own size strings.
+   */
+  protected buildImageBody(req: AdapterImageRequest): Record<string, unknown> {
+    const body: Record<string, unknown> = { model: req.modelId, prompt: req.prompt }
+    if (req.count > 1) body.n = req.count
+    const size = mapOpenAiImageSize(req.modelId, req.size)
+    if (size) body.size = size
+    // gpt-image models always return base64 and REJECT response_format.
+    if (!/^gpt-image/i.test(req.modelId)) body.response_format = 'b64_json'
+    return body
+  }
+
+  /** Downloads a result URL (dall-e default, CogView). https-only, size-capped. */
+  protected async downloadGeneratedImage(
+    url: string,
+    ctx: AdapterContext
+  ): Promise<AdapterGeneratedImage> {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new ProviderError('unknown', 'The provider returned an invalid image URL.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new ProviderError('unknown', 'The provider returned a non-https image URL.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    // The result URL is provider-hosted and pre-signed: GET without auth so
+    // the API key never travels to a third-party host.
+    const res = await checkedFetch(parsed.toString(), {
+      method: 'GET',
+      headers: {},
+      signal: ctx.signal,
+      providerType: this.type,
+      secrets: [ctx.apiKey],
+      fetchImpl: ctx.fetchImpl,
+    })
+    const buffer = new Uint8Array(await res.arrayBuffer())
+    if (buffer.byteLength === 0 || buffer.byteLength > GENERATED_IMAGE_MAX_BYTES) {
+      throw new ProviderError('unknown', 'The generated image was empty or too large.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    const contentType = res.headers.get('content-type') ?? ''
+    return {
+      bytes: buffer,
+      mimeType: contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/png',
+    }
+  }
+
+  /**
+   * Text-to-image via POST /images/generations (OpenAI images API and
+   * compatibles; Zhipu CogView inherits with a body override). Non-streaming.
+   */
+  async generateImage(
+    req: AdapterImageRequest,
+    ctx: AdapterContext
+  ): Promise<AdapterGeneratedImage[]> {
+    const res = await withRetry(
+      () =>
+        this.doRequest(ctx, '/images/generations', {
+          method: 'POST',
+          body: JSON.stringify(this.buildImageBody(req)),
+        }),
+      { signal: ctx.signal }
+    )
+    const json = await this.readJson(res, ctx)
+    this.checkBodyForProviderError(json, ctx)
+    const parsed = oaiImagesResponseSchema.safeParse(json)
+    if (!parsed.success) {
+      throw new ProviderError('unknown', 'The provider returned an unexpected image response.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    const images: AdapterGeneratedImage[] = []
+    for (const item of parsed.data.data) {
+      if (typeof item.b64_json === 'string' && item.b64_json.length > 0) {
+        const bytes = Buffer.from(item.b64_json, 'base64')
+        if (bytes.byteLength === 0 || bytes.byteLength > GENERATED_IMAGE_MAX_BYTES) {
+          throw new ProviderError('unknown', 'The generated image was empty or too large.', {
+            retryable: false,
+            providerType: this.type,
+          })
+        }
+        images.push({
+          bytes: new Uint8Array(bytes),
+          mimeType: 'image/png',
+          ...(item.revised_prompt ? { revisedPrompt: item.revised_prompt } : {}),
+        })
+      } else if (typeof item.url === 'string' && item.url.length > 0) {
+        const downloaded = await this.downloadGeneratedImage(item.url, ctx)
+        images.push({
+          ...downloaded,
+          ...(item.revised_prompt ? { revisedPrompt: item.revised_prompt } : {}),
+        })
+      }
+    }
+    if (images.length === 0) {
+      throw new ProviderError('unknown', 'The provider returned no image.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    return images
   }
 
   // -- ProviderAdapter ---------------------------------------------------------

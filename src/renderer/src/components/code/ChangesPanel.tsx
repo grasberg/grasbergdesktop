@@ -1,6 +1,8 @@
 import { useState, type ReactElement } from 'react'
 import type { CodeChange } from '@shared/types'
+import { useChatStore } from '@/stores/chat'
 import { useCodeStore } from '@/stores/code'
+import CommitBar from './CommitBar'
 import DiffView from './DiffView'
 import './code.css'
 
@@ -10,7 +12,14 @@ const TYPE_LABEL: Record<CodeChange['changeType'], string> = {
   delete: 'delete',
 }
 
-function ChangeItem({ change }: { change: CodeChange }): ReactElement {
+function ChangeItem({
+  change,
+  sourceTitle,
+}: {
+  change: CodeChange
+  /** Conversation title shown in the "All chats" review-queue scope. */
+  sourceTitle?: string | null
+}): ReactElement {
   const busyChangeId = useCodeStore((s) => s.busyChangeId)
   const applyChange = useCodeStore((s) => s.applyChange)
   const rejectChange = useCodeStore((s) => s.rejectChange)
@@ -43,6 +52,12 @@ function ChangeItem({ change }: { change: CodeChange }): ReactElement {
         </span>
         {!proposed && <span className="badge">{change.status}</span>}
       </button>
+
+      {sourceTitle !== undefined && (
+        <div className="code-change-source" title="Conversation this change came from">
+          from: {sourceTitle ?? 'a deleted conversation'}
+        </div>
+      )}
 
       {expanded && (
         <div className="code-change-body">
@@ -153,32 +168,66 @@ function ChangeItem({ change }: { change: CodeChange }): ReactElement {
 
 /**
  * Right-hand pane: proposed changes first, applied/rejected collapsed under
- * "History". Nothing is written to disk except through the Apply confirm here.
+ * "History", scoped to this conversation or the whole project ("All chats" —
+ * the cross-conversation review queue), with the git commit bar at the
+ * bottom. Nothing is written to disk except through the Apply confirm here.
  */
 export default function ChangesPanel(): ReactElement {
   const changes = useCodeStore((s) => s.changes)
+  const allChanges = useCodeStore((s) => s.allChanges)
+  const scope = useCodeStore((s) => s.changesScope)
+  const setScope = useCodeStore((s) => s.setChangesScope)
   const loading = useCodeStore((s) => s.loadingChanges)
+  const conversationId = useChatStore((s) => s.conversation?.id ?? null)
   const [historyOpen, setHistoryOpen] = useState(false)
 
-  const proposed = changes.filter((c) => c.status === 'proposed')
-  const history = changes.filter((c) => c.status !== 'proposed')
+  const all = scope === 'all'
+  const scoped = all
+    ? allChanges
+    : changes.filter((c) => c.conversationId === conversationId)
+  const titleOf = (c: CodeChange): string | null | undefined =>
+    all ? (allChanges.find((a) => a.id === c.id)?.conversationTitle ?? null) : undefined
+
+  const proposed = scoped.filter((c) => c.status === 'proposed')
+  const history = scoped.filter((c) => c.status !== 'proposed')
 
   return (
     <div className="code-changes">
       <div className="code-changes-header">
         <h2 className="code-changes-title">Proposed changes</h2>
+        <div className="code-changes-scope" role="tablist" aria-label="Changes scope">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={!all}
+            className={`btn-link code-changes-scope-btn${all ? '' : ' active'}`}
+            onClick={() => setScope('conversation')}
+          >
+            This chat
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={all}
+            className={`btn-link code-changes-scope-btn${all ? ' active' : ''}`}
+            onClick={() => setScope('all')}
+          >
+            All chats
+          </button>
+        </div>
         {loading && <span className="code-changes-loading">Refreshing…</span>}
       </div>
 
       <div className="code-changes-scroll">
         {proposed.length === 0 && (
           <div className="code-changes-empty">
-            Ask the assistant to propose changes — they appear here as diffs and are written only
-            when you click Apply.
+            {all
+              ? 'No pending changes anywhere in this project.'
+              : 'Ask the assistant to propose changes — they appear here as diffs and are written only when you click Apply.'}
           </div>
         )}
         {proposed.map((c) => (
-          <ChangeItem key={c.id} change={c} />
+          <ChangeItem key={c.id} change={c} sourceTitle={titleOf(c)} />
         ))}
 
         {history.length > 0 && (
@@ -194,10 +243,13 @@ export default function ChangesPanel(): ReactElement {
               </span>
               History ({history.length})
             </button>
-            {historyOpen && history.map((c) => <ChangeItem key={c.id} change={c} />)}
+            {historyOpen &&
+              history.map((c) => <ChangeItem key={c.id} change={c} sourceTitle={titleOf(c)} />)}
           </div>
         )}
       </div>
+
+      <CommitBar />
     </div>
   )
 }

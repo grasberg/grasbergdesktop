@@ -15,7 +15,9 @@ import type {
   CodeProject,
   Conversation,
   FileTreeNode,
+  GitStatus,
 } from '@shared/types'
+import type { CodeChangeWithContext } from '@shared/ipc'
 import { toNormalized, unwrap } from '@/api/uld'
 import { useUiStore } from './ui'
 
@@ -34,6 +36,13 @@ export interface CodeStoreState {
   selectedPaths: string[]
   openFile: OpenFilePreview | null
   changes: CodeChange[]
+  /** Project-wide changes with conversation titles (the "All chats" scope). */
+  allChanges: CodeChangeWithContext[]
+  /** Changes panel scope: this conversation only, or the whole project. */
+  changesScope: 'conversation' | 'all'
+  /** Working-tree status for the commit bar (null = not loaded / no repo info). */
+  gitStatus: GitStatus | null
+  gitBusy: boolean
   loadingTree: boolean
   loadingChanges: boolean
   /** Change id currently being applied/rejected (disables its buttons). */
@@ -58,6 +67,15 @@ export interface CodeStoreState {
    * Returns null when a read failed (already toasted).
    */
   readSelectedAsAttachments(): Promise<Attachment[] | null>
+  setChangesScope(scope: 'conversation' | 'all'): void
+  loadAllChanges(): Promise<void>
+  loadGitStatus(): Promise<void>
+  /** Stages every unstaged + untracked path. */
+  gitStageAll(): Promise<void>
+  gitCommit(message: string): Promise<boolean>
+  gitCreateBranch(name: string): Promise<boolean>
+  /** Suggested commit message from the staged diff, or null on failure. */
+  gitGenerateMessage(): Promise<string | null>
   reset(): void
 }
 
@@ -76,23 +94,46 @@ function toastError(e: unknown, what: string): void {
   useUiStore.getState().toast(friendlyMessage(e, what), 'error')
 }
 
+/**
+ * One app-wide subscription to the review-queue push channel: changes made
+ * by ANY conversation (or a background run) refresh the open project's panel
+ * and git status live.
+ */
+let changesSubscribed = false
+function ensureChangesSubscription(): void {
+  if (changesSubscribed) return
+  changesSubscribed = true
+  window.uld.code.onChangesChanged(({ projectId }) => {
+    const s = useCodeStore.getState()
+    if (s.project?.id !== projectId) return
+    void s.loadChanges()
+    if (s.changesScope === 'all') void s.loadAllChanges()
+    void s.loadGitStatus()
+  })
+}
+
 export const useCodeStore = create<CodeStoreState>()((set, get) => ({
   project: null,
   tree: null,
   selectedPaths: [],
   openFile: null,
   changes: [],
+  allChanges: [],
+  changesScope: 'conversation',
+  gitStatus: null,
+  gitBusy: false,
   loadingTree: false,
   loadingChanges: false,
   busyChangeId: null,
 
   async openProjectViaPicker() {
     try {
+      ensureChangesSubscription()
       const path = await unwrap(window.uld.app.pickFolder())
       if (!path) return null
       const project = await unwrap(window.uld.code.projectOpen(path))
-      set({ project, tree: null, selectedPaths: [], openFile: null, changes: [] })
-      await Promise.all([get().loadTree(), get().loadChanges()])
+      set({ project, tree: null, selectedPaths: [], openFile: null, changes: [], allChanges: [], gitStatus: null })
+      await Promise.all([get().loadTree(), get().loadChanges(), get().loadGitStatus()])
       return project
     } catch (e) {
       toastError(e, 'Opening the folder')
@@ -102,8 +143,9 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
 
   async loadForConversation(conversation) {
     const token = ++loadToken
+    ensureChangesSubscription()
     if (!conversation.projectId) {
-      set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [] })
+      set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], allChanges: [], gitStatus: null })
       return
     }
     try {
@@ -111,7 +153,7 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       if (token !== loadToken) return
       const project = projects.find((p) => p.id === conversation.projectId) ?? null
       if (!project) {
-        set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [] })
+        set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], allChanges: [], gitStatus: null })
         useUiStore
           .getState()
           .toast('The folder linked to this conversation is no longer registered.', 'info')
@@ -125,7 +167,7 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
         selectedPaths: samePath ? get().selectedPaths : [],
         openFile: null,
       })
-      await Promise.all([get().loadTree(), get().loadChanges()])
+      await Promise.all([get().loadTree(), get().loadChanges(), get().loadGitStatus()])
     } catch (e) {
       if (token !== loadToken) return
       toastError(e, 'Loading the project')
@@ -248,6 +290,102 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
     }
   },
 
+  setChangesScope(scope) {
+    set({ changesScope: scope })
+    if (scope === 'all') void get().loadAllChanges()
+  },
+
+  async loadAllChanges() {
+    const { project } = get()
+    if (!project) return
+    try {
+      const allChanges = await unwrap(window.uld.code.changesListAll(project.id))
+      if (get().project?.id === project.id) set({ allChanges })
+    } catch (e) {
+      if (toNormalized(e).code !== 'not_supported') toastError(e, 'Loading the review queue')
+    }
+  },
+
+  async loadGitStatus() {
+    const { project } = get()
+    if (!project) return
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitStatus(project.id))
+      if (get().project?.id === project.id) set({ gitStatus })
+    } catch {
+      // No git / no repo is a normal state — the commit bar just hides.
+      if (get().project?.id === project.id) set({ gitStatus: null })
+    }
+  },
+
+  async gitStageAll() {
+    const { project, gitStatus } = get()
+    if (!project || !gitStatus) return
+    const paths = [...gitStatus.unstaged.map((f) => f.path), ...gitStatus.untracked]
+    if (paths.length === 0) return
+    set({ gitBusy: true })
+    try {
+      const updated = await unwrap(window.uld.code.gitStage(project.id, paths))
+      set({ gitStatus: updated, gitBusy: false })
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Staging files')
+    }
+  },
+
+  async gitCommit(message) {
+    const { project } = get()
+    if (!project) return false
+    set({ gitBusy: true })
+    try {
+      const result = await unwrap(window.uld.code.gitCommit(project.id, message))
+      set({ gitBusy: false })
+      useUiStore
+        .getState()
+        .toast(
+          `Committed ${result.sha}${result.branch ? ` on '${result.branch}'` : ''}`,
+          'success'
+        )
+      void get().loadGitStatus()
+      return true
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Committing')
+      return false
+    }
+  },
+
+  async gitCreateBranch(name) {
+    const { project } = get()
+    if (!project) return false
+    set({ gitBusy: true })
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitCreateBranch(project.id, name))
+      set({ gitStatus, gitBusy: false })
+      useUiStore.getState().toast(`Switched to new branch '${name}'`, 'success')
+      return true
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Creating the branch')
+      return false
+    }
+  },
+
+  async gitGenerateMessage() {
+    const { project } = get()
+    if (!project) return null
+    set({ gitBusy: true })
+    try {
+      const result = await unwrap(window.uld.code.gitGenerateCommitMessage(project.id))
+      set({ gitBusy: false })
+      return result.message
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Generating a commit message')
+      return null
+    }
+  },
+
   async readSelectedAsAttachments() {
     const { project, selectedPaths } = get()
     if (!project || selectedPaths.length === 0) return []
@@ -278,6 +416,9 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       selectedPaths: [],
       openFile: null,
       changes: [],
+      allChanges: [],
+      gitStatus: null,
+      gitBusy: false,
       loadingTree: false,
       loadingChanges: false,
       busyChangeId: null,

@@ -83,6 +83,10 @@ export interface CreateToolSystemOptions {
   knowledgeSearch?: ToolExecutorDeps['knowledgeSearch']
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: ToolExecutorDeps['delegate']
+  /** Text-to-image for 'generate_image' (wired to ChatService.generateImage). */
+  imageGeneration?: NonNullable<ToolExecutorDeps['imageGeneration']>
+  /** Local git writes for 'git_write' (wired to GitService). */
+  gitWrite?: NonNullable<ToolExecutorDeps['gitWrite']>
   /** Background sub-agent tasks (delegate background=true, task_output, task_stop). */
   delegateBackground?: NonNullable<ToolExecutorDeps['delegateBackground']>
   /** Approval-gated project writes for edit_file/write_file (wired to CodeService). */
@@ -120,6 +124,8 @@ export function createToolSystem(
     browser: options.browser ?? null,
     knowledgeSearch: options.knowledgeSearch,
     delegate: options.delegate,
+    imageGeneration: options.imageGeneration ?? null,
+    gitWrite: options.gitWrite ?? null,
     delegateBackground: options.delegateBackground ?? null,
     codeChanges: options.codeChanges ?? null,
     // update_task_list: persists the list as a 'Task list' checklist item in

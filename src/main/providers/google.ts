@@ -12,12 +12,15 @@ import type {
   AdapterChatRequest,
   AdapterChatResult,
   AdapterContext,
+  AdapterGeneratedImage,
+  AdapterImageRequest,
   AdapterMessage,
   AdapterStreamEvent,
   AdapterToolDef,
   ContentPart,
   ProviderAdapter,
 } from './adapter'
+import { ProviderError } from './errors'
 import { checkedFetch, joinUrl, requireStreamBody } from './http'
 import { collectStream, parseDataUrl, parseToolArguments, probeConnection } from './native'
 import { withRetry } from './retry'
@@ -107,6 +110,15 @@ export const GEMINI_THINKING_BUDGETS: Record<'low' | 'medium' | 'high', number> 
   medium: 8192,
   high: 24576,
 }
+
+/** Gemini/Imagen aspect ratio per abstract size ('auto' stays off the wire). */
+export function mapGeminiAspectRatio(size: AdapterImageRequest['size']): string | undefined {
+  if (!size || size === 'auto') return undefined
+  return size === 'square' ? '1:1' : size === 'landscape' ? '16:9' : '9:16'
+}
+
+/** Cap per generated image (decoded bytes) — mirrors the OpenAI-compatible cap. */
+const GEMINI_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 export function toGeminiTools(tools: AdapterToolDef[] | undefined): Record<string, unknown>[] | undefined {
   if (!tools || tools.length === 0) return undefined
@@ -250,6 +262,119 @@ export class GoogleAdapter implements ProviderAdapter {
 
   async chat(req: AdapterChatRequest, ctx: AdapterContext): Promise<AdapterChatResult> {
     return collectStream(this.chatStream({ ...req, stream: false }, ctx))
+  }
+
+  /** POST helper for the non-chat endpoints (:predict, image generateContent). */
+  private async postJson(ctx: AdapterContext, path: string, body: unknown): Promise<unknown> {
+    const res = await withRetry(
+      () =>
+        checkedFetch(joinUrl(ctx.baseUrl, path), {
+          method: 'POST',
+          headers: { 'x-goog-api-key': ctx.apiKey, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: ctx.signal,
+          providerType: this.type,
+          secrets: [ctx.apiKey],
+          fetchImpl: ctx.fetchImpl,
+          honorRetryAfter: true,
+        }),
+      { signal: ctx.signal }
+    )
+    try {
+      return JSON.parse(await res.text()) as unknown
+    } catch {
+      throw new ProviderError('unknown', 'Gemini returned a non-JSON response.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+  }
+
+  private decodeImage(b64: string, mimeType: string | undefined): AdapterGeneratedImage {
+    const bytes = Buffer.from(b64, 'base64')
+    if (bytes.byteLength === 0 || bytes.byteLength > GEMINI_IMAGE_MAX_BYTES) {
+      throw new ProviderError('unknown', 'The generated image was empty or too large.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    return {
+      bytes: new Uint8Array(bytes),
+      mimeType: mimeType?.startsWith('image/') ? mimeType : 'image/png',
+    }
+  }
+
+  /**
+   * Text-to-image. Gemini image models (gemini-*-image*, "Nano Banana") run
+   * through :generateContent with responseModalities IMAGE; imagen-* ids run
+   * through the legacy :predict endpoint (kept for typed custom ids).
+   */
+  async generateImage(
+    req: AdapterImageRequest,
+    ctx: AdapterContext
+  ): Promise<AdapterGeneratedImage[]> {
+    const aspect = mapGeminiAspectRatio(req.size)
+    if (/^imagen/i.test(req.modelId)) {
+      const json = (await this.postJson(
+        ctx,
+        `/models/${encodeURIComponent(req.modelId)}:predict`,
+        {
+          instances: [{ prompt: req.prompt }],
+          parameters: {
+            sampleCount: Math.min(Math.max(req.count, 1), 4),
+            ...(aspect ? { aspectRatio: aspect } : {}),
+          },
+        }
+      )) as { predictions?: Array<{ bytesBase64Encoded?: string; mimeType?: string }> }
+      const images = (json.predictions ?? [])
+        .filter((p) => typeof p.bytesBase64Encoded === 'string' && p.bytesBase64Encoded.length > 0)
+        .map((p) => this.decodeImage(p.bytesBase64Encoded as string, p.mimeType))
+      if (images.length === 0) {
+        throw new ProviderError('unknown', 'Imagen returned no image.', {
+          retryable: false,
+          providerType: this.type,
+        })
+      }
+      return images
+    }
+
+    // Gemini image output: one image per call (no native sampleCount).
+    const json = (await this.postJson(
+      ctx,
+      `/models/${encodeURIComponent(req.modelId)}:generateContent`,
+      {
+        contents: [{ role: 'user', parts: [{ text: req.prompt }] }],
+        generationConfig: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          ...(aspect ? { imageConfig: { aspectRatio: aspect } } : {}),
+        },
+      }
+    )) as {
+      candidates?: Array<{ content?: { parts?: Array<Record<string, unknown>> } }>
+      promptFeedback?: { blockReason?: string }
+    }
+    if (json.promptFeedback?.blockReason) {
+      throw new ProviderError(
+        'invalid_request',
+        `The prompt was blocked (${json.promptFeedback.blockReason}).`,
+        { retryable: false, providerType: this.type }
+      )
+    }
+    const parts = json.candidates?.[0]?.content?.parts ?? []
+    const images: AdapterGeneratedImage[] = []
+    for (const part of parts) {
+      const inline = part.inlineData as { mimeType?: string; data?: string } | undefined
+      if (inline && typeof inline.data === 'string' && inline.data.length > 0) {
+        images.push(this.decodeImage(inline.data, inline.mimeType))
+      }
+    }
+    if (images.length === 0) {
+      throw new ProviderError('unknown', 'Gemini returned no image for this prompt.', {
+        retryable: false,
+        providerType: this.type,
+      })
+    }
+    return images
   }
 
   async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {

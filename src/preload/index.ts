@@ -27,6 +27,8 @@ const api: UldApi = {
     pickFolder: () => ipcRenderer.invoke(CHANNELS.appPickFolder),
     pickFiles: () => ipcRenderer.invoke(CHANNELS.appPickFiles),
     readAttachment: (storageKey) => ipcRenderer.invoke(CHANNELS.appReadAttachment, storageKey),
+    saveAttachmentAs: (storageKey, suggestedName) =>
+      ipcRenderer.invoke(CHANNELS.appSaveAttachmentAs, { storageKey, suggestedName }),
   },
   settings: {
     get: () => ipcRenderer.invoke(CHANNELS.settingsGet),
@@ -95,7 +97,20 @@ const api: UldApi = {
     changeApply: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeApply, changeId),
     changeReject: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeReject, changeId),
     changeRevert: (changeId) => ipcRenderer.invoke(CHANNELS.codeChangeRevert, changeId),
+    changesListAll: (projectId) => ipcRenderer.invoke(CHANNELS.codeChangesListAll, projectId),
     suggestFiles: (req) => ipcRenderer.invoke(CHANNELS.codeSuggestFiles, req),
+    onChangesChanged: subscribe(CHANNELS.codeChangesChanged),
+    gitStatus: (projectId) => ipcRenderer.invoke(CHANNELS.codeGitStatus, projectId),
+    gitStage: (projectId, paths) =>
+      ipcRenderer.invoke(CHANNELS.codeGitStage, { projectId, paths }),
+    gitUnstage: (projectId, paths) =>
+      ipcRenderer.invoke(CHANNELS.codeGitUnstage, { projectId, paths }),
+    gitCommit: (projectId, message) =>
+      ipcRenderer.invoke(CHANNELS.codeGitCommit, { projectId, message }),
+    gitCreateBranch: (projectId, name) =>
+      ipcRenderer.invoke(CHANNELS.codeGitCreateBranch, { projectId, name }),
+    gitGenerateCommitMessage: (projectId) =>
+      ipcRenderer.invoke(CHANNELS.codeGitGenerateCommitMessage, projectId),
   },
   tools: {
     list: () => ipcRenderer.invoke(CHANNELS.toolsList),

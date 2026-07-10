@@ -19,6 +19,7 @@ import type {
   ProviderConfigInput,
   ProviderConfigPatch,
   ProviderTypeMeta,
+  ResearchDepth,
   StreamEventEnvelope,
   TestConnectionResult,
 } from '@shared/types'
@@ -118,6 +119,8 @@ export interface ChatStoreState {
     opts?: {
       /** Run this send as a compare ("Arena") fan-out through the given MoA preset. */
       comparePresetId?: string
+      /** Run this send as a Deep Research run (the composer toggle). */
+      research?: { depth?: ResearchDepth }
     }
   ): Promise<void>
   stop(): Promise<void>

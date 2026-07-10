@@ -24,6 +24,7 @@ import type {
   ToolPermission,
   ToolPermissionDecision,
 } from '@shared/types'
+import { providerSupportsImageOutput } from '@shared/catalog'
 import type { AppDatabase } from '../db/database'
 import type { CustomToolRecord } from '../db/repositories/custom-tools'
 import { BUILTIN_TOOL_DEFINITIONS, DEFAULT_PERMISSION_BY_RISK } from './definitions'
@@ -65,6 +66,12 @@ export class ToolRegistry {
     }
     // use_skill is pointless (and prompt noise) without any enabled skills.
     if (this.db.skills.listEnabled().length === 0) hidden.add('use_skill')
+    // generate_image is prompt noise when nothing can generate images: no
+    // explicit default set AND no enabled, keyed provider of an image-capable
+    // family (e.g. an Anthropic-only setup).
+    if (!settings.defaultImageProviderId && !this.anyImageCapableProvider()) {
+      hidden.add('generate_image')
+    }
     const builtins = BUILTIN_TOOL_DEFINITIONS.filter((tool) => !hidden.has(tool.id)).map((tool) => ({
       ...tool,
       enabled: isEnabled(tool.id),
@@ -80,6 +87,14 @@ export class ToolRegistry {
   /** Enabled tools only — what actually gets offered to the model. */
   listEnabledDefinitions(): ToolDefinition[] {
     return this.listDefinitions().filter((tool) => tool.enabled)
+  }
+
+  private anyImageCapableProvider(): boolean {
+    return this.db.providers
+      .list()
+      .some(
+        (p) => p.enabled && p.hasKey && p.authMode !== 'chatgpt_oauth' && providerSupportsImageOutput(p)
+      )
   }
 
   /** Lookup by ToolDefinition id ('file_search', 'custom:<uuid>'). */

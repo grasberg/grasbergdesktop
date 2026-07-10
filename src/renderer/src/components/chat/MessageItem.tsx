@@ -6,7 +6,9 @@ import { useCopied } from '@/hooks/useCopied'
 import { formatBytes } from '@/lib/format'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
+import GeneratedImage from './GeneratedImage'
 import Markdown from './Markdown'
+import ResearchProgress from './ResearchProgress'
 import ToolCallCard from './ToolCallCard'
 import './chat.css'
 
@@ -290,6 +292,10 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   return (
     <div className="msg-row msg-row-assistant">
       <div className={`msg-card msg-card-assistant${isError ? ' msg-card-error' : ''}`}>
+        {message.research && (
+          <ResearchProgress research={message.research} streaming={isStreaming} />
+        )}
+
         {message.moaReferences &&
           message.moaReferences.length > 0 &&
           (message.compare ? (
@@ -333,7 +339,21 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
           </div>
         )}
 
-        {message.content && <Markdown content={message.content} />}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="msg-genimages">
+            {message.attachments.map((a) =>
+              a.kind === 'image' ? (
+                <GeneratedImage key={a.id} attachment={a} />
+              ) : (
+                <AttachmentChip key={a.id} attachment={a} />
+              )
+            )}
+          </div>
+        )}
+
+        {message.content && (
+          <Markdown content={message.content} citations={message.research?.sources} />
+        )}
 
         {isStreaming && message.content && <span className="chat-cursor" aria-hidden />}
         {isStreaming &&

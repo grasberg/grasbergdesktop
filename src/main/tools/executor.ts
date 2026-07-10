@@ -27,7 +27,9 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
+  Attachment,
   Conversation,
+  GitStatus,
   ToolApprovalAnswer,
   ToolApprovalRequest,
   ToolCallRecord,
@@ -110,6 +112,27 @@ export interface ToolExecutorDeps {
   ) => Promise<Array<{ source: string; content: string; score: number }>>
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: (task: string, ctx: ToolExecuteContext, agentName?: string) => Promise<string>
+  /**
+   * Text-to-image for the 'generate_image' tool (wired to
+   * ChatService.generateImage). Returns the stored image attachments.
+   */
+  imageGeneration?: {
+    generate(req: {
+      prompt: string
+      count?: number
+      size?: 'auto' | 'square' | 'landscape' | 'portrait'
+    }): Promise<Attachment[]>
+  } | null
+  /**
+   * Local git writes for the 'git_write' tool (wired to GitService — the only
+   * module that spawns mutating git). Every call is user-approved first.
+   */
+  gitWrite?: {
+    status(root: string): Promise<GitStatus>
+    stage(root: string, paths: string[]): Promise<string>
+    commit(root: string, message: string): Promise<{ sha: string; branch: string | null }>
+    createBranch(root: string, name: string): Promise<string>
+  } | null
   /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
   delegateBackground?: {
     start(task: string, ctx: ToolExecuteContext, agentName?: string): string
@@ -168,6 +191,12 @@ export interface ToolExecuteContext {
   autoAcceptEdits?: boolean
   /** Receives live output chunks from long-running tools (shell commands). */
   onToolOutput?: (toolCallId: string, chunk: string) => void
+  /**
+   * Receives each image the generate_image tool stored, so the caller can
+   * attach it to the assistant message and stream it to the renderer.
+   * Absent (delegate/workflow loops) => the tool reports itself unavailable.
+   */
+  onAttachment?: (attachment: Attachment) => void
 }
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
@@ -721,14 +750,18 @@ export class ToolExecutor {
       return `The user has denied the tool '${definition.name}' in this app's settings; it was not run.`
     }
     if (decision === 'ask' && !this.approvalPreGranted(definition, args, ctx)) {
+      const note = await this.approvalNoteFor(definition, args, ctx)
       const answer = await ctx.approval({
         streamId: ctx.streamId ?? '',
         conversationId: ctx.conversation.id,
         toolCall,
         risk: definition.risk,
+        ...(note ? { note } : {}),
       })
       if (!answer.approved) return USER_DECLINED_RESULT
-      if (answer.scope === 'conversation') {
+      // A conversation-wide grant can never cover a noStandingApproval tool:
+      // each of its calls is individually consequential (e.g. a git commit).
+      if (answer.scope === 'conversation' && definition.noStandingApproval !== true) {
         let allowed = this.conversationApprovals.get(ctx.conversation.id)
         if (!allowed) {
           allowed = new Set()
@@ -742,16 +775,60 @@ export class ToolExecutor {
   }
 
   /**
+   * Main-computed context line shown prominently in the approval dialog —
+   * currently the git_write "what exactly will this do, on which branch"
+   * summary. Best-effort; never blocks the approval on a failure.
+   */
+  private async approvalNoteFor(
+    definition: ToolDefinition,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string | undefined> {
+    if (definition.id !== 'git_write' || !this.deps.gitWrite) return undefined
+    const root = this.deps.getProjectRoot(ctx.conversation)
+    if (!root) return undefined
+    try {
+      const action = getString(args, 'action') ?? ''
+      if (action === 'commit') {
+        const status = await this.deps.gitWrite.status(root)
+        const count = status.staged.length
+        const branch = status.branch ?? (status.detached ? 'a detached HEAD' : 'an unborn branch')
+        const isDefault = status.branch !== null && status.branch === status.defaultBranch
+        return (
+          `Commits ${count} staged ${count === 1 ? 'file' : 'files'} on ${status.branch ? `branch '${branch}'` : branch}` +
+          (isDefault ? ' — the DEFAULT branch' : '')
+        )
+      }
+      if (action === 'stage') {
+        const paths = Array.isArray(args.paths)
+          ? args.paths.filter((p): p is string => typeof p === 'string')
+          : []
+        const shown = paths.slice(0, 5).join(', ')
+        return `Stages ${paths.length} ${paths.length === 1 ? 'file' : 'files'}: ${shown}${paths.length > 5 ? ', …' : ''}`
+      }
+      if (action === 'create_branch') {
+        const branch = getString(args, 'branch') ?? ''
+        return `Creates and switches to branch '${branch}'`
+      }
+    } catch {
+      // The dialog still shows the raw arguments.
+    }
+    return undefined
+  }
+
+  /**
    * Standing grants that let an 'ask' tool run without the dialog:
    * - an earlier "allow for this conversation" answer for the same tool,
    * - auto-accept-edits mode for the file-editing tools,
    * - a shell command covered by the user's prefix allowlist.
+   * Tools marked noStandingApproval get NO standing grant of any kind.
    */
   private approvalPreGranted(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
   ): boolean {
+    if (definition.noStandingApproval === true) return false
     if (this.conversationApprovals.get(ctx.conversation.id)?.has(definition.id)) return true
     if (
       ctx.autoAcceptEdits === true &&
@@ -784,6 +861,10 @@ export class ToolExecutor {
         return this.runGit(args, ctx)
       case 'web_search':
         return this.runWebSearch(args)
+      case 'generate_image':
+        return this.runGenerateImage(args, ctx)
+      case 'git_write':
+        return this.runGitWrite(args, ctx)
       case 'edit_file':
         return this.runEditFile(args, ctx)
       case 'write_file':
@@ -1353,6 +1434,88 @@ export class ToolExecutor {
       throw new FetchGuardError('Error: too many redirects.')
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  private async runGitWrite(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    const gitWrite = this.deps.gitWrite
+    if (!gitWrite) return 'Error: git write operations are unavailable in this context.'
+    const root = this.deps.getProjectRoot(ctx.conversation)
+    if (!root) {
+      return 'Error: no project folder is granted to this conversation — git_write needs one.'
+    }
+    const action = getString(args, 'action') ?? ''
+    try {
+      switch (action) {
+        case 'stage': {
+          const paths = Array.isArray(args.paths)
+            ? args.paths.filter((p): p is string => typeof p === 'string')
+            : []
+          if (paths.length === 0) {
+            return "Error: 'paths' must be a non-empty array of relative file paths."
+          }
+          return await gitWrite.stage(root, paths)
+        }
+        case 'commit': {
+          const [message, messageError] = requireStringArg(args, 'message')
+          if (messageError) return messageError
+          // Belt: refuse a default-branch commit unless the model explicitly
+          // confirmed (which the approval dialog shows in the arguments) —
+          // the note tells the user which branch this lands on either way.
+          const status = await gitWrite.status(root)
+          const onDefault = status.branch !== null && status.branch === status.defaultBranch
+          if (onDefault && args.confirm_default_branch !== true) {
+            return (
+              `Refused: HEAD is on the default branch ('${status.branch}'). Create a branch ` +
+              `first (action "create_branch"), or — only if the user explicitly asked to ` +
+              `commit here — retry with confirm_default_branch: true and tell the user why.`
+            )
+          }
+          const result = await gitWrite.commit(root, message)
+          return `Committed ${result.sha}${result.branch ? ` on branch '${result.branch}'` : ''}.`
+        }
+        case 'create_branch': {
+          const [branch, branchError] = requireStringArg(args, 'branch')
+          if (branchError) return branchError
+          return await gitWrite.createBranch(root, branch)
+        }
+        default:
+          return "Error: 'action' must be one of stage | commit | create_branch."
+      }
+    } catch (e) {
+      return redactSecrets(`git_write failed: ${errorMessage(e)}`)
+    }
+  }
+
+  private async runGenerateImage(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    const [prompt, promptError] = requireStringArg(args, 'prompt')
+    if (promptError) return promptError
+    if (prompt.length > 4000) return "Error: 'prompt' is too long (max 4000 characters)."
+    const generator = this.deps.imageGeneration
+    if (!generator || !ctx.onAttachment) {
+      return 'Error: image generation is unavailable in this context.'
+    }
+    const count = clampIntArg(args, 'count', 1, 4)
+    const sizeRaw = getString(args, 'size') ?? 'auto'
+    const size =
+      sizeRaw === 'square' || sizeRaw === 'landscape' || sizeRaw === 'portrait' ? sizeRaw : 'auto'
+    try {
+      const attachments = await generator.generate({ prompt, count, size })
+      for (const attachment of attachments) ctx.onAttachment(attachment)
+      const modelId = attachments[0]?.generatedBy?.modelId ?? 'the configured image model'
+      return (
+        `Generated ${attachments.length} image${attachments.length === 1 ? '' : 's'} with ` +
+        `${modelId}${size !== 'auto' ? ` (${size})` : ''}. ` +
+        `They are shown to the user inside this message — do not invent a link.`
+      )
+    } catch (e) {
+      return redactSecrets(`Image generation failed: ${errorMessage(e)}`)
     }
   }
 

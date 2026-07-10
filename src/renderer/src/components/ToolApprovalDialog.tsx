@@ -80,6 +80,8 @@ export default function ToolApprovalDialog(): ReactElement | null {
 
         {tool?.description ? <p className="tool-approval-desc">{tool.description}</p> : null}
 
+        {pending.note ? <p className="tool-approval-note">{pending.note}</p> : null}
+
         <p className="tool-approval-copy">
           The assistant wants to run this tool. Nothing runs without your approval.
         </p>
@@ -108,14 +110,16 @@ export default function ToolApprovalDialog(): ReactElement | null {
           >
             Deny
           </button>
-          <button
-            type="button"
-            className="btn"
-            title="Also auto-approve future calls of this tool in this conversation (until the app restarts)"
-            onClick={() => void useToolsStore.getState().respond(true, 'conversation')}
-          >
-            Allow for this conversation
-          </button>
+          {tool?.noStandingApproval !== true && (
+            <button
+              type="button"
+              className="btn"
+              title="Also auto-approve future calls of this tool in this conversation (until the app restarts)"
+              onClick={() => void useToolsStore.getState().respond(true, 'conversation')}
+            >
+              Allow for this conversation
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"

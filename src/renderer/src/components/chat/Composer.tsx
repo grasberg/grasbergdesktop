@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { Attachment } from '@shared/types'
+import type { Attachment, ResearchDepth } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
 import { providerUsable as isProviderUsable } from '@/lib/providers'
@@ -59,6 +59,9 @@ export default function Composer(): ReactElement {
 
   const [value, setValue] = useState('')
   const [compareOn, setCompareOn] = useState(false)
+  const [researchOn, setResearchOn] = useState(false)
+  // '' = use the settings default depth for this run.
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth | ''>('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<Attachment[] | null>(null)
   const [confirmFlash, setConfirmFlash] = useState(false)
@@ -131,9 +134,11 @@ export default function Composer(): ReactElement {
     enabledPresets[0] ??
     null
 
-  // The toggle is a per-conversation intent; don't leak it across switches.
+  // The toggles are per-conversation intents; don't leak them across switches.
   useEffect(() => {
     setCompareOn(false)
+    setResearchOn(false)
+    setResearchDepth('')
   }, [conversation?.id])
 
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
@@ -165,6 +170,12 @@ export default function Composer(): ReactElement {
       label: '/compact',
       description: 'Summarize older messages to free up context',
       takesArgs: false,
+    })
+    items.push({
+      command: '/research',
+      label: '/research <question>',
+      description: 'Search the web and write a report with cited sources',
+      takesArgs: true,
     })
     if (settings?.defaultMoaPresetId) {
       items.push({
@@ -334,8 +345,11 @@ export default function Composer(): ReactElement {
       return
     }
     const sentAttachments = attachments.length > 0 ? attachments : undefined
-    const sendOpts =
-      compareOn && comparePreset ? { comparePresetId: comparePreset.id } : undefined
+    const sendOpts = researchOn
+      ? { research: researchDepth ? { depth: researchDepth } : {} }
+      : compareOn && comparePreset
+        ? { comparePresetId: comparePreset.id }
+        : undefined
     setValue('')
     setAttachments([])
     setMention(null)
@@ -524,6 +538,48 @@ export default function Composer(): ReactElement {
             )}
           </div>
         )}
+        <div className="composer-moa">
+          <button
+            type="button"
+            className={`btn-icon composer-attach composer-moa-toggle${researchOn ? ' active' : ''}`}
+            aria-pressed={researchOn}
+            aria-label={
+              researchOn
+                ? 'Deep research on — the next message runs web research and writes a cited report'
+                : 'Turn on deep research for the next message'
+            }
+            title={
+              researchOn
+                ? 'Deep research: the next message searches the web and writes a cited report'
+                : 'Deep research — search the web and write a cited report (/research)'
+            }
+            disabled={!conversation || isStreaming}
+            onClick={() =>
+              setResearchOn((v) => {
+                if (!v) setCompareOn(false)
+                return !v
+              })
+            }
+          >
+            DR
+          </button>
+          {researchOn && (
+            <select
+              className="composer-moa-select"
+              aria-label="Research depth"
+              value={researchDepth}
+              disabled={isStreaming}
+              onChange={(e) => setResearchDepth(e.target.value as ResearchDepth | '')}
+            >
+              <option value="">
+                depth: {settings?.researchDefaultDepth ?? 'standard'} (default)
+              </option>
+              <option value="quick">quick</option>
+              <option value="standard">standard</option>
+              <option value="deep">deep</option>
+            </select>
+          )}
+        </div>
         {enabledPresets.length > 0 && (
           <div className="composer-moa">
             <button
@@ -575,7 +631,12 @@ export default function Composer(): ReactElement {
                   : 'Compare — ask several models side by side and pick the best answer'
               }
               disabled={!conversation || isStreaming || !comparePreset}
-              onClick={() => setCompareOn((v) => !v)}
+              onClick={() =>
+                setCompareOn((v) => {
+                  if (!v) setResearchOn(false)
+                  return !v
+                })
+              }
             >
               VS
             </button>

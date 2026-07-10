@@ -1343,6 +1343,145 @@
   }
 }
 
+/* --- Deep Research (progress + sources block, citation chips) --- */
+
+.msg-research-summary {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.msg-research-activities {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msg-research-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.msg-research-activity-running .msg-research-activity-icon {
+  color: var(--accent);
+}
+
+.msg-research-activity-done .msg-research-activity-icon {
+  color: var(--success, #22c55e);
+}
+
+.msg-research-activity-error {
+  color: var(--warning);
+}
+
+.msg-research-heading {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.msg-research-plan ul,
+.msg-research-sources ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  font-size: 13px;
+}
+
+.msg-research-source-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Inline [n] citation markers linkified by Markdown.tsx */
+.chat-md a.chat-citation {
+  display: inline-block;
+  padding: 0 5px;
+  margin: 0 1px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: super;
+  text-decoration: none;
+  color: var(--text-muted);
+}
+
+.chat-md a.chat-citation:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* --- Generated images (generate_image tool output) --- */
+
+.msg-genimages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+.msg-genimage {
+  margin: 0;
+  max-width: 420px;
+}
+
+.msg-genimage-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: zoom-in;
+  background: var(--bg-panel);
+}
+
+.msg-genimage-loading {
+  width: 280px;
+  height: 200px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.msg-genimage-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.msg-genimage-save {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+.msg-genimage-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  cursor: zoom-out;
+}
+
+.msg-genimage-overlay img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: var(--radius-md);
+}
+
 /* --- Mermaid diagrams (```mermaid fences render as SVG) --- */
 
 .chat-mermaid {

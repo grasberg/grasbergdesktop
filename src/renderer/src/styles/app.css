@@ -899,6 +899,15 @@ kbd {
   font-size: 0.82rem;
 }
 
+/* Main-computed context line (e.g. which branch a git commit lands on). */
+.tool-approval-note {
+  padding: 6px 10px;
+  border: 1px solid var(--warning, #d97706);
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
 .tool-approval-copy {
   font-size: 0.85rem;
 }

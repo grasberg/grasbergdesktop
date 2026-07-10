@@ -58,6 +58,7 @@ import {
   providerConfigPatchSchema,
   providerTypeSchema,
   authModeSchema,
+  researchDepthSchema,
   settingsPatchSchema,
   workflowGraphSchema,
   isValidStorageKey,
@@ -65,6 +66,7 @@ import {
 import type { AppDatabase } from '../db/database'
 import type { ChatService } from '../services/chat-service'
 import type { CodeService } from '../code/code-service'
+import type { GitService } from '../code/git-service'
 import type { Keystore } from '../keys/keystore'
 import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
@@ -78,12 +80,14 @@ import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/
 import { readSkillsFromFolder } from '../services/skills'
 import { applyBackup, buildBackup } from '../services/backup'
 import { readAttachment, readStoredImage } from './attachments'
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 export interface RegisterIpcDeps {
   db: AppDatabase
   chatService: ChatService
   codeService: CodeService
+  gitService: GitService
   keystore: Keystore
   toolSystem: ToolSystem
   approvalBroker: ApprovalBroker
@@ -262,6 +266,7 @@ const chatSendSchema = z.object({
       params: chatParamsSchema.optional(),
       moaPresetId: z.string().min(1).nullable().optional(),
       compare: z.boolean().optional(),
+      research: z.object({ depth: researchDepthSchema.optional() }).strict().optional(),
     })
     .optional(),
 })
@@ -357,7 +362,7 @@ const documentExportFormatSchema = z.enum(['markdown', 'html'])
 // ---------------------------------------------------------------------------
 
 export function registerIpc(deps: RegisterIpcDeps): void {
-  const { db, chatService, codeService, keystore, toolSystem, approvalBroker, questionBroker, oauthManager } = deps
+  const { db, chatService, codeService, gitService, keystore, toolSystem, approvalBroker, questionBroker, oauthManager } = deps
 
   const register = (channel: ChannelName, fn: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
@@ -434,6 +439,33 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.appReadAttachment, (storageKey) =>
     readStoredImage(deps.attachmentsDir, requireString(storageKey, 'Attachment key'))
   )
+
+  register(CHANNELS.appSaveAttachmentAs, async (req) => {
+    const parsed = parseInput(
+      z.object({
+        storageKey: z
+          .string()
+          .max(300)
+          .refine(isValidStorageKey, { message: 'Invalid attachment storage key' }),
+        suggestedName: z.string().max(200).optional(),
+      }),
+      req
+    )
+    // Same gate as readStoredImage: only app-shaped keys, only image mimes.
+    const stored = await readStoredImage(deps.attachmentsDir, parsed.storageKey)
+    if (!stored) throw invalid('That image is no longer available.')
+    const defaultName =
+      parsed.suggestedName && /^[^\\/:*?"<>|]+$/.test(parsed.suggestedName)
+        ? parsed.suggestedName
+        : parsed.storageKey
+    const result = await showSave({
+      defaultPath: defaultName,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+    })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await copyFile(join(deps.attachmentsDir, parsed.storageKey), result.filePath)
+    return { canceled: false, path: result.filePath }
+  })
 
   // -- settings -----------------------------------------------------------------
 
@@ -836,6 +868,64 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     const parsed = parseInput(codeSuggestFilesSchema, req)
     return codeService.suggestFiles(parsed.projectId, parsed.query, parsed.limit ?? 12)
   })
+
+  // The cross-conversation review queue: all of a project's changes with
+  // their conversation titles.
+  register(CHANNELS.codeChangesListAll, (projectId) =>
+    codeService.listChangesWithContext(requireString(projectId, 'Project id'))
+  )
+
+  // -- code git (commit bar; every handler is reached from an explicit click,
+  //    which IS the consent — no approval broker involved) ---------------------
+
+  const projectRoot = (projectId: unknown): string => {
+    const project = db.code.projectGetById(requireString(projectId, 'Project id'))
+    if (!project) throw invalid('Project not found.')
+    return project.path
+  }
+
+  const gitPathsSchema = z.object({
+    projectId: z.string().min(1),
+    paths: z.array(z.string().min(1).max(1000)).min(1).max(200),
+  })
+
+  register(CHANNELS.codeGitStatus, (projectId) => gitService.status(projectRoot(projectId)))
+
+  register(CHANNELS.codeGitStage, async (req) => {
+    const parsed = parseInput(gitPathsSchema, req)
+    const root = projectRoot(parsed.projectId)
+    await gitService.stage(root, parsed.paths)
+    return gitService.status(root)
+  })
+
+  register(CHANNELS.codeGitUnstage, async (req) => {
+    const parsed = parseInput(gitPathsSchema, req)
+    const root = projectRoot(parsed.projectId)
+    await gitService.unstage(root, parsed.paths)
+    return gitService.status(root)
+  })
+
+  register(CHANNELS.codeGitCommit, (req) => {
+    const parsed = parseInput(
+      z.object({ projectId: z.string().min(1), message: z.string().min(1).max(5000) }),
+      req
+    )
+    return gitService.commit(projectRoot(parsed.projectId), parsed.message)
+  })
+
+  register(CHANNELS.codeGitCreateBranch, async (req) => {
+    const parsed = parseInput(
+      z.object({ projectId: z.string().min(1), name: z.string().min(1).max(200) }),
+      req
+    )
+    const root = projectRoot(parsed.projectId)
+    await gitService.createBranch(root, parsed.name)
+    return gitService.status(root)
+  })
+
+  register(CHANNELS.codeGitGenerateCommitMessage, (projectId) =>
+    gitService.generateCommitMessage(projectRoot(projectId))
+  )
 
   // -- tools --------------------------------------------------------------------
 

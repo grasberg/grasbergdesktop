@@ -165,6 +165,51 @@ export async function readAttachment(
   }
 }
 
+/** Extension written for a generated image, by mime type. */
+const EXTENSION_BY_IMAGE_MIME: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/** Short filesystem-safe slug of a prompt for the display filename. */
+function promptSlug(prompt: string): string {
+  return prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+}
+
+/**
+ * Persists a generated image's bytes under the attachments dir and returns
+ * the Attachment referencing it (kind 'image', app-shaped storageKey, and
+ * generatedBy metadata for the renderer caption). The write path mirrors
+ * readAttachment's image branch.
+ */
+export async function storeGeneratedImage(
+  imageDir: string,
+  bytes: Uint8Array,
+  mimeType: string,
+  meta: { prompt: string; modelId: string; size?: string }
+): Promise<Attachment> {
+  const ext = EXTENSION_BY_IMAGE_MIME[mimeType] ?? 'png'
+  const id = randomUUID()
+  const storageKey = `${id}.${ext}`
+  await mkdir(imageDir, { recursive: true })
+  await writeFile(join(imageDir, storageKey), bytes)
+  return {
+    id,
+    name: `${promptSlug(meta.prompt) || 'generated-image'}.${ext}`,
+    mimeType: EXTENSION_BY_IMAGE_MIME[mimeType] ? mimeType : 'image/png',
+    sizeBytes: bytes.byteLength,
+    kind: 'image',
+    storageKey,
+    generatedBy: { modelId: meta.modelId, ...(meta.size ? { size: meta.size } : {}) },
+  }
+}
+
 /**
  * Reads a stored image by its storageKey and returns a data URL, or null when
  * the file is missing or escapes the attachments dir. Read-only.

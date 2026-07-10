@@ -38,6 +38,8 @@ export interface ModelCapabilities {
   vision: boolean
   /** Emits reasoning/thinking content (e.g. deepseek-reasoner). */
   reasoning: boolean
+  /** Generates images (text-to-image output). Absent = no. */
+  imageOutput?: boolean
 }
 
 export interface ModelInfo {
@@ -69,6 +71,13 @@ export interface ProviderTypeMeta {
   keyLabel?: string
   /** Short note shown under the type (e.g. subscription/coding-plan hint). */
   hint?: string
+  /**
+   * Image-generation models this family serves (the generate_image tool).
+   * Absent = the family has no image endpoint.
+   */
+  imageModels?: ModelInfo[]
+  /** Default image model when the user hasn't picked one. */
+  defaultImageModelId?: string
 }
 
 /** A user-configured provider instance (stored in SQLite; key stored separately). */
@@ -192,6 +201,11 @@ export interface Attachment {
    * persisted (stripped at the IPC boundary) — reload uses app.readAttachment.
    */
   dataUrl?: string
+  /**
+   * Present on assistant-message images produced by the generate_image tool:
+   * which model made it and at what requested size (for the caption).
+   */
+  generatedBy?: { modelId: string; size?: string }
 }
 
 export interface ToolCallRecord {
@@ -247,6 +261,12 @@ export interface Message {
    * text the user promoted into `content` (null until picked).
    */
   compare?: { pickedIndex: number | null }
+  /**
+   * Deep Research: plan + consulted sources of the research run that produced
+   * this assistant message (the [n] markers in `content` cite these sources).
+   * Present only when the message was generated via /research.
+   */
+  research?: ResearchRunInfo
   /** Monotonic order within the conversation. */
   seq: number
   createdAt: number
@@ -406,6 +426,62 @@ export interface MoaReferenceOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Deep Research
+// ---------------------------------------------------------------------------
+
+/** How much a research run may search/read (caps live in research.ts). */
+export type ResearchDepth = 'quick' | 'standard' | 'deep'
+
+/**
+ * One source a research run consulted. Sources are collected in main from the
+ * OBSERVED web_search/fetch_url tool calls (never from model output) and get
+ * app-assigned 1-based citation ids the report's [n] markers refer to.
+ */
+export interface ResearchSource {
+  /** 1-based citation number, assigned by the app after dedupe. */
+  id: number
+  url: string
+  title: string
+  /** Search-result snippet, when the source came from a search hit. */
+  snippet?: string
+  /** Set when the page body was actually fetched and read. */
+  fetchedAt?: number
+  status: 'fetched' | 'search-only' | 'error'
+}
+
+/**
+ * Live progress record for a research run, streamed as 'research-activity'
+ * events (upsert by id). Renderer-transient — accumulated on the streaming
+ * message like ToolCallRecord.liveOutput; main never persists activities.
+ */
+export interface ResearchActivity {
+  id: string
+  phase: 'planning' | 'searching' | 'reading' | 'synthesizing'
+  /** e.g. "Searching: best 2026 heat pumps" or "Reading: example.com". */
+  label: string
+  status: 'running' | 'done' | 'error'
+  detail?: string
+}
+
+/** Persisted on the assistant message a deep-research run produced. */
+export interface ResearchRunInfo {
+  depth: ResearchDepth
+  /** Sub-queries the planner decomposed the question into. */
+  plan: string[]
+  sources: ResearchSource[]
+  /** Totals for the collapsed summary line. */
+  searches: number
+  pagesRead: number
+  /** Summed planner+worker usage (synthesis usage is in message.usage). */
+  workerUsage?: TokenUsage
+  /**
+   * Live activities while streaming. Renderer-side only — accumulated from
+   * 'research-activity' events; main never sets or persists this field.
+   */
+  activities?: ResearchActivity[]
+}
+
+// ---------------------------------------------------------------------------
 // Streaming (main -> renderer)
 // ---------------------------------------------------------------------------
 
@@ -419,6 +495,10 @@ export type StreamEvent =
   | { type: 'usage'; usage: TokenUsage }
   /** Mixture-of-Agents: an advisor model started/finished (upsert by index). */
   | { type: 'moa-reference'; reference: MoaReferenceOutput }
+  /** Deep Research: a pipeline activity started/settled (upsert by id). */
+  | { type: 'research-activity'; activity: ResearchActivity }
+  /** A generated image was stored and attached to the assistant message. */
+  | { type: 'attachment'; attachment: Attachment }
   | {
       type: 'done'
       finishReason: 'stop' | 'length' | 'tool_calls' | 'aborted' | 'error'
@@ -540,6 +620,20 @@ export interface AppSettings {
   telegramBridgePairingCode: string | null
   /** Generic outbound webhook posted on each assistant completion (opt-in). */
   outboundWebhookUrl: string | null
+  /**
+   * Provider used for deep-research planning and web workers (often a cheaper
+   * model). Null = the conversation's acting model does everything.
+   */
+  researchWorkerProviderId: string | null
+  researchWorkerModelId: string | null
+  /** Depth used when /research or the composer toggle doesn't specify one. */
+  researchDefaultDepth: ResearchDepth
+  /**
+   * Provider/model the generate_image tool uses. Null provider = auto-pick
+   * the first enabled, keyed provider whose family can generate images.
+   */
+  defaultImageProviderId: string | null
+  defaultImageModelId: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -575,6 +669,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   telegramBridgeAllowedChatId: null,
   telegramBridgePairingCode: null,
   outboundWebhookUrl: null,
+  researchWorkerProviderId: null,
+  researchWorkerModelId: null,
+  researchDefaultDepth: 'standard',
+  defaultImageProviderId: null,
+  defaultImageModelId: null,
 }
 
 /**
@@ -652,6 +751,28 @@ export interface FileTreeNode {
 export type CodeChangeType = 'create' | 'edit' | 'delete'
 export type CodeChangeStatus = 'proposed' | 'applied' | 'rejected' | 'reverted'
 
+/** One path in `git status` (status = the porcelain letter, e.g. M/A/D/R). */
+export interface GitFileChange {
+  path: string
+  status: string
+}
+
+/** Working-tree status for the Code-mode commit bar. */
+export interface GitStatus {
+  isRepo: boolean
+  /** Current branch, or null when detached / unborn / not a repo. */
+  branch: string | null
+  /** origin/HEAD or main/master heuristic; null for bare local repos. */
+  defaultBranch: string | null
+  detached: boolean
+  /** Commits ahead/behind the upstream (0 when no upstream). */
+  ahead: number
+  behind: number
+  staged: GitFileChange[]
+  unstaged: GitFileChange[]
+  untracked: string[]
+}
+
 export interface CodeChange {
   id: string
   projectId: string
@@ -703,6 +824,12 @@ export interface ToolDefinition {
    * effects can't be inspected, so they're treated conservatively as mutating).
    */
   mutating?: boolean
+  /**
+   * EVERY call needs a fresh approval click: excluded from "allow for this
+   * conversation" grants and from auto-accept-edits. For tools whose calls
+   * are individually consequential (git_write commits).
+   */
+  noStandingApproval?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +905,12 @@ export interface ToolApprovalRequest {
   conversationId: string
   toolCall: ToolCallRecord
   risk: ToolRiskLevel
+  /**
+   * Main-computed context line the dialog shows prominently, e.g.
+   * "Commits 3 staged files on branch 'main' — the DEFAULT branch". Never
+   * model text.
+   */
+  note?: string
 }
 
 /**

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { ChatParams, ConversationMode, ModeModelDefault } from '@shared/types'
+import type { ChatParams, ConversationMode, ModeModelDefault, ResearchDepth } from '@shared/types'
+import { providerSupportsImageOutput, resolveImageModelCatalog } from '@shared/catalog'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
@@ -128,6 +129,108 @@ function ModeModelRow({
         )
       ) : (
         <span className="field-hint mode-model-hint">Uses the default above.</span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Provider + model picker for image generation. Unlike ModeModelRow the model
+ * list comes from the family's static image catalog (no live /models call —
+ * image models rarely appear there), with the usual custom-id escape hatch.
+ */
+function ImageModelRow({
+  value,
+  onChange,
+}: {
+  value: ModeModelDefault
+  onChange: (next: ModeModelDefault) => void
+}): React.JSX.Element {
+  const providers = useProvidersStore((s) => s.providers)
+  const [customMode, setCustomMode] = useState(false)
+  const [customDraft, setCustomDraft] = useState(value.modelId ?? '')
+
+  const provider = providers.find((p) => p.id === value.providerId) ?? null
+  const eligible = providers.filter((p) => p.enabled && providerSupportsImageOutput(p))
+  const catalog = provider ? resolveImageModelCatalog(provider) : null
+  const models = catalog?.imageModels ?? []
+  const inList = models.some((m) => m.id === value.modelId)
+  const showCustom =
+    !!provider && (customMode || models.length === 0 || (!!value.modelId && !inList))
+
+  useEffect(() => setCustomDraft(value.modelId ?? ''), [value.modelId])
+
+  const commitCustom = (): void =>
+    onChange({ providerId: value.providerId, modelId: customDraft.trim() || null })
+
+  return (
+    <div className="mode-model-row">
+      <span className="mode-model-label">Image model</span>
+      <select
+        className="select"
+        aria-label="Image provider"
+        value={value.providerId ?? ''}
+        onChange={(e) => {
+          setCustomMode(false)
+          const id = e.target.value
+          onChange(id ? { providerId: id, modelId: null } : { providerId: null, modelId: null })
+        }}
+      >
+        <option value="">Auto (first image-capable provider)</option>
+        {eligible.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+        {provider && !eligible.some((p) => p.id === provider.id) ? (
+          <option value={provider.id}>{provider.label}</option>
+        ) : null}
+      </select>
+      {provider ? (
+        showCustom ? (
+          <input
+            className="input mono"
+            aria-label="Custom image model id"
+            value={customDraft}
+            placeholder="model id"
+            spellCheck={false}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onBlur={commitCustom}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                commitCustom()
+              }
+            }}
+          />
+        ) : (
+          <select
+            className="select"
+            aria-label="Image model"
+            value={value.modelId ?? ''}
+            onChange={(e) => {
+              if (e.target.value === CUSTOM) {
+                setCustomMode(true)
+                setCustomDraft(value.modelId ?? '')
+                return
+              }
+              setCustomMode(false)
+              onChange({ providerId: value.providerId, modelId: e.target.value || null })
+            }}
+          >
+            <option value="">
+              Family default{catalog?.defaultImageModelId ? ` (${catalog.defaultImageModelId})` : ''}
+            </option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label ?? m.id}
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom model id…</option>
+          </select>
+        )
+      ) : (
+        <span className="field-hint mode-model-hint">Auto-picks the model too.</span>
       )}
     </div>
   )
@@ -475,6 +578,68 @@ export default function DefaultsTab() {
           </span>
         </span>
       </label>
+
+      <h4 className="section-subhead">Deep Research</h4>
+      <p className="field-hint">
+        The /research command (and the DR composer toggle) searches the web with web_search and
+        fetch_url — those two tools run without per-call approval during a research run — and
+        writes a report with numbered, clickable sources. The conversation&apos;s model writes the
+        final report; the worker model below (often a cheaper one) plans and gathers.
+      </p>
+      <div className="mode-model-list">
+        <ModeModelRow
+          label="Worker model"
+          value={{
+            providerId: settings.researchWorkerProviderId,
+            modelId: settings.researchWorkerModelId,
+          }}
+          onChange={(next) =>
+            void persist({
+              researchWorkerProviderId: next.providerId,
+              researchWorkerModelId: next.modelId,
+            })
+          }
+        />
+      </div>
+      <div className="param-row">
+        <label className="field-label" htmlFor="def-research-depth">
+          Default depth
+        </label>
+        <span className="param-spacer" aria-hidden="true" />
+        <select
+          id="def-research-depth"
+          className="select param-num wide"
+          value={settings.researchDefaultDepth}
+          onChange={(e) =>
+            void persist({ researchDefaultDepth: e.target.value as ResearchDepth })
+          }
+        >
+          <option value="quick">Quick — a couple of searches</option>
+          <option value="standard">Standard — several topics, more pages</option>
+          <option value="deep">Deep — the most topics, rounds and sources</option>
+        </select>
+      </div>
+
+      <h4 className="section-subhead">Image generation</h4>
+      <p className="field-hint">
+        Used by the generate_image tool (each call still asks for approval). Unset = the first
+        enabled provider that can generate images (OpenAI, Google Gemini or GLM/Zhipu). The model
+        dropdown lists that family&apos;s image models — or type a custom id.
+      </p>
+      <div className="mode-model-list">
+        <ImageModelRow
+          value={{
+            providerId: settings.defaultImageProviderId,
+            modelId: settings.defaultImageModelId,
+          }}
+          onChange={(next) =>
+            void persist({
+              defaultImageProviderId: next.providerId,
+              defaultImageModelId: next.modelId,
+            })
+          }
+        />
+      </div>
     </section>
   )
 }
