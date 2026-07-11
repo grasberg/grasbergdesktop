@@ -9,7 +9,8 @@ const RESULT_LIMIT = 40_000
 
 export interface ScheduledTaskSchedulerDeps {
   db: AppDatabase
-  run: (prompt: string) => Promise<string>
+  /** Runs the task's prompt headlessly (with its per-task grants applied). */
+  run: (task: ScheduledTask) => Promise<string>
   onChanged?: () => void
 }
 
@@ -61,7 +62,7 @@ export class ScheduledTaskScheduler {
       this.deps.db.scheduledTasks.markRunning(task.id, startedAt)
       this.deps.onChanged?.()
       try {
-        const output = await this.deps.run(task.prompt)
+        const output = await this.deps.run(task)
         const finishedAt = Date.now()
         const current = this.deps.db.scheduledTasks.getById(task.id)
         if (!current) continue

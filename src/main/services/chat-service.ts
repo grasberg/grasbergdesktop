@@ -1393,7 +1393,20 @@ export class ChatService {
     prompt: string,
     providerId?: string,
     modelId?: string,
-    opts?: { useTools?: boolean; agentId?: string; json?: boolean; signal?: AbortSignal }
+    opts?: {
+      useTools?: boolean
+      agentId?: string
+      json?: boolean
+      signal?: AbortSignal
+      /**
+       * Tool ids the user pre-approved for this headless run (scheduled
+       * tasks): they pass the approval gate that otherwise auto-declines.
+       * A 'deny' permission still refuses inside the executor.
+       */
+      approvedToolIds?: string[]
+      /** Working folder (code_projects row) for file/shell tools. */
+      projectId?: string | null
+    }
   ): Promise<string> {
     const settings = this.db.settings.get()
     const stub: Conversation = {
@@ -1405,7 +1418,7 @@ export class ChatService {
       systemPrompt: null,
       params: {},
       workspaceId: null,
-      projectId: null,
+      projectId: opts?.projectId ?? null,
       projectRef: null,
       moaPresetId: null,
       createdAt: 0,
@@ -1431,8 +1444,11 @@ export class ChatService {
 
     // Tool-enabled node: a bounded, non-streaming loop over the enabled tools.
     // Headless runs can never pop an approval dialog, so the approval callback
-    // auto-declines — only tools whose permission is 'always allow' actually
-    // run (web_search/fetch_url by default; users can grant more in Settings).
+    // auto-declines everything except the caller's pre-approved tool ids
+    // (scheduled tasks: consented once at create time). Otherwise only tools
+    // whose permission is 'always allow' actually run (web_search/fetch_url
+    // by default; users can grant more in Settings).
+    const approvedTools = new Set(opts?.approvedToolIds ?? [])
     const tools = this.options.tools
     const toolDefs: AdapterToolDef[] =
       opts?.useTools && tools
@@ -1474,7 +1490,10 @@ export class ChatService {
       for (const call of result.toolCalls) {
         const out = await tools.executor.execute(call, {
           conversation: stub,
-          approval: async () => ({ approved: false, scope: 'once' as const }),
+          approval: async (req) => ({
+            approved: approvedTools.has(req.toolCall.name),
+            scope: 'once' as const,
+          }),
         })
         messages.push({ role: 'tool', content: out, toolCallId: call.id })
       }

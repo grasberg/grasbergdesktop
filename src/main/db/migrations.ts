@@ -782,4 +782,16 @@ export const MIGRATIONS: Migration[] = [
          ON scheduled_tasks(enabled, next_run_at)`,
     ],
   },
+  {
+    version: 29,
+    name: 'scheduled-task-preapproval',
+    // Per-task standing approvals for headless runs: tool ids the user
+    // consented to when creating the task, plus an optional working folder
+    // (code_projects row) for file/shell tools. No FK on project_id — a
+    // forgotten folder just resolves to null at run time.
+    statements: [
+      `ALTER TABLE scheduled_tasks ADD COLUMN approved_tools_json TEXT NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE scheduled_tasks ADD COLUMN project_id TEXT`,
+    ],
+  },
 ]

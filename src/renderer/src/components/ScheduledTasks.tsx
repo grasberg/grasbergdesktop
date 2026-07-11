@@ -1,9 +1,11 @@
 /** Standalone clock-task popover beside Home (independent from Workflows). */
 
 import { useEffect, useRef, useState } from 'react'
-import type { ScheduledTaskRecurrence } from '@shared/types'
+import type { CodeProject, ScheduledTaskRecurrence } from '@shared/types'
+import { unwrap } from '@/api/uld'
 import { useNow } from '@/hooks/useNow'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
+import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
 
 const ClockIcon = (
@@ -51,10 +53,32 @@ export default function ScheduledTasks(): React.JSX.Element {
   const [prompt, setPrompt] = useState('')
   const [runAt, setRunAt] = useState(initialDateTime)
   const [recurrence, setRecurrence] = useState<ScheduledTaskRecurrence>('once')
+  const [grantIds, setGrantIds] = useState<string[]>([])
+  const [projectId, setProjectId] = useState('')
+  const [projects, setProjects] = useState<CodeProject[]>([])
   const [saving, setSaving] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const tools = useToolsStore((state) => state.tools)
+  const permissions = useToolsStore((state) => state.permissions)
   useNow()
+
+  // Approval-gated tools the user may pre-approve for a task's headless runs.
+  // noStandingApproval tools (git_write) keep their per-call contract, and a
+  // task must not mint further scheduled tasks.
+  const grantable = tools.filter(
+    (tool) =>
+      tool.enabled &&
+      tool.noStandingApproval !== true &&
+      tool.id !== 'schedule_task' &&
+      effectivePermission(permissions, tool) === 'ask'
+  )
+
+  const toggleGrant = (toolId: string): void => {
+    setGrantIds((ids) =>
+      ids.includes(toolId) ? ids.filter((id) => id !== toolId) : [...ids, toolId]
+    )
+  }
 
   const failed = tasks.some((task) => task.lastStatus === 'error')
 
@@ -88,6 +112,22 @@ export default function ScheduledTasks(): React.JSX.Element {
     setPrompt('')
     setRunAt(initialDateTime())
     setRecurrence('once')
+    setGrantIds([])
+    setProjectId('')
+  }
+
+  const openCreateForm = (): void => {
+    setCreating((value) => !value)
+    setConfirmingId(null)
+    if (creating) return
+    void useToolsStore.getState().load()
+    void (async () => {
+      try {
+        setProjects(await unwrap(window.uld.code.projectsList()))
+      } catch {
+        setProjects([])
+      }
+    })()
   }
 
   const createTask = async (): Promise<void> => {
@@ -102,6 +142,8 @@ export default function ScheduledTasks(): React.JSX.Element {
       prompt: prompt.trim(),
       recurrence,
       runAt: timestamp,
+      approvedToolIds: grantIds,
+      projectId: grantIds.length > 0 && projectId ? projectId : null,
     })
     setSaving(false)
     if (created) {
@@ -140,10 +182,7 @@ export default function ScheduledTasks(): React.JSX.Element {
             <button
               type="button"
               className="btn btn-ghost sched-manage"
-              onClick={() => {
-                setCreating((value) => !value)
-                setConfirmingId(null)
-              }}
+              onClick={openCreateForm}
             >
               {creating ? 'Cancel' : '+ Add'}
             </button>
@@ -189,6 +228,40 @@ export default function ScheduledTasks(): React.JSX.Element {
                   <option value="weekly">Weekly</option>
                 </select>
               </div>
+              {grantable.length > 0 ? (
+                <div className="sched-grants">
+                  <span className="sched-grants-label">
+                    Pre-approve tools for this task's runs
+                  </span>
+                  <div className="sched-grants-list">
+                    {grantable.map((tool) => (
+                      <label key={tool.id} className="sched-grant-check">
+                        <input
+                          type="checkbox"
+                          checked={grantIds.includes(tool.id)}
+                          onChange={() => toggleGrant(tool.id)}
+                        />
+                        <span>{tool.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {grantIds.length > 0 ? (
+                    <select
+                      className="select"
+                      value={projectId}
+                      aria-label="Working folder for file and shell tools"
+                      onChange={(event) => setProjectId(event.target.value)}
+                    >
+                      <option value="">No working folder</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name || project.path}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="btn btn-primary sched-create-submit"
@@ -227,7 +300,7 @@ export default function ScheduledTasks(): React.JSX.Element {
                       <span className="sched-item-meta">
                         {completed
                           ? 'Completed'
-                          : `${RECURRENCE_LABEL[task.recurrence]} · ${dateTimeLabel(task.nextRunAt)}${task.enabled ? '' : ' · paused'}`}
+                          : `${RECURRENCE_LABEL[task.recurrence]} · ${dateTimeLabel(task.nextRunAt)}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.enabled ? '' : ' · paused'}`}
                       </span>
                     </div>
                     {!completed ? (

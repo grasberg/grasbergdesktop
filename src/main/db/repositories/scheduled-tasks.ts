@@ -13,12 +13,23 @@ interface ScheduledTaskRow {
   recurrence: ScheduledTask['recurrence']
   next_run_at: number | null
   enabled: number
+  approved_tools_json: string
+  project_id: string | null
   last_run_at: number | null
   last_status: ScheduledTaskStatus
   last_output: string
   last_error: string | null
   created_at: number
   updated_at: number
+}
+
+function parseApprovedTools(json: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
 }
 
 function toTask(row: ScheduledTaskRow): ScheduledTask {
@@ -29,6 +40,8 @@ function toTask(row: ScheduledTaskRow): ScheduledTask {
     recurrence: row.recurrence,
     nextRunAt: row.next_run_at,
     enabled: row.enabled === 1,
+    approvedToolIds: parseApprovedTools(row.approved_tools_json),
+    projectId: row.project_id,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
     lastOutput: row.last_output,
@@ -87,6 +100,8 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
         recurrence: input.recurrence,
         nextRunAt: input.runAt,
         enabled: true,
+        approvedToolIds: input.approvedToolIds ?? [],
+        projectId: input.projectId ?? null,
         lastRunAt: null,
         lastStatus: 'idle',
         lastOutput: '',
@@ -96,10 +111,20 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
       }
       driver.run(
         `INSERT INTO scheduled_tasks
-           (id, title, prompt, recurrence, next_run_at, enabled, last_run_at,
-            last_status, last_output, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, NULL, 'idle', '', NULL, ?, ?)`,
-        [task.id, task.title, task.prompt, task.recurrence, task.nextRunAt, now, now]
+           (id, title, prompt, recurrence, next_run_at, enabled, approved_tools_json,
+            project_id, last_run_at, last_status, last_output, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL, 'idle', '', NULL, ?, ?)`,
+        [
+          task.id,
+          task.title,
+          task.prompt,
+          task.recurrence,
+          task.nextRunAt,
+          JSON.stringify(task.approvedToolIds),
+          task.projectId,
+          now,
+          now,
+        ]
       )
       return task
     },

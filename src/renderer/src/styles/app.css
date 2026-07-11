@@ -1007,6 +1007,40 @@ kbd {
   font-size: 0.75rem;
 }
 
+.sched-grants {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sched-grants-label {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.sched-grants-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.sched-grant-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.sched-grant-check input {
+  accent-color: var(--accent);
+}
+
+.sched-grants .select {
+  padding-inline: 7px;
+  font-size: 0.75rem;
+}
+
 .sched-popover-list {
   max-height: min(360px, 60vh);
   margin: 0;

@@ -438,7 +438,12 @@ function bootstrap(): void {
 
   const clockScheduler = new ScheduledTaskScheduler({
     db: database,
-    run: (prompt) => chatService!.generateForWorkflow(prompt, undefined, undefined, { useTools: true }),
+    run: (task) =>
+      chatService!.generateForWorkflow(task.prompt, undefined, undefined, {
+        useTools: true,
+        approvedToolIds: task.approvedToolIds,
+        projectId: task.projectId,
+      }),
     onChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
   })
   scheduledTaskScheduler = clockScheduler

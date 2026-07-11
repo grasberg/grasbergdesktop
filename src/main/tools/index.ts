@@ -178,6 +178,9 @@ export function createToolSystem(
         db.scheduledTasks.remove(id)
         options.onScheduledTasksChanged?.()
       },
+      conversationProjectId: (conversationId) =>
+        db.conversations.getById(conversationId)?.projectId ?? null,
+      projectPath: (projectId) => db.code.projectGetById(projectId)?.path ?? null,
     },
     skills: {
       getEnabledByName: (name) => {

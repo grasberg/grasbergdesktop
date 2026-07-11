@@ -169,6 +169,10 @@ export interface ToolExecutorDeps {
     list(): ScheduledTask[]
     getById(id: string): ScheduledTask | null
     remove(id: string): void
+    /** Fresh conversation → linked projectId (tasks inherit the folder). */
+    conversationProjectId(conversationId: string): string | null
+    /** projectId → absolute path, for result/approval texts. */
+    projectPath(projectId: string): string | null
   } | null
   /**
    * Lazily creates + links a Work task's own workspace folder (registered as
@@ -540,6 +544,13 @@ function isRecurrence(value: string): value is ScheduledTaskRecurrence {
   return SCHEDULE_RECURRENCES.includes(value)
 }
 
+/** The 'tools' arg as given (unvalidated) — for the approval note. */
+function parseScheduleGrantArgs(args: Record<string, unknown>): string[] {
+  return Array.isArray(args.tools)
+    ? args.tools.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+    : []
+}
+
 function clampIntArg(args: Record<string, unknown>, key: string, def: number, max: number): number {
   const value = args[key]
   const raw = typeof value === 'number' ? Math.floor(value) : NaN
@@ -816,7 +827,7 @@ export class ToolExecutor {
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
   ): Promise<string | undefined> {
-    if (definition.id === 'schedule_task') return this.scheduleTaskNote(args)
+    if (definition.id === 'schedule_task') return this.scheduleTaskNote(args, ctx)
     if (definition.id !== 'git_write' || !this.deps.gitWrite) return undefined
     const root = this.deps.getProjectRoot(ctx.conversation)
     if (!root) return undefined
@@ -909,7 +920,7 @@ export class ToolExecutor {
       case 'update_task_list':
         return this.runUpdateTaskList(args, ctx)
       case 'schedule_task':
-        return this.runScheduleTask(args)
+        return this.runScheduleTask(args, ctx)
       case 'ask_user_question':
         return this.runAskUserQuestion(args, ctx)
       case 'repo_map':
@@ -1412,14 +1423,25 @@ export class ToolExecutor {
   // -- scheduled tasks ------------------------------------------------------------
 
   /** Approval-dialog context line for schedule_task (best-effort). */
-  private scheduleTaskNote(args: Record<string, unknown>): string | undefined {
+  private scheduleTaskNote(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): string | undefined {
     try {
       const action = getString(args, 'action')
       if (action === 'create') {
         const title = getString(args, 'title') ?? ''
         const recurrence = getString(args, 'recurrence') ?? ''
         const cadence = recurrence === 'once' ? 'one-time' : recurrence
-        return `Creates a ${cadence} scheduled task "${title}" that runs its prompt automatically with tools enabled`
+        const grants = parseScheduleGrantArgs(args)
+        let note = `Creates a ${cadence} scheduled task "${title}" that runs its prompt automatically`
+        if (grants.length > 0) {
+          note += ` — pre-approves for its runs: ${grants.join(', ')}`
+          const projectId = this.deps.scheduledTasks?.conversationProjectId(ctx.conversation.id)
+          const root = projectId ? this.deps.scheduledTasks?.projectPath(projectId) : null
+          if (root) note += ` (working folder: ${root})`
+        }
+        return note
       }
       if (action === 'cancel') {
         const task = this.deps.scheduledTasks?.getById(getString(args, 'id') ?? '')
@@ -1431,7 +1453,7 @@ export class ToolExecutor {
     return undefined
   }
 
-  private runScheduleTask(args: Record<string, unknown>): string {
+  private runScheduleTask(args: Record<string, unknown>, ctx: ToolExecuteContext): string {
     const tasks = this.deps.scheduledTasks
     if (!tasks) return 'Error: scheduled tasks are unavailable in this context.'
     const [action, actionError] = requireStringArg(args, 'action')
@@ -1474,6 +1496,46 @@ export class ToolExecutor {
     if (!recurrence || !isRecurrence(recurrence)) {
       return 'Error: recurrence must be one of "once", "hourly", "daily", "weekly".'
     }
+
+    // Pre-approved tools: standing grants for this task's headless runs. Only
+    // known, enabled tools qualify; noStandingApproval tools never do (their
+    // contract is a fresh approval per call), nor schedule_task itself (a task
+    // must not mint further standing grants).
+    if (args.tools !== undefined && !Array.isArray(args.tools)) {
+      return "Error: 'tools' must be an array of tool ids."
+    }
+    const grantIds: string[] = []
+    for (const entry of Array.isArray(args.tools) ? args.tools : []) {
+      if (typeof entry !== 'string' || entry.trim().length === 0) {
+        return "Error: 'tools' must be an array of tool ids."
+      }
+      const tool = this.deps.registry.resolveForCall(entry.trim())
+      if (!tool || !tool.enabled) {
+        return `Error: unknown or disabled tool '${entry}' in 'tools'.`
+      }
+      if (tool.noStandingApproval === true || tool.id === 'schedule_task') {
+        return `Error: '${tool.id}' requires a fresh approval for every call and cannot be pre-approved for a scheduled task.`
+      }
+      if (!grantIds.includes(tool.id)) grantIds.push(tool.id)
+    }
+
+    // The task inherits this conversation's working folder so pre-approved
+    // file/shell tools have a root; a folderless Work task gets its own
+    // workspace (same lazy path the file tools use).
+    let projectId = grantIds.length > 0 ? tasks.conversationProjectId(ctx.conversation.id) : null
+    if (
+      grantIds.length > 0 &&
+      !projectId &&
+      ctx.conversation.mode === 'work' &&
+      this.deps.ensureWorkspaceRoot
+    ) {
+      try {
+        projectId = this.deps.ensureWorkspaceRoot(ctx.conversation.id).projectId
+      } catch {
+        projectId = null
+      }
+    }
+
     const resolved = resolveFirstRun(
       {
         recurrence,
@@ -1484,12 +1546,28 @@ export class ToolExecutor {
       Date.now()
     )
     if ('error' in resolved) return resolved.error
-    const task = tasks.create({ title, prompt, recurrence, runAt: resolved.runAt })
+    const task = tasks.create({
+      title,
+      prompt,
+      recurrence,
+      runAt: resolved.runAt,
+      approvedToolIds: grantIds,
+      projectId,
+    })
     const cadence = recurrence === 'once' ? 'It runs once' : `It repeats ${recurrence}`
+    let grantNote = ''
+    if (grantIds.length > 0) {
+      const root = projectId ? tasks.projectPath(projectId) : null
+      grantNote = ` Pre-approved tools: ${grantIds.join(', ')}${
+        root
+          ? ` (working folder: ${root}).`
+          : '. WARNING: no working folder is attached — file and shell tools will fail at run time; create the task from a conversation with a connected folder if it needs one.'
+      }`
+    }
     return (
       `Scheduled task "${task.title}" created (id: ${task.id}). ` +
       `First run: ${formatLocalRunTime(resolved.runAt)}. ${cadence}; the user can pause or ` +
-      'remove it from the Scheduled tasks panel.'
+      `remove it from the Scheduled tasks panel.${grantNote}`
     )
   }
 

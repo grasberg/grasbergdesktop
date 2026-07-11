@@ -53,6 +53,29 @@ describe('scheduled tasks repository', () => {
     })
     expect(db.scheduledTasks.getById(task.id)?.recurrence).toBe('hourly')
   })
+
+  it('round-trips per-task grants and working folder (v29)', () => {
+    const task = db.scheduledTasks.create({
+      title: 'Script run',
+      prompt: 'Run the script.',
+      recurrence: 'daily',
+      runAt: Date.now() + 60_000,
+      approvedToolIds: ['run_shell_command', 'write_file'],
+      projectId: 'proj-1',
+    })
+    const stored = db.scheduledTasks.getById(task.id)!
+    expect(stored.approvedToolIds).toEqual(['run_shell_command', 'write_file'])
+    expect(stored.projectId).toBe('proj-1')
+    // Defaults when omitted.
+    const plain = db.scheduledTasks.create({
+      title: 'Plain',
+      prompt: 'P.',
+      recurrence: 'once',
+      runAt: Date.now() + 60_000,
+    })
+    expect(db.scheduledTasks.getById(plain.id)?.approvedToolIds).toEqual([])
+    expect(db.scheduledTasks.getById(plain.id)?.projectId).toBeNull()
+  })
 })
 
 describe('standalone scheduled task scheduler', () => {
@@ -69,7 +92,9 @@ describe('standalone scheduled task scheduler', () => {
 
     await scheduler.tick()
 
-    expect(run).toHaveBeenCalledWith('Do the thing')
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ id: task.id, prompt: 'Do the thing' })
+    )
     const finished = db.scheduledTasks.getById(task.id)!
     expect(finished.lastStatus).toBe('ok')
     expect(finished.lastOutput).toBe('Finished result')

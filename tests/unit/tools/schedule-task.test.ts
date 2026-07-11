@@ -146,6 +146,66 @@ describe('schedule_task execution', () => {
     expect(db.scheduledTasks.list()).toEqual([])
   })
 
+  it('pre-approves valid tools; folderless grants carry a warning', async () => {
+    const { executor } = createToolSystem(db)
+    const result = await executor.execute(
+      call({
+        action: 'create',
+        title: 'Fetcher',
+        prompt: 'Fetch the page.',
+        recurrence: 'hourly',
+        tools: ['fetch_url', 'fetch_url'],
+      }),
+      { conversation, approval: vi.fn(async () => APPROVE) }
+    )
+    expect(result).toContain('Pre-approved tools: fetch_url')
+    expect(result).toContain('WARNING: no working folder')
+    const stored = db.scheduledTasks.list()[0]
+    expect(stored.approvedToolIds).toEqual(['fetch_url']) // deduped
+    expect(stored.projectId).toBeNull()
+  })
+
+  it('inherits the conversation working folder for granted tools', async () => {
+    const project = db.code.projectUpsertByPath(dir, 'Proj')
+    const conv = db.conversations.create({ mode: 'work', projectId: project.id })
+    const { executor } = createToolSystem(db)
+    const result = await executor.execute(
+      call({
+        action: 'create',
+        title: 'Writer',
+        prompt: 'Write the report.',
+        recurrence: 'daily',
+        time: '09:00',
+        tools: ['write_file'],
+      }),
+      { conversation: conv, approval: vi.fn(async () => APPROVE) }
+    )
+    expect(result).toContain('working folder')
+    expect(result).not.toContain('WARNING')
+    expect(db.scheduledTasks.list()[0].projectId).toBe(project.id)
+  })
+
+  it('refuses grants for unknown, hidden and per-call-approval tools', async () => {
+    const { executor } = createToolSystem(db)
+    const ctx = { conversation, approval: vi.fn(async () => APPROVE) }
+    const base = { action: 'create', title: 'T', prompt: 'P', recurrence: 'hourly' }
+
+    expect(await executor.execute(call({ ...base, tools: ['nope'] }), ctx)).toContain(
+      "unknown or disabled tool 'nope'"
+    )
+    // run_shell_command is hidden while shell execution is off => not grantable.
+    expect(
+      await executor.execute(call({ ...base, tools: ['run_shell_command'] }), ctx)
+    ).toContain('unknown or disabled')
+    expect(await executor.execute(call({ ...base, tools: ['git_write'] }), ctx)).toContain(
+      'cannot be pre-approved'
+    )
+    expect(await executor.execute(call({ ...base, tools: ['schedule_task'] }), ctx)).toContain(
+      'cannot be pre-approved'
+    )
+    expect(db.scheduledTasks.list()).toEqual([])
+  })
+
   it('reports unavailable when built without the dep', async () => {
     const executor = new ToolExecutor({
       registry: createToolSystem(db).registry,

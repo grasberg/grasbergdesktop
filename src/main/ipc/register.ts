@@ -1363,7 +1363,27 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     prompt: z.string().trim().min(1).max(20_000),
     recurrence: z.enum(['once', 'hourly', 'daily', 'weekly']),
     runAt: z.number().int().positive(),
+    approvedToolIds: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
+    projectId: z.string().trim().min(1).nullable().optional(),
   }) satisfies z.ZodType<ScheduledTaskInput>
+
+  /**
+   * Pre-approved tools become standing grants for the task's headless runs —
+   * only known, enabled tools qualify, and never noStandingApproval ones
+   * (their contract is a fresh approval per call).
+   */
+  const validateScheduledTaskGrants = (input: ScheduledTaskInput): void => {
+    for (const toolId of input.approvedToolIds ?? []) {
+      const tool = toolSystem.registry.getById(toolId)
+      if (!tool || !tool.enabled) throw invalid(`Unknown or disabled tool: ${toolId}`)
+      if (tool.noStandingApproval === true || tool.id === 'schedule_task') {
+        throw invalid(`The tool '${toolId}' cannot be pre-approved for scheduled runs.`)
+      }
+    }
+    if (input.projectId && !db.code.projectGetById(input.projectId)) {
+      throw invalid('The selected working folder is no longer registered.')
+    }
+  }
 
   const signalScheduledTasksChanged = (): void => {
     for (const win of deps.getWindows()) {
@@ -1379,6 +1399,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     if (parsed.runAt < Date.now() - 60_000) {
       throw invalid('The first run time cannot be in the past.')
     }
+    validateScheduledTaskGrants(parsed)
     const task = db.scheduledTasks.create(parsed)
     signalScheduledTasksChanged()
     return task

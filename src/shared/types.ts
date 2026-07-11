@@ -1299,6 +1299,13 @@ export interface ScheduledTask {
   recurrence: ScheduledTaskRecurrence
   nextRunAt: number | null
   enabled: boolean
+  /**
+   * Tool ids pre-approved for this task's headless runs (consented once, in
+   * the create approval/dialog). Everything else still auto-declines there.
+   */
+  approvedToolIds: string[]
+  /** Working folder (code_projects row) for file/shell tools, or null. */
+  projectId: string | null
   lastRunAt: number | null
   lastStatus: ScheduledTaskStatus
   lastOutput: string
@@ -1312,6 +1319,8 @@ export interface ScheduledTaskInput {
   prompt: string
   recurrence: ScheduledTaskRecurrence
   runAt: number
+  approvedToolIds?: string[]
+  projectId?: string | null
 }
 
 // ---------------------------------------------------------------------------

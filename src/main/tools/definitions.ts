@@ -690,8 +690,12 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       'panel, not in this chat. For "create": give title, prompt, recurrence, and when — ' +
       'either time ("HH:MM", 24-hour local; a passed time rolls to the next occurrence), ' +
       'optionally with date ("YYYY-MM-DD"), or in_minutes from now. "Every hour" needs no ' +
-      'time at all. Use "list" to see existing tasks with their ids, "cancel" with an id to ' +
-      'remove one. Each call needs the user\'s approval.',
+      'time at all. In headless runs approval-gated tools are normally auto-declined; list ' +
+      'the tool ids the prompt needs in "tools" to pre-approve them for this task (the ' +
+      "user's approval of THIS call is that consent — the approval dialog names them). The " +
+      "task inherits this conversation's working folder for file/shell tools. Use \"list\" " +
+      'to see existing tasks with their ids, "cancel" with an id to remove one. Each call ' +
+      "needs the user's approval.",
     parameters: {
       type: 'object',
       properties: {
@@ -730,6 +734,15 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'integer',
           minimum: 1,
           description: 'For "create": run this many minutes from now (instead of time/date).',
+        },
+        tools: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'For "create": tool ids to pre-approve for this task\'s headless runs, e.g. ' +
+            '["run_shell_command", "write_file"]. Omit for prompts that only need ' +
+            'always-allowed tools. Tools requiring a fresh approval per call (git_write) ' +
+            'cannot be pre-approved.',
         },
         id: {
           type: 'string',
