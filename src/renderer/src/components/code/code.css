@@ -1,64 +1,11 @@
 /*
- * Code mode styles: three-pane layout (tree | chat | changes), file tree,
- * file preview modal, proposed-changes panel and diff rendering.
- * All colors derive from theme.css tokens, so both themes work automatically;
- * diff tints get explicit per-theme strengths at the bottom.
+ * Code-pipeline styles used by the Work panel: file tree, file preview modal,
+ * connect-a-folder panel, center-bar controls, proposed-changes panel and
+ * diff rendering. All colors derive from theme.css tokens, so both themes
+ * work automatically; diff tints get explicit per-theme strengths at the
+ * bottom. (The old three-pane .code-view layout died with CodeView — the
+ * Work panel's layout lives in work/work.css.)
  */
-
-/* ------------------------------------------------------------ layout */
-
-.code-view {
-  position: relative;
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 320px;
-  flex: 1;
-  min-height: 0;
-  height: 100%;
-}
-
-.code-view.code-view-collapsed {
-  grid-template-columns: 240px minmax(0, 1fr) 36px;
-}
-
-.code-pane {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.code-pane-left {
-  border-right: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.code-pane-right {
-  position: relative;
-  border-left: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-/* Two panes under 1100px: the open changes panel floats over the chat. */
-@media (max-width: 1100px) {
-  .code-view,
-  .code-view.code-view-collapsed {
-    grid-template-columns: 200px minmax(0, 1fr) 36px;
-  }
-
-  .code-view:not(.code-view-collapsed) {
-    grid-template-columns: 200px minmax(0, 1fr) 0;
-  }
-
-  .code-view:not(.code-view-collapsed) .code-pane-right {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 320px;
-    z-index: 40;
-    box-shadow: var(--shadow);
-  }
-}
 
 /* ------------------------------------------------------- grant panel */
 
@@ -323,48 +270,6 @@
   padding: 14px 4px;
   color: var(--text-muted);
   font-size: 0.78rem;
-}
-
-.code-changes-collapse {
-  position: absolute;
-  top: 10px;
-  right: 8px;
-  z-index: 2;
-}
-
-.code-changes-rail {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.code-changes-rail:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.code-changes-rail-count {
-  min-width: 18px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 0.68rem;
-  font-weight: 600;
-  text-align: center;
-}
-
-.code-changes-rail-label {
-  writing-mode: vertical-rl;
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
 }
 
 .code-changes-history-toggle {

@@ -96,17 +96,17 @@ describe('readProjectInstructions', () => {
 })
 
 describe('expandSlashCommand (/init)', () => {
-  it('expands /init to the AGENTS.md init prompt in code mode only', () => {
-    expect(expandSlashCommand('/init', 'code')).toBe(INIT_COMMAND_PROMPT)
-    expect(expandSlashCommand('  /init  ', 'code')).toBe(INIT_COMMAND_PROMPT)
+  it('expands /init to the AGENTS.md init prompt in work mode only', () => {
+    expect(expandSlashCommand('/init', 'work')).toBe(INIT_COMMAND_PROMPT)
+    expect(expandSlashCommand('  /init  ', 'work')).toBe(INIT_COMMAND_PROMPT)
     expect(INIT_COMMAND_PROMPT).toContain('AGENTS.md')
     expect(INIT_COMMAND_PROMPT).toContain('write_file')
   })
 
   it('passes everything else through verbatim', () => {
     expect(expandSlashCommand('/init', 'chat')).toBe('/init')
-    expect(expandSlashCommand('/init now please', 'code')).toBe('/init now please')
-    expect(expandSlashCommand('hello', 'code')).toBe('hello')
+    expect(expandSlashCommand('/init now please', 'work')).toBe('/init now please')
+    expect(expandSlashCommand('hello', 'work')).toBe('hello')
   })
 })
 
@@ -116,7 +116,7 @@ describe('expandSlashCommand (/skill)', () => {
     expect(bare).toContain('use_skill')
     expect(bare).toContain('"triage"')
 
-    const withTask = expandSlashCommand('/skill triage sort these five bug reports', 'code')
+    const withTask = expandSlashCommand('/skill triage sort these five bug reports', 'work')
     expect(withTask).toContain('"triage"')
     expect(withTask).toContain('sort these five bug reports')
   })
@@ -127,7 +127,7 @@ describe('expandSlashCommand (/skill)', () => {
   })
 
   it('isExpandingSlashCommand mirrors the expansion rules', () => {
-    expect(isExpandingSlashCommand('/init', 'code')).toBe(true)
+    expect(isExpandingSlashCommand('/init', 'work')).toBe(true)
     expect(isExpandingSlashCommand('/init', 'chat')).toBe(false)
     expect(isExpandingSlashCommand('/skill triage', 'chat')).toBe(true)
     expect(isExpandingSlashCommand('hello', 'chat')).toBe(false)

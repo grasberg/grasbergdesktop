@@ -15,12 +15,14 @@ import type {
   AgentProfile,
   AgentProfileInput,
   AgentProfilePatch,
+  AgentRun,
   AppInfo,
   AppSettings,
   Attachment,
   AuthMode,
   ChatParams,
   CodeChange,
+  Checkpoint,
   CodeProject,
   GitStatus,
   Conversation,
@@ -30,8 +32,6 @@ import type {
   CustomToolInfo,
   CustomToolInput,
   CustomToolPatch,
-  Document,
-  DocumentExportFormat,
   FileTreeNode,
   ImBridgeStatus,
   KnowledgeBase,
@@ -53,7 +53,9 @@ import type {
   WorkflowGraph,
   WorkflowInput,
   WorkflowRun,
+  WorkflowRunFinishedEvent,
   WorkflowRunResult,
+  WorkflowsOverview,
   Message,
   ModelInfo,
   NormalizedError,
@@ -66,6 +68,8 @@ import type {
   ProviderConfigPatch,
   ProviderTypeMeta,
   ResearchDepth,
+  ScheduledTask,
+  ScheduledTaskInput,
   PromptTemplate,
   PromptTemplateInput,
   PromptTemplatePatch,
@@ -81,6 +85,7 @@ import type {
   Workspace,
   WorkspaceItem,
   WorkspaceItemKind,
+  WorktreeInfo,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -101,6 +106,7 @@ export const CHANNELS = {
   appGetInfo: 'app:getInfo',
   appPickFolder: 'app:pickFolder',
   appPickFiles: 'app:pickFiles',
+  appStorePastedImage: 'app:storePastedImage',
   appReadAttachment: 'app:readAttachment',
   /** Save a stored (generated) image to a user-chosen path. */
   appSaveAttachmentAs: 'app:saveAttachmentAs',
@@ -132,6 +138,7 @@ export const CHANNELS = {
   convDelete: 'conv:delete',
   convMessages: 'conv:messages',
   convExport: 'conv:export',
+  convFork: 'conv:fork',
 
   // projects (per-mode organizational grouping of conversations)
   projectsList: 'projects:list',
@@ -162,10 +169,12 @@ export const CHANNELS = {
   workspaceItemUpdate: 'workspace:items:update',
   workspaceItemDelete: 'workspace:items:delete',
 
-  // code mode
+  // working folders + code pipeline (Work mode)
   codeProjectsList: 'code:projects:list',
   codeProjectOpen: 'code:projects:open',
   codeProjectForget: 'code:projects:forget',
+  /** Opens the project's folder in the OS file explorer. */
+  codeProjectReveal: 'code:projects:reveal',
   codeFileTree: 'code:fileTree',
   codeReadFile: 'code:readFile',
   codeChangesList: 'code:changes:list',
@@ -183,6 +192,10 @@ export const CHANNELS = {
   codeGitCommit: 'code:git:commit',
   codeGitCreateBranch: 'code:git:createBranch',
   codeGitGenerateCommitMessage: 'code:git:generateCommitMessage',
+  codeWorktreeCreate: 'code:worktree:create',
+  codeOpenInIde: 'code:ide:open',
+  codeCheckpointsList: 'code:checkpoints:list',
+  codeCheckpointRestore: 'code:checkpoints:restore',
 
   // tools
   toolsList: 'tools:list',
@@ -234,12 +247,6 @@ export const CHANNELS = {
   imSetTelegram: 'im:setTelegram',
   imSetWebhook: 'im:setWebhook',
 
-  // Write / Design documents
-  documentsGet: 'documents:get',
-  documentsSave: 'documents:save',
-  documentsListHtml: 'documents:listHtml',
-  documentsExport: 'documents:export',
-
   // Workflows
   workflowsList: 'workflows:list',
   workflowsGet: 'workflows:get',
@@ -249,12 +256,24 @@ export const CHANNELS = {
   workflowsRun: 'workflows:run',
   workflowsRunById: 'workflows:runById',
   workflowsRuns: 'workflows:runs',
+  /** Scheduled workflows with latest-run status + recent runs across all workflows. */
+  workflowsOverview: 'workflows:overview',
+
+  // Standalone scheduled tasks (clock menu; independent from workflows)
+  scheduledTasksList: 'scheduledTasks:list',
+  scheduledTasksCreate: 'scheduledTasks:create',
+  scheduledTasksSetEnabled: 'scheduledTasks:setEnabled',
+  scheduledTasksDelete: 'scheduledTasks:delete',
 
   // agent profiles
   agentsList: 'agents:list',
   agentsCreate: 'agents:create',
   agentsUpdate: 'agents:update',
   agentsDelete: 'agents:delete',
+  agentRunsList: 'agents:runs:list',
+  agentRunStop: 'agents:runs:stop',
+  agentPackExport: 'agents:pack:export',
+  agentPackImport: 'agents:pack:import',
 
   // knowledge bases (RAG)
   kbList: 'kb:list',
@@ -281,6 +300,13 @@ export const CHANNELS = {
    * changes proposed by OTHER conversations.
    */
   codeChangesChanged: 'push:codeChangesChanged',
+  /**
+   * Sent with WorkflowRunFinishedEvent whenever a saved-workflow run is
+   * persisted (manual or scheduled) — keeps the Home overview and the
+   * sidebar Scheduled section live in every window.
+   */
+  workflowRunFinished: 'push:workflowRunFinished',
+  scheduledTasksChanged: 'push:scheduledTasksChanged',
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
@@ -334,9 +360,9 @@ export interface ConvUpdateRequest {
     modelId: string | null
     systemPrompt: string | null
     params: ChatParams
-    /** Link/unlink a cowork workspace (cowork mode). */
+    /** Link/unlink the task's workspace (work mode). */
     workspaceId: string | null
-    /** Link/unlink a code project (code mode). */
+    /** Link/unlink the working folder (work mode). */
     projectId: string | null
     /** File/unfile the task under an organizational Project (any mode). */
     projectRef: string | null
@@ -456,6 +482,11 @@ export interface PickFilesResult {
   attachments: Attachment[]
 }
 
+export interface StorePastedImageInput {
+  mimeType: string
+  dataBase64: string
+}
+
 // ---------------------------------------------------------------------------
 // The API preload exposes as window.uld
 // ---------------------------------------------------------------------------
@@ -467,6 +498,8 @@ export interface UldApi {
     pickFolder(): Promise<IpcResult<string | null>>
     /** Native file picker; reads text content, enforces size limits. */
     pickFiles(): Promise<IpcResult<PickFilesResult>>
+    /** Persists an image pasted from the renderer clipboard as an attachment. */
+    storePastedImage(input: StorePastedImageInput): Promise<IpcResult<Attachment>>
     /** Reads a stored image attachment as a data URL (null when missing). */
     readAttachment(storageKey: string): Promise<IpcResult<{ dataUrl: string } | null>>
     /** Copies a stored image attachment to a user-picked path (save dialog). */
@@ -508,6 +541,7 @@ export interface UldApi {
     messages(conversationId: string): Promise<IpcResult<Message[]>>
     /** Serializes a conversation to a file via a native save dialog (main). */
     export(req: ConvExportRequest): Promise<IpcResult<ConvExportResult>>
+    fork(id: string, throughSeq?: number): Promise<IpcResult<Conversation>>
   }
   projects: {
     /** Organizational projects, newest first; scoped by mode when given. */
@@ -567,6 +601,8 @@ export interface UldApi {
     /** Registers a folder the user explicitly picked. */
     projectOpen(path: string): Promise<IpcResult<CodeProject>>
     projectForget(id: string): Promise<IpcResult<void>>
+    /** Opens the project's folder in the OS file explorer. */
+    projectReveal(id: string): Promise<IpcResult<void>>
     fileTree(projectId: string): Promise<IpcResult<FileTreeNode>>
     readFile(req: CodeReadFileRequest): Promise<IpcResult<CodeReadFileResult>>
     changesList(projectId: string): Promise<IpcResult<CodeChange[]>>
@@ -592,6 +628,10 @@ export interface UldApi {
     gitCreateBranch(projectId: string, name: string): Promise<IpcResult<GitStatus>>
     /** Suggests a commit message from the staged diff (default model). */
     gitGenerateCommitMessage(projectId: string): Promise<IpcResult<{ message: string }>>
+    worktreeCreate(projectId: string, name?: string): Promise<IpcResult<WorktreeInfo>>
+    openInIde(projectId: string): Promise<IpcResult<{ command: string }>>
+    checkpointsList(conversationId: string): Promise<IpcResult<Checkpoint[]>>
+    checkpointRestore(checkpointId: string): Promise<IpcResult<CodeChange>>
   }
   tools: {
     list(): Promise<IpcResult<ToolDefinition[]>>
@@ -663,18 +703,6 @@ export interface UldApi {
     setTelegram(input: SetTelegramBridgeInput): Promise<IpcResult<ImBridgeStatus>>
     setWebhook(url: string | null): Promise<IpcResult<ImBridgeStatus>>
   }
-  documents: {
-    /** The Write-mode document for a conversation (null if none yet). */
-    get(conversationId: string): Promise<IpcResult<Document | null>>
-    /** Create/replace the Write document's content. */
-    save(conversationId: string, content: string): Promise<IpcResult<Document>>
-    /** Design-mode HTML prototypes for a conversation, newest first. */
-    listHtml(conversationId: string): Promise<IpcResult<Document[]>>
-    export(
-      id: string,
-      format: DocumentExportFormat
-    ): Promise<IpcResult<{ canceled: boolean; path?: string }>>
-  }
   workflows: {
     list(): Promise<IpcResult<Workflow[]>>
     get(id: string): Promise<IpcResult<Workflow | null>>
@@ -687,12 +715,27 @@ export interface UldApi {
     runById(id: string): Promise<IpcResult<WorkflowRunResult>>
     /** Recent persisted executions, newest first. */
     runs(id: string): Promise<IpcResult<WorkflowRun[]>>
+    /** Scheduled workflows with latest-run status + recent runs (Home/sidebar). */
+    overview(): Promise<IpcResult<WorkflowsOverview>>
+    /** Fires whenever a saved-workflow run is persisted; returns unsubscribe. */
+    onRunFinished(cb: (evt: WorkflowRunFinishedEvent) => void): () => void
+  }
+  scheduledTasks: {
+    list(): Promise<IpcResult<ScheduledTask[]>>
+    create(input: ScheduledTaskInput): Promise<IpcResult<ScheduledTask>>
+    setEnabled(id: string, enabled: boolean): Promise<IpcResult<ScheduledTask>>
+    delete(id: string): Promise<IpcResult<void>>
+    onChanged(cb: () => void): () => void
   }
   agents: {
     list(): Promise<IpcResult<AgentProfile[]>>
     create(input: AgentProfileInput): Promise<IpcResult<AgentProfile>>
     update(id: string, patch: AgentProfilePatch): Promise<IpcResult<AgentProfile>>
     delete(id: string): Promise<IpcResult<void>>
+    runs(conversationId?: string): Promise<IpcResult<AgentRun[]>>
+    stopRun(runId: string): Promise<IpcResult<boolean>>
+    packExport(): Promise<IpcResult<{ canceled: boolean; path?: string }>>
+    packImport(): Promise<IpcResult<{ canceled: boolean; agents?: number; skills?: number; hooks?: number }>>
   }
   knowledge: {
     list(): Promise<IpcResult<KnowledgeBase[]>>

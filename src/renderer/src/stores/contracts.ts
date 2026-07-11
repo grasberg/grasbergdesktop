@@ -20,8 +20,13 @@ import type {
   ProviderConfigPatch,
   ProviderTypeMeta,
   ResearchDepth,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledWorkflowStatus,
   StreamEventEnvelope,
   TestConnectionResult,
+  WorkflowRunFinishedEvent,
+  WorkflowRunListItem,
 } from '@shared/types'
 
 export interface SettingsStoreState {
@@ -89,7 +94,7 @@ export interface ProjectsStoreState {
   mode: ConversationMode | null
   loaded: boolean
   /**
-   * Ids of collapsed groups in the sidebar tree (the "No project" group uses a
+   * Ids of collapsed groups in the sidebar tree (the standalone "Tasks" group uses a
    * stable key). Persisted to localStorage so expand/collapse survives reloads.
    */
   collapsed: Set<string>
@@ -154,14 +159,21 @@ export interface ArtifactPreview {
   html: string
 }
 
+/**
+ * Which surface fills the main area. 'home' is the boot default (the overview
+ * dashboard); 'conversation' shows the active conversation's mode view and
+ * falls back to Home while no conversation is selected.
+ */
+export type AppView = 'home' | 'conversation' | 'workflows'
+
 export interface UiStoreState {
   /** Resolved theme actually applied to <html data-theme>. */
   resolvedTheme: 'light' | 'dark'
   settingsOpen: boolean
   paletteOpen: boolean
   shortcutsOpen: boolean
-  /** The Workflows builder surface replaces the main area when true. */
-  workflowsOpen: boolean
+  /** The surface currently filling the main area. */
+  view: AppView
   /**
    * Workflow the builder should open with (sidebar "Scheduled tasks" deep
    * link). Set by openWorkflows(open, workflowId); cleared by the next call.
@@ -171,11 +183,40 @@ export interface UiStoreState {
   artifactPreview: ArtifactPreview | null
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
+  setView(view: AppView): void
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
+  /** Enters/leaves the Workflows surface ('workflows' ↔ 'conversation'). */
   openWorkflows(open: boolean, workflowId?: string | null): void
   openArtifactPreview(preview: ArtifactPreview | null): void
   toast(message: string, kind?: ToastKind): void
   dismissToast(id: string): void
+}
+
+export interface WorkflowsStoreState {
+  /** Workflows that have a schedule (paused included) with latest-run status. */
+  scheduled: ScheduledWorkflowStatus[]
+  /** Latest runs across ALL workflows, newest first (bounded, truncated). */
+  recentRuns: WorkflowRunListItem[]
+  loaded: boolean
+  /** Workflow ids with a manual "Run now" in flight (instant busy state). */
+  runningIds: Record<string, true>
+  /** Fetches the overview; cheap and idempotent (called on surface mounts). */
+  load(): Promise<void>
+  /** Runs a saved workflow now; toasts the outcome and refreshes. */
+  runNow(id: string): Promise<void>
+  /** Pauses/resumes a schedule, preserving the rest of the workflow. */
+  toggleSchedule(status: ScheduledWorkflowStatus, enabled: boolean): Promise<void>
+  /** Wired once at app start to window.uld.workflows.onRunFinished. */
+  handleRunFinished(evt: WorkflowRunFinishedEvent): void
+}
+
+export interface ScheduledTasksStoreState {
+  tasks: ScheduledTask[]
+  loaded: boolean
+  load(): Promise<void>
+  create(input: ScheduledTaskInput): Promise<ScheduledTask | null>
+  setEnabled(id: string, enabled: boolean): Promise<void>
+  remove(id: string): Promise<void>
 }

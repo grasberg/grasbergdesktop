@@ -52,6 +52,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - **Mixture of Agents** — define presets where several *advisor* models answer in parallel and an *aggregator* model synthesizes the final reply (with the full tool loop intact). Trigger per conversation or one-shot with `/moa`.
 - **Arena compare** — run the same prompt across models side by side and pick the winner.
 - **Agent profiles** — named personas with their own system prompt, model and restricted toolset, usable by the `delegate` sub-agent and workflow nodes.
+- **Automatic model routing** — an optional provider-neutral Auto policy can prefer lowest cost, highest quality, or localhost-only models when a task has no explicit target.
 
 ### Tools, MCP & agents
 
@@ -75,6 +76,10 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - **Scheduler** — run any saved workflow on an interval.
 - **Telegram bridge** — bind a bot to a conversation and chat with your assistant from your phone (trust-on-first-use pairing, single authorized chat).
 - **Outbound webhook** — POST every completed reply to your own endpoint (opt-in).
+- **Agent control plane** — background delegates have persistent run history and can be stopped from Settings; Work tasks can be forked into isolated Git worktrees.
+- **Checkpoints & forks** — every applied assistant change captures a persistent pre-edit checkpoint, and conversations can branch without losing their original history.
+- **Project hooks & agent packs** — allowlisted lifecycle quality gates plus portable JSON bundles of agents, skills, and hooks.
+- **IDE bridge** — open the current task or isolated worktree in VS Code, Cursor, or Zed from Work mode.
 
 ### Everything a daily driver needs
 

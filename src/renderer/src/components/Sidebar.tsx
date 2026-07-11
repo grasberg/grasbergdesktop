@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ConversationMode, ConversationSummary, Project } from '@shared/types'
-import { newConversation, newTaskInActiveMode } from '@/lib/new-conversation'
+import { newConversation } from '@/lib/new-conversation'
 import { groupTasks } from '@shared/task-groups'
 import { relativeTime } from '@/lib/format'
 import { modKeyLabel } from '@/lib/platform'
@@ -10,24 +10,19 @@ import { useProjectsStore } from '@/stores/projects'
 import { toastError, useUiStore } from '@/stores/ui'
 import appIcon from '@/assets/icon.png'
 
-/** Collapse key for the catch-all "No project" group. */
+/** Collapse key for the catch-all standalone Tasks group. */
 const NO_PROJECT_KEY = '__no_project__'
+const NO_PROJECT_LABEL = 'Tasks'
 
 const MODE_TABS: ReadonlyArray<{ key: ConversationMode; label: string }> = [
   { key: 'chat', label: 'Chat' },
-  { key: 'cowork', label: 'Cowork' },
-  { key: 'code', label: 'Code' },
-  { key: 'write', label: 'Write' },
-  { key: 'design', label: 'Design' },
+  { key: 'work', label: 'Work' },
 ]
 
 /** Human label for the "New task" caret menu, per mode. */
 const NEW_LABELS: Record<ConversationMode, string> = {
   chat: 'New chat',
-  cowork: 'New cowork workspace',
-  code: 'New code session',
-  write: 'New document (Write)',
-  design: 'New design',
+  work: 'New work task',
 }
 
 /** The real app icon (same asset as the packaged exe/dock icon). */
@@ -251,7 +246,7 @@ function ConversationRow({ summary, active, projects }: RowProps): React.JSX.Ele
                         className={`conv-move-item${summary.projectRef === null ? ' active' : ''}`}
                         onClick={() => moveTo(null)}
                       >
-                        No project
+                        {NO_PROJECT_LABEL}
                       </button>
                       {projects.map((p) => (
                         <button
@@ -299,7 +294,7 @@ function ConversationRow({ summary, active, projects }: RowProps): React.JSX.Ele
 }
 
 interface TaskGroupProps {
-  /** The project this group represents, or null for the catch-all "No project". */
+  /** The project this group represents, or null for the standalone Tasks group. */
   project: Project | null
   tasks: ConversationSummary[]
   /** All projects in the mode (for a task row's move-to-project menu). */
@@ -400,7 +395,7 @@ function TaskGroup({
             onClick={toggle}
           >
             <span className={`task-group-chevron${collapsed ? '' : ' open'}`}>{ChevronIcon}</span>
-            <span className="task-group-name">{project ? project.name : 'No project'}</span>
+            <span className="task-group-name">{project ? project.name : NO_PROJECT_LABEL}</span>
             <span className="task-group-count">{tasks.length}</span>
           </button>
           {project ? (
@@ -475,6 +470,7 @@ export default function Sidebar(): React.JSX.Element {
   const modeFilter = useConversationsStore((s) => s.modeFilter)
   const loaded = useConversationsStore((s) => s.loaded)
   const projects = useProjectsStore((s) => s.projects)
+  const view = useUiStore((s) => s.view)
   const [query, setQuery] = useState(useConversationsStore.getState().search)
 
   // Load this mode's projects on mount and whenever the current mode changes.
@@ -494,8 +490,6 @@ export default function Sidebar(): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [query])
 
-  const [newMenuOpen, setNewMenuOpen] = useState(false)
-  const newMenuRef = useRef<HTMLDivElement>(null)
   const [creatingProject, setCreatingProject] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const newProjectRef = useRef<HTMLInputElement>(null)
@@ -504,37 +498,16 @@ export default function Sidebar(): React.JSX.Element {
     if (creatingProject) newProjectRef.current?.focus()
   }, [creatingProject])
 
-  // Close the new-conversation menu on outside click / Escape.
-  useEffect(() => {
-    if (!newMenuOpen) return
-    const onDown = (e: MouseEvent): void => {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
-        setNewMenuOpen(false)
-      }
-    }
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        setNewMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey, true)
-    }
-  }, [newMenuOpen])
-
   const startConversation = (mode: ConversationMode): void => {
-    setNewMenuOpen(false)
+    // A standalone task is filed under "Tasks". Make sure its new row is
+    // immediately visible in the sidebar even when that group was collapsed.
+    useProjectsStore.getState().expand(NO_PROJECT_KEY)
     newConversation(mode)
   }
 
-  /** New standalone (unfiled) task in the current mode. */
-  const newTask = (): void => {
-    setNewMenuOpen(false)
-    newTaskInActiveMode()
+  const startProject = (): void => {
+    setNewProjectName('')
+    setCreatingProject(true)
   }
 
   const commitNewProject = (): void => {
@@ -556,58 +529,37 @@ export default function Sidebar(): React.JSX.Element {
   const visibleGroups = searching ? groups.filter((g) => g.tasks.length > 0) : groups
 
   return (
-    <nav className="sidebar" aria-label="Conversations">
+    <nav className={`sidebar sidebar-mode-${modeFilter}`} aria-label="Conversations">
       <div className="sidebar-brand">
         <Logo />
         <span className="sidebar-wordmark">Grasberg</span>
+        <button
+          type="button"
+          className={`btn-icon sidebar-home-btn${view === 'home' ? ' active' : ''}`}
+          aria-label="Home overview"
+          aria-current={view === 'home' ? 'page' : undefined}
+          title="Home"
+          onClick={() => useUiStore.getState().setView('home')}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 10.5 12 3l9 7.5" />
+            <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
+          </svg>
+        </button>
+        <ScheduledTasks />
       </div>
 
       <div className="sidebar-controls">
-        <div className="sidebar-new-split" ref={newMenuRef}>
-          <button
-            type="button"
-            className="btn btn-primary sidebar-new"
-            title={`New task in ${modeFilter} (${modKeyLabel}+N)`}
-            onClick={newTask}
-          >
-            {PlusIcon}
-            New task
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary sidebar-new-caret"
-            aria-label="New conversation options"
-            aria-haspopup="menu"
-            aria-expanded={newMenuOpen}
-            onClick={() => setNewMenuOpen(!newMenuOpen)}
-          >
-            <svg width="10" height="10" viewBox="0 0 16 16" aria-hidden="true">
-              <path
-                d="M3 6l5 5 5-5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-          {newMenuOpen ? (
-            <div className="sidebar-new-menu" role="menu" aria-label="New conversation">
-              {MODE_TABS.map((tab) => (
-                <button
-                  key={tab.key}
-                  type="button"
-                  role="menuitem"
-                  className="sidebar-new-item"
-                  onClick={() => startConversation(tab.key)}
-                >
-                  {NEW_LABELS[tab.key]}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
         <input
           type="search"
           className="input sidebar-search"
@@ -617,35 +569,50 @@ export default function Sidebar(): React.JSX.Element {
           onChange={(e) => setQuery(e.target.value)}
         />
         <div className="mode-tabs" role="tablist" aria-label="Current mode">
-          {MODE_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              role="tab"
-              aria-selected={modeFilter === tab.key}
-              className={`mode-tab${modeFilter === tab.key ? ' active' : ''}`}
-              onClick={() => useConversationsStore.getState().setModeFilter(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
+          {MODE_TABS.map((tab) => {
+            const active = modeFilter === tab.key
+            return (
+              <div
+                key={tab.key}
+                data-mode={tab.key}
+                className={`mode-tab-item${active ? ' active' : ''}`}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  className="mode-tab"
+                  onClick={() => useConversationsStore.getState().setModeFilter(tab.key)}
+                >
+                  {tab.label}
+                </button>
+                <button
+                  type="button"
+                  className="mode-tab-add"
+                  aria-label={NEW_LABELS[tab.key]}
+                  title={NEW_LABELS[tab.key]}
+                  onClick={() => startConversation(tab.key)}
+                >
+                  {PlusIcon}
+                </button>
+              </div>
+            )
+          })}
         </div>
-      </div>
-
-      <div className="sidebar-section-head">
-        <span className="sidebar-section-title">Projects &amp; tasks</span>
-        <button
-          type="button"
-          className="btn-icon"
-          aria-label="New project"
-          title="New project"
-          onClick={() => {
-            setNewProjectName('')
-            setCreatingProject(true)
-          }}
-        >
-          {PlusIcon}
-        </button>
+        <div className="mode-quick-actions" aria-label={`${modeFilter} actions`}>
+          <button type="button" className="mode-quick-action" onClick={startProject}>
+            {PlusIcon}
+            New project
+          </button>
+          <button
+            type="button"
+            className="mode-quick-action"
+            onClick={() => startConversation(modeFilter)}
+          >
+            {PlusIcon}
+            New Task
+          </button>
+        </div>
       </div>
 
       <ul className="tree-list">
@@ -703,32 +670,7 @@ export default function Sidebar(): React.JSX.Element {
         ) : null}
       </ul>
 
-      <ScheduledTasks />
-
       <div className="sidebar-footer">
-        <button
-          type="button"
-          className="btn-icon"
-          aria-label="Open workflows"
-          title="Workflows"
-          onClick={() => useUiStore.getState().openWorkflows(true)}
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <rect x="3" y="3" width="6" height="6" rx="1" />
-            <rect x="15" y="15" width="6" height="6" rx="1" />
-            <path d="M9 6h5a2 2 0 0 1 2 2v4M15 18h-5a2 2 0 0 1-2-2v-4" />
-          </svg>
-        </button>
         <button
           type="button"
           className="btn-icon"

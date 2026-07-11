@@ -40,11 +40,15 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v22, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v28, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
 - `src/renderer/src/stores/contracts.ts` — renderer store contracts
 
 All IPC returns `IpcResult<T>`; every handler in `src/main/ipc/` validates its input with zod before calling a service. The renderer talks to main only via `window.uld` (implemented in `src/preload/`); stream events arrive via `webContents.send` push channels.
+
+### Conversation modes (two since v24/v25)
+
+`ConversationMode = 'chat' | 'work'`. **Chat** is a plain conversation. **Work** is the agentic mode: one `WorkView` (renderer `components/work/`) with an on-demand right panel — Files (directory tree), Changes (reviewable code-change pipeline + git), Preview (sandboxed `.html` rendering), Tasks (goal + plans/checklists). A Work task without a user-connected folder gets its own workspace folder (`{userData}/data/workspaces/<conversationId>/`) lazily on the first file write: `WorkspaceRootService` (`src/main/code/workspace-root.ts`) creates the dir, registers it as a `code_projects` row and links `conversation.projectId`, so the entire existing code pipeline (tree, path jail, diffs, git) works on it unchanged. Auto workspaces are the ONLY folders the app ever deletes (path-prefix check); user grants are never touched. The legacy cowork/code/write/design modes were collapsed in v24 (legacy content deleted by explicit product decision) and their mode CHECKs dropped in v25 (v13 pattern: zod enforces the enum). Backups from before v3 import legacy modes as `work`.
 
 ### Security invariants
 
@@ -65,7 +69,7 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 
 `node-sqlite3-wasm` (real SQLite compiled to WASM, synchronous API, zero native compilation — this is why the test suite runs in plain Node on Windows). Wrapped by `driver.ts`, accessed through repositories. Migrations are append-only in `migrations.ts`.
 
-**Critical migration pattern:** SQLite cannot widen a CHECK constraint in place. To alter one on a table with FK children (e.g. `conversations`, `providers`), use the FK-safe rebuild: mark the migration `noTransaction`, wrap in `PRAGMA foreign_keys = OFF/ON`, rebuild the table, and preserve child rows. Migrations v8, v11, and v13 are the reference examples — doing this any other way cascade-deletes messages/keys. Since v13 the `providers.type` CHECK is dropped entirely (enum enforced by zod at the IPC boundary), so new providers/presets need no migration.
+**Critical migration pattern:** SQLite cannot widen a CHECK constraint in place. To alter one on a table with FK children (e.g. `conversations`, `providers`), use the FK-safe rebuild: mark the migration `noTransaction`, wrap in `PRAGMA foreign_keys = OFF/ON`, rebuild the table, and preserve child rows. Migrations v8, v11, v13 and v25 are the reference examples — doing this any other way cascade-deletes messages/keys. Since v13 the `providers.type` CHECK is dropped entirely (enum enforced by zod at the IPC boundary); v25 did the same for `conversations.mode` and `projects.mode`, so mode changes need no migration.
 
 ### Chat/streaming pipeline (`src/main/services/chat-service.ts`)
 
@@ -76,6 +80,18 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 ### Tool system (`src/main/tools/`)
 
 One registry for built-in tools, user-defined custom HTTP tools, and real MCP servers (`@modelcontextprotocol/sdk`, stdio + HTTP transports). Everything goes through the same per-tool permission model and approval broker; sensitive/dangerous tools (`run_shell_command`, `browser`, `computer`) are opt-in via settings and filtered out of the tool list unless enabled. Browser/computer use drives a hidden sandboxed BrowserWindow (`src/main/browser/session.ts`), never the OS desktop.
+
+### Top-level views and background execution
+
+The renderer routes on `ui.view` (`AppView = 'home' | 'conversation' | 'workflows'`); boot lands on the Home overview. Home and Workflows are surfaces above conversations, not conversation modes.
+
+Three independent background-execution systems — don't conflate them:
+
+- **Workflows** (`src/main/workflows/`): visual node graphs (React Flow) executed in-process by `engine.ts`; `runner.ts` owns run history + push events and is shared by manual runs and the interval `scheduler.ts`.
+- **Scheduled tasks** (`src/main/scheduled-tasks/`): standalone prompt tasks (v27 `scheduled_tasks`, once/daily/weekly recurrence), deliberately independent of workflow graphs; a 30 s clock scheduler runs due prompts headlessly with tools enabled.
+- **Background agents** (v26): `agent_runs` is the persistent control plane for background `delegate` runs (stoppable from Settings); `checkpoints` stores pre-edit file snapshots for reversible code changes. Project hooks are declarative DB rows executed behind the same approval boundary as tools.
+
+All headless generation funnels through the chat service: `generateForWorkflow` (one-shot — workflows, scheduled tasks, git commit-message suggestions) and `generateHeadless` (conversation reply — Telegram bridge). New headless callers should reuse these, not spawn their own adapter loops.
 
 ## Testing conventions
 

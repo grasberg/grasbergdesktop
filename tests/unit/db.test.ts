@@ -84,6 +84,41 @@ describe('openDatabase + migrations', () => {
   })
 })
 
+describe('agent platform repository', () => {
+  it('persists agent runs and checkpoints across reopen', () => {
+    const conversation = db!.conversations.create({ mode: 'work', title: 'Agent task' })
+    const run = db!.agentPlatform.runStart({
+      conversationId: conversation.id,
+      projectId: null,
+      agentName: 'reviewer',
+      task: 'Review the patch',
+      worktreePath: null,
+      providerId: null,
+      modelId: null,
+    })
+    db!.agentPlatform.runFinish(run.id, 'done', 'Looks good')
+    const checkpoint = db!.agentPlatform.checkpointCreate({
+      conversationId: conversation.id,
+      projectId: 'project-1',
+      changeId: 'change-1',
+      label: 'Before edit',
+      messageSeq: 4,
+      files: [{ relPath: 'src/app.ts', content: 'old' }],
+    })
+
+    const re = reopen()
+    expect(re.agentPlatform.runsList(conversation.id)[0]).toMatchObject({
+      id: run.id,
+      status: 'done',
+      result: 'Looks good',
+    })
+    expect(re.agentPlatform.checkpointGet(checkpoint.id)).toMatchObject({
+      messageSeq: 4,
+      files: [{ relPath: 'src/app.ts', content: 'old' }],
+    })
+  })
+})
+
 describe('providers repository', () => {
   const input = {
     id: 'prov-1',
@@ -338,8 +373,8 @@ describe('conversations + messages', () => {
   it('filters by mode and honors limit', () => {
     db!.conversations.create({ mode: 'chat', title: 'C1' })
     db!.conversations.create({ mode: 'chat', title: 'C2' })
-    const cw = db!.conversations.create({ mode: 'cowork', title: 'W1' })
-    expect(db!.conversations.list({ mode: 'cowork' }).map((s) => s.id)).toEqual([cw.id])
+    const cw = db!.conversations.create({ mode: 'work', title: 'W1' })
+    expect(db!.conversations.list({ mode: 'work' }).map((s) => s.id)).toEqual([cw.id])
     expect(db!.conversations.list({ limit: 2 })).toHaveLength(2)
   })
 

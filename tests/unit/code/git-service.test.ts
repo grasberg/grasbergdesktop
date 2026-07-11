@@ -136,6 +136,25 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
     await expect(service.createBranch(dir, 'has space')).rejects.toThrow(/branch names/i)
   })
 
+  it('creates an isolated app-owned worktree on a grasberg branch', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'x\n')
+    await service.stage(dir, ['a.txt'])
+    await service.commit(dir, 'init')
+    const worktrees = mkdtempSync(join(tmpdir(), 'uld-worktrees-'))
+    try {
+      const created = await service.createWorktree(dir, worktrees, 'project-1', 'Review task')
+      expect(created.branch).toMatch(/^grasberg\/review-task-/)
+      expect(git(created.path, 'branch', '--show-current').trim()).toBe(created.branch)
+      expect(git(dir, 'branch', '--show-current').trim()).toBe('main')
+    } finally {
+      // Remove through git first so the source repo does not retain metadata.
+      const listed = git(dir, 'worktree', 'list', '--porcelain')
+      const match = /worktree (.*uld-worktrees-[^\r\n]*)/.exec(listed)
+      if (match) execFileSync('git', ['worktree', 'remove', '--force', match[1]], { cwd: dir, windowsHide: true })
+      rmSync(worktrees, { recursive: true, force: true })
+    }
+  })
+
   it('generateCommitMessage feeds the staged diff to the model and cleans the reply', async () => {
     const generateText = vi.fn(async (_prompt: string) => '```\nfix: adjust greeting\n```')
     const withModel = new GitService({ generateText })
@@ -149,5 +168,20 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
     // Nothing staged → clear refusal before any model call.
     await withModel.commit(dir, 'setup')
     await expect(withModel.generateCommitMessage(dir)).rejects.toThrow(/nothing is staged/i)
+  })
+
+  it('runs the required before-commit quality gate', async () => {
+    const beforeCommit = vi.fn(async () => {})
+    const guarded = new GitService({ beforeCommit })
+    writeFileSync(join(dir, 'a.txt'), 'x\n')
+    await guarded.stage(dir, ['a.txt'])
+    await guarded.commit(dir, 'guarded')
+    expect(beforeCommit).toHaveBeenCalledWith(dir)
+
+    writeFileSync(join(dir, 'a.txt'), 'y\n')
+    await guarded.stage(dir, ['a.txt'])
+    const blocked = new GitService({ beforeCommit: async () => { throw new Error('quality gate failed') } })
+    await expect(blocked.commit(dir, 'blocked')).rejects.toThrow(/quality gate failed/i)
+    expect(git(dir, 'log', '--format=%s', '-1').trim()).toBe('guarded')
   })
 })

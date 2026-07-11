@@ -155,17 +155,12 @@ const MODE_CARDS: ReadonlyArray<{ id: ConversationMode; title: string; desc: str
   {
     id: 'chat',
     title: 'Chat',
-    desc: 'Classic assistant conversations with streaming, markdown and attachments.',
+    desc: 'Classic assistant conversations — fast answers, drafts and ideas with streaming, markdown and attachments.',
   },
   {
-    id: 'cowork',
-    title: 'Cowork',
-    desc: 'Plan projects together — shared notes, checklists and tasks.',
-  },
-  {
-    id: 'code',
-    title: 'Code',
-    desc: 'Point at a folder and review AI-proposed changes before they touch disk.',
+    id: 'work',
+    title: 'Work',
+    desc: 'Give the assistant a real task: it creates files on disk, edits code with reviewable diffs, builds clickable HTML prototypes and keeps a task list — a workspace panel appears beside the chat as it works.',
   },
 ]
 
@@ -262,7 +257,7 @@ export default function Onboarding() {
         {step === 3 ? (
           <div className="wizard-step">
             <h1>You&rsquo;re all set</h1>
-            <p className="wizard-pitch">Three ways to work — pick one to begin.</p>
+            <p className="wizard-pitch">Two ways to start — pick one to begin.</p>
             <div className="mode-cards">
               {MODE_CARDS.map((m) => (
                 <button

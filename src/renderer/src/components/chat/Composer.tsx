@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { Attachment, ResearchDepth } from '@shared/types'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type ReactElement,
+} from 'react'
+import type { Attachment, ChatParams, ResearchDepth } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
 import { providerUsable as isProviderUsable } from '@/lib/providers'
@@ -9,11 +17,35 @@ import { useProvidersStore } from '@/stores/providers'
 import { usePromptsStore } from '@/stores/prompts'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
+import { toNormalized, unwrap } from '@/api/uld'
+import ModelSelector from './ModelSelector'
 import './chat.css'
 
 const MAX_TEXTAREA_HEIGHT = 240 // ~10 lines
 const CHAR_COUNT_THRESHOLD = 2000
 const MENTION_DEBOUNCE_MS = 150
+const MAX_PASTED_IMAGE_BYTES = 4 * 1024 * 1024
+const PASTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+function fileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read the pasted image'))
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Could not read the pasted image'))
+        return
+      }
+      const separator = reader.result.indexOf(',')
+      if (separator < 0) {
+        reject(new Error('Could not decode the pasted image'))
+        return
+      }
+      resolve(reader.result.slice(separator + 1))
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 /** One entry in the composer's slash-command menu. */
 interface SlashItem {
@@ -62,10 +94,12 @@ export default function Composer(): ReactElement {
   const [researchOn, setResearchOn] = useState(false)
   // '' = use the settings default depth for this run.
   const [researchDepth, setResearchDepth] = useState<ResearchDepth | ''>('')
+  const [planBusy, setPlanBusy] = useState(false)
+  const [autoAcceptBusy, setAutoAcceptBusy] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<Attachment[] | null>(null)
   const [confirmFlash, setConfirmFlash] = useState(false)
-  const [promptMenuOpen, setPromptMenuOpen] = useState(false)
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   // Slash-command / @-mention autocomplete state.
   const [slashDismissed, setSlashDismissed] = useState(false)
   const [mention, setMention] = useState<{ start: number; end: number; query: string } | null>(null)
@@ -83,7 +117,7 @@ export default function Composer(): ReactElement {
   }, [skillsLoaded])
 
   const insertPrompt = (body: string): void => {
-    setPromptMenuOpen(false)
+    setPlusMenuOpen(false)
     setValue((cur) => (cur.trim().length > 0 ? `${cur}\n\n${body}` : body))
     textareaRef.current?.focus()
   }
@@ -157,7 +191,7 @@ export default function Composer(): ReactElement {
   const slashItems = useMemo<SlashItem[]>(() => {
     if (!conversation) return []
     const items: SlashItem[] = []
-    if (conversation.mode === 'code' && conversation.projectId) {
+    if (conversation.mode === 'work' && conversation.projectId) {
       items.push({
         command: '/init',
         label: '/init',
@@ -309,8 +343,8 @@ export default function Composer(): ReactElement {
    */
   const runInitCommand = (): void => {
     const conv = conversation
-    if (!conv || conv.mode !== 'code' || !conv.projectId) {
-      toast('/init needs a Code conversation with a granted project folder.', 'error')
+    if (!conv || conv.mode !== 'work' || !conv.projectId) {
+      toast('/init needs a work task with a connected folder.', 'error')
       return
     }
     if (attachments.length > 0) {
@@ -367,13 +401,8 @@ export default function Composer(): ReactElement {
     })()
   }
 
-  const handleAttach = async (): Promise<void> => {
-    const res = await window.uld.app.pickFiles()
-    if (!res.ok) {
-      toast(res.error.message, 'error')
-      return
-    }
-    let files = res.data.attachments
+  const queueAttachments = (picked: Attachment[]): void => {
+    let files = picked
     // Drop images the effective model can't see, rather than sending them to a
     // text-only endpoint that would reject or ignore them.
     if (!visionSupported && files.some((f) => f.kind === 'image')) {
@@ -388,6 +417,56 @@ export default function Composer(): ReactElement {
     } else {
       setAttachments((prev) => [...prev, ...files])
     }
+  }
+
+  const handleAttach = async (): Promise<void> => {
+    const res = await window.uld.app.pickFiles()
+    if (!res.ok) {
+      toast(res.error.message, 'error')
+      return
+    }
+    queueAttachments(res.data.attachments)
+  }
+
+  const handlePaste = (event: ReactClipboardEvent<HTMLTextAreaElement>): void => {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && PASTED_IMAGE_MIME_TYPES.has(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+
+    if (imageFiles.length === 0) return
+    event.preventDefault()
+
+    if (!visionSupported) {
+      toast('This model has no vision support — the pasted image was not attached.', 'info')
+      return
+    }
+
+    void (async () => {
+      const pasted: Attachment[] = []
+      for (const file of imageFiles) {
+        if (file.size === 0) {
+          toast('The pasted image is empty.', 'error')
+          continue
+        }
+        if (file.size > MAX_PASTED_IMAGE_BYTES) {
+          toast('The pasted image exceeds the 4 MB limit.', 'error')
+          continue
+        }
+        try {
+          const dataBase64 = await fileAsBase64(file)
+          const res = await window.uld.app.storePastedImage({ mimeType: file.type, dataBase64 })
+          if (!res.ok) {
+            toast(res.error.message, 'error')
+            continue
+          }
+          pasted.push(res.data)
+        } catch (error) {
+          toast(toNormalized(error).message, 'error')
+        }
+      }
+      if (pasted.length > 0) queueAttachments(pasted)
+    })()
   }
 
   const placeholder = !conversation
@@ -406,6 +485,42 @@ export default function Composer(): ReactElement {
     const pick =
       enabledPresets.find((p) => p.id === settings?.defaultMoaPresetId) ?? enabledPresets[0]
     if (pick) void updateConversation({ moaPresetId: pick.id })
+  }
+
+  const togglePlanMode = async (): Promise<void> => {
+    if (!conversation || conversation.mode !== 'work') return
+    setPlanBusy(true)
+    try {
+      const params: ChatParams = { ...conversation.params }
+      if (params.planMode === true) delete params.planMode
+      else params.planMode = true
+      const updated = await unwrap(
+        window.uld.conversations.update({ id: conversation.id, patch: { params } })
+      )
+      useChatStore.setState({ conversation: updated })
+    } catch (error) {
+      toast(`Could not toggle plan mode: ${toNormalized(error).message}`, 'error')
+    } finally {
+      setPlanBusy(false)
+    }
+  }
+
+  const toggleAutoAcceptEdits = async (): Promise<void> => {
+    if (!conversation || conversation.mode !== 'work') return
+    setAutoAcceptBusy(true)
+    try {
+      const params: ChatParams = { ...conversation.params }
+      if (params.autoAcceptEdits === true) delete params.autoAcceptEdits
+      else params.autoAcceptEdits = true
+      const updated = await unwrap(
+        window.uld.conversations.update({ id: conversation.id, patch: { params } })
+      )
+      useChatStore.setState({ conversation: updated })
+    } catch (error) {
+      toast(`Could not toggle auto-accept edits: ${toNormalized(error).message}`, 'error')
+    } finally {
+      setAutoAcceptBusy(false)
+    }
   }
 
   return (
@@ -490,158 +605,157 @@ export default function Composer(): ReactElement {
       <div className="composer-inputrow">
         <button
           type="button"
-          className="btn-icon composer-attach"
-          aria-label="Attach files"
-          title="Attach files"
-          disabled={disabled}
+          className="btn-icon composer-attach-button"
+          aria-label="Add files or photos"
+          title="Add files or photos"
+          disabled={!conversation || isStreaming}
           onClick={() => void handleAttach()}
         >
-          📎
+          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m20.5 11.5-8.7 8.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7L9 17.4a2 2 0 0 1-2.8-2.8l8.6-8.6" />
+          </svg>
         </button>
-        {promptTemplates.length > 0 && (
-          <div className="composer-prompts">
-            <button
-              type="button"
-              className="btn-icon composer-attach"
-              aria-label="Insert a saved prompt"
-              title="Insert a saved prompt"
-              aria-haspopup="menu"
-              aria-expanded={promptMenuOpen}
-              disabled={!conversation || isStreaming}
-              onClick={() => setPromptMenuOpen((o) => !o)}
-            >
-              ⚡
-            </button>
-            {promptMenuOpen && (
-              <>
-                <div
-                  className="composer-prompts-backdrop"
-                  onClick={() => setPromptMenuOpen(false)}
-                  aria-hidden
-                />
-                <ul className="composer-prompts-menu" role="menu">
-                  {promptTemplates.map((t) => (
-                    <li key={t.id} role="none">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="composer-prompts-item"
-                        title={t.body}
-                        onClick={() => insertPrompt(t.body)}
-                      >
-                        {t.title}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-        )}
-        <div className="composer-moa">
+        <div className="composer-plus">
           <button
             type="button"
-            className={`btn-icon composer-attach composer-moa-toggle${researchOn ? ' active' : ''}`}
-            aria-pressed={researchOn}
-            aria-label={
-              researchOn
-                ? 'Deep research on — the next message runs web research and writes a cited report'
-                : 'Turn on deep research for the next message'
-            }
-            title={
-              researchOn
-                ? 'Deep research: the next message searches the web and writes a cited report'
-                : 'Deep research — search the web and write a cited report (/research)'
-            }
+            className={`btn-icon composer-plus-button${plusMenuOpen ? ' open' : ''}`}
+            aria-label="Open tools and modes"
+            title="Choose tools and modes"
+            aria-haspopup="menu"
+            aria-expanded={plusMenuOpen}
             disabled={!conversation || isStreaming}
-            onClick={() =>
-              setResearchOn((v) => {
-                if (!v) setCompareOn(false)
-                return !v
-              })
-            }
+            onClick={() => setPlusMenuOpen((open) => !open)}
           >
-            DR
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 2.5v11M2.5 8h11" />
+            </svg>
           </button>
-          {researchOn && (
-            <select
-              className="composer-moa-select"
-              aria-label="Research depth"
-              value={researchDepth}
-              disabled={isStreaming}
-              onChange={(e) => setResearchDepth(e.target.value as ResearchDepth | '')}
-            >
-              <option value="">
-                depth: {settings?.researchDefaultDepth ?? 'standard'} (default)
-              </option>
-              <option value="quick">quick</option>
-              <option value="standard">standard</option>
-              <option value="deep">deep</option>
-            </select>
-          )}
+          {plusMenuOpen ? (
+            <>
+              <div
+                className="composer-plus-backdrop"
+                aria-hidden
+                onClick={() => setPlusMenuOpen(false)}
+              />
+              <div className="composer-plus-menu" role="menu" aria-label="Tools and modes">
+                {promptTemplates.length > 0 ? (
+                  <>
+                    <div className="composer-plus-heading">Saved prompts</div>
+                    {promptTemplates.map((template) => (
+                      <button
+                        key={template.id}
+                        type="button"
+                        role="menuitem"
+                        className="composer-plus-item composer-plus-prompt"
+                        title={template.body}
+                        onClick={() => insertPrompt(template.body)}
+                      >
+                        <span className="composer-plus-icon" aria-hidden>⚡</span>
+                        <span>{template.title}</span>
+                      </button>
+                    ))}
+                    <div className="composer-plus-separator" />
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={researchOn}
+                  className="composer-plus-item"
+                  onClick={() => setResearchOn((value) => {
+                    if (!value) setCompareOn(false)
+                    return !value
+                  })}
+                >
+                  <span className="composer-plus-check" aria-hidden>{researchOn ? '✓' : ''}</span>
+                  <span>Deep Research</span>
+                </button>
+                {researchOn ? (
+                  <label className="composer-plus-subcontrol">
+                    <span>Depth</span>
+                    <select
+                      value={researchDepth}
+                      onChange={(e) => setResearchDepth(e.target.value as ResearchDepth | '')}
+                    >
+                      <option value="">{settings?.researchDefaultDepth ?? 'standard'} (default)</option>
+                      <option value="quick">quick</option>
+                      <option value="standard">standard</option>
+                      <option value="deep">deep</option>
+                    </select>
+                  </label>
+                ) : null}
+                {enabledPresets.length > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={!!activePreset}
+                      className="composer-plus-item"
+                      onClick={toggleMoa}
+                    >
+                      <span className="composer-plus-check" aria-hidden>{activePreset ? '✓' : ''}</span>
+                      <span>Mixture of Agents</span>
+                    </button>
+                    {activePreset && enabledPresets.length > 1 ? (
+                      <label className="composer-plus-subcontrol">
+                        <span>Preset</span>
+                        <select
+                          value={activePreset.id}
+                          onChange={(e) => void updateConversation({ moaPresetId: e.target.value })}
+                        >
+                          {enabledPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={compareOn}
+                      className="composer-plus-item"
+                      disabled={!comparePreset}
+                      onClick={() => setCompareOn((value) => {
+                        if (!value) setResearchOn(false)
+                        return !value
+                      })}
+                    >
+                      <span className="composer-plus-check" aria-hidden>{compareOn ? '✓' : ''}</span>
+                      <span>Compare models (VS)</span>
+                    </button>
+                  </>
+                ) : null}
+                {conversation?.mode === 'work' ? (
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={conversation.params.planMode === true}
+                    className="composer-plus-item"
+                    disabled={planBusy}
+                    onClick={() => void togglePlanMode()}
+                  >
+                    <span className="composer-plus-check" aria-hidden>
+                      {conversation.params.planMode === true ? '✓' : ''}
+                    </span>
+                    <span>Plan Mode</span>
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : null}
         </div>
-        {enabledPresets.length > 0 && (
-          <div className="composer-moa">
-            <button
-              type="button"
-              className={`btn-icon composer-attach composer-moa-toggle${activePreset ? ' active' : ''}`}
-              aria-pressed={!!activePreset}
-              aria-label={
-                activePreset
-                  ? `Mixture of Agents on (${activePreset.name}) — click to turn off`
-                  : 'Turn on Mixture of Agents'
-              }
-              title={
-                activePreset
-                  ? `Mixture of Agents: ${activePreset.name}`
-                  : 'Mixture of Agents — combine several models'
-              }
-              disabled={!conversation || isStreaming}
-              onClick={toggleMoa}
-            >
-              MoA
-            </button>
-            {activePreset && enabledPresets.length > 1 && (
-              <select
-                className="composer-moa-select"
-                aria-label="Mixture of Agents preset"
-                value={activePreset.id}
-                disabled={isStreaming}
-                onChange={(e) => void updateConversation({ moaPresetId: e.target.value })}
-              >
-                {enabledPresets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            <button
-              type="button"
-              className={`btn-icon composer-attach composer-moa-toggle${compareOn ? ' active' : ''}`}
-              aria-pressed={compareOn}
-              aria-label={
-                compareOn
-                  ? `Compare mode on (${comparePreset?.name ?? ''}) — click to turn off`
-                  : 'Turn on compare mode — ask several models side by side'
-              }
-              title={
-                compareOn
-                  ? `Compare: the models of "${comparePreset?.name}" answer side by side`
-                  : 'Compare — ask several models side by side and pick the best answer'
-              }
-              disabled={!conversation || isStreaming || !comparePreset}
-              onClick={() =>
-                setCompareOn((v) => {
-                  if (!v) setResearchOn(false)
-                  return !v
-                })
-              }
-            >
-              VS
-            </button>
-          </div>
-        )}
+        {conversation?.mode === 'work' ? (
+          <button
+            type="button"
+            className={`composer-autoaccept${conversation.params.autoAcceptEdits === true ? ' active' : ''}`}
+            aria-pressed={conversation.params.autoAcceptEdits === true}
+            title="Apply assistant file edits without asking for each edit"
+            disabled={autoAcceptBusy || isStreaming}
+            onClick={() => void toggleAutoAcceptEdits()}
+          >
+            Auto-accept edits
+          </button>
+        ) : null}
         {(slashVisible || mentionVisible) && (
           <ul
             className="composer-suggest"
@@ -676,61 +790,64 @@ export default function Composer(): ReactElement {
                 ))}
           </ul>
         )}
-        <textarea
-          ref={textareaRef}
-          className="textarea composer-textarea"
-          rows={1}
-          value={value}
-          placeholder={placeholder}
-          disabled={!conversation || isStreaming}
-          aria-label="Message"
-          onChange={(e) => {
-            setValue(e.target.value)
-            setSlashDismissed(false)
-            setMention(mentionTokenAt(e.target.value, e.target.selectionStart ?? 0))
-          }}
-          onKeyDown={(e) => {
-            const menuLength = slashVisible
-              ? filteredSlash.length
-              : mentionVisible
-                ? mentionItems.length
-                : 0
-            if (menuLength > 0 && !e.nativeEvent.isComposing) {
-              const index = Math.min(suggestIndex, menuLength - 1)
-              if (e.key === 'ArrowDown') {
-                e.preventDefault()
-                setSuggestIndex((index + 1) % menuLength)
-                return
-              }
-              if (e.key === 'ArrowUp') {
-                e.preventDefault()
-                setSuggestIndex((index - 1 + menuLength) % menuLength)
-                return
-              }
-              if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
-                e.preventDefault()
-                if (slashVisible) pickSlash(filteredSlash[index])
-                else pickMention(mentionItems[index])
-                return
-              }
-              if (e.key === 'Escape') {
-                // Close the menu only; don't let Escape stop the generation.
-                e.preventDefault()
-                e.stopPropagation()
-                if (slashVisible) setSlashDismissed(true)
-                else {
-                  setMention(null)
-                  setMentionItems([])
+        <div className="composer-textarea-wrap">
+          <textarea
+            ref={textareaRef}
+            className="textarea composer-textarea"
+            rows={1}
+            value={value}
+            placeholder={placeholder}
+            disabled={!conversation || isStreaming}
+            aria-label="Message"
+            onPaste={handlePaste}
+            onChange={(e) => {
+              setValue(e.target.value)
+              setSlashDismissed(false)
+              setMention(mentionTokenAt(e.target.value, e.target.selectionStart ?? 0))
+            }}
+            onKeyDown={(e) => {
+              const menuLength = slashVisible
+                ? filteredSlash.length
+                : mentionVisible
+                  ? mentionItems.length
+                  : 0
+              if (menuLength > 0 && !e.nativeEvent.isComposing) {
+                const index = Math.min(suggestIndex, menuLength - 1)
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setSuggestIndex((index + 1) % menuLength)
+                  return
                 }
-                return
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setSuggestIndex((index - 1 + menuLength) % menuLength)
+                  return
+                }
+                if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+                  e.preventDefault()
+                  if (slashVisible) pickSlash(filteredSlash[index])
+                  else pickMention(mentionItems[index])
+                  return
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (slashVisible) setSlashDismissed(true)
+                  else {
+                    setMention(null)
+                    setMentionItems([])
+                  }
+                  return
+                }
               }
-            }
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-        />
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
+          <ModelSelector placement="composer" />
+        </div>
         {isStreaming ? (
           <button
             type="button"

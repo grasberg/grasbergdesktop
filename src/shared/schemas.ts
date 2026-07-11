@@ -244,14 +244,11 @@ const modeModelDefaultSchema = z
   })
   .strict()
 
-/** Full per-mode map (all five modes present, matching AppSettings.modeModels). */
+/** Full per-mode map (both modes present, matching AppSettings.modeModels). */
 const modeModelsSchema = z
   .object({
     chat: modeModelDefaultSchema,
-    cowork: modeModelDefaultSchema,
-    code: modeModelDefaultSchema,
-    write: modeModelDefaultSchema,
-    design: modeModelDefaultSchema,
+    work: modeModelDefaultSchema,
   })
   .strict()
 
@@ -366,6 +363,17 @@ export const settingsPatchSchema = z
     researchDefaultDepth: researchDepthSchema,
     defaultImageProviderId: z.string().nullable(),
     defaultImageModelId: z.string().max(200).nullable(),
+    autoRoutingEnabled: z.boolean(),
+    autoRoutingPolicy: z.enum(['balanced', 'lowest_cost', 'highest_quality', 'local_only']),
+    autoRoutingMaxCostUsd: z.number().positive().max(10_000).nullable(),
+    projectHooks: z.array(z.object({
+      id: z.string().min(1).max(200),
+      name: z.string().trim().min(1).max(200),
+      event: z.enum(['afterAgent', 'afterApply', 'beforeCommit']),
+      command: z.string().trim().min(1).max(2000),
+      enabled: z.boolean(),
+    }).strict()).max(100),
+    ideCommand: z.enum(['auto', 'code', 'cursor', 'zed']),
   })
   .partial()
   .strict()

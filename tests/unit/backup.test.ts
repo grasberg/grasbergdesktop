@@ -228,4 +228,18 @@ describe('applyBackup', () => {
     expect(target.conversations.list()).toHaveLength(1)
     expect(target.messages.listByConversation(conversation.id)).toHaveLength(2)
   })
+
+  it('remaps legacy pre-v3 modes to work on import', () => {
+    const summary = applyBackup(target, {
+      format: BACKUP_FORMAT,
+      version: 2,
+      conversations: [
+        { id: 'legacy-code', mode: 'code', title: 'Old code task', messages: [] },
+        { id: 'legacy-chat', mode: 'chat', title: 'Old chat', messages: [] },
+      ],
+    })
+    expect(summary.conversationsImported).toBe(2)
+    expect(target.conversations.getById('legacy-code')?.mode).toBe('work')
+    expect(target.conversations.getById('legacy-chat')?.mode).toBe('chat')
+  })
 })

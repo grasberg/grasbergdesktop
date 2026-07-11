@@ -5,11 +5,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import {
   BrowserWindow,
   app,
   dialog,
   ipcMain,
+  shell,
   type FileFilter,
   type OpenDialogOptions,
   type OpenDialogReturnValue,
@@ -22,13 +24,16 @@ import type {
   AppInfo,
   Attachment,
   ConversationMode,
+  ScheduledTaskInput,
   ToolPermissionDecision,
   WorkflowGraph,
   WorkflowInput,
+  WorkflowsOverview,
   WorkspaceItemKind,
 } from '@shared/types'
 import { runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
+import type { WorkspaceRootService } from '../code/workspace-root'
 import type { KnowledgeService } from '../services/knowledge'
 import type { DreamingService } from '../services/dreaming'
 import {
@@ -76,10 +81,16 @@ import type { QuestionBroker } from '../services/question-broker'
 import { getAdapter, resolveAdapter } from '../providers/registry'
 import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
-import { toJson, toMarkdown, exportFileBase, documentToHtml } from '../services/export'
+import { toJson, toMarkdown, exportFileBase } from '../services/export'
 import { readSkillsFromFolder } from '../services/skills'
 import { applyBackup, buildBackup } from '../services/backup'
-import { readAttachment, readStoredImage } from './attachments'
+import {
+  MAX_IMAGE_BASE64_CHARS,
+  PASTED_IMAGE_MIME_TYPES,
+  readAttachment,
+  readStoredImage,
+  storePastedImage,
+} from './attachments'
 import { copyFile, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -97,12 +108,16 @@ export interface RegisterIpcDeps {
   oauthManager: OpenAiOAuthManager
   /** Runs saved workflows and records their run history. */
   workflowRunner: WorkflowRunner
+  /** Per-task workspace folders (auto-created working dirs for Work tasks). */
+  workspaceRoots: WorkspaceRootService
   /** Memory consolidation ("dreaming") — the manual Consolidate-now action. */
   dreamingService: DreamingService
   /** Knowledge-base chunking/embedding/retrieval. */
   knowledgeService: KnowledgeService
   /** Directory where image attachments are stored on disk. */
   attachmentsDir: string
+  /** App-owned directory for isolated Git worktrees. */
+  worktreesDir: string
   getWindows: () => BrowserWindow[]
 }
 
@@ -168,13 +183,7 @@ async function asInvalidAsync<T>(fn: () => Promise<T>, fallback: string): Promis
 // Schemas without a shared counterpart (hand-rolled, minimal)
 // ---------------------------------------------------------------------------
 
-const conversationModeSchema = z.enum([
-  'chat',
-  'cowork',
-  'code',
-  'write',
-  'design',
-]) satisfies z.ZodType<ConversationMode>
+const conversationModeSchema = z.enum(['chat', 'work']) satisfies z.ZodType<ConversationMode>
 
 const previewModelsSchema = z.object({
   type: providerTypeSchema,
@@ -355,8 +364,6 @@ const imTelegramSchema = z
   })
   .strict()
 
-const documentExportFormatSchema = z.enum(['markdown', 'html'])
-
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -434,6 +441,21 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       if (attachment) attachments.push(attachment)
     }
     return { attachments }
+  })
+
+  register(CHANNELS.appStorePastedImage, async (req) => {
+    const parsed = parseInput(
+      z.object({
+        mimeType: z.enum(PASTED_IMAGE_MIME_TYPES),
+        dataBase64: z
+          .string()
+          .min(1)
+          .max(MAX_IMAGE_BASE64_CHARS)
+          .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Invalid base64 image data'),
+      }),
+      req
+    )
+    return storePastedImage(deps.attachmentsDir, parsed.mimeType, parsed.dataBase64)
   })
 
   register(CHANNELS.appReadAttachment, (storageKey) =>
@@ -677,6 +699,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     // Stop any generation running in this conversation before deleting its rows
     // so the detached loop doesn't write to messages that no longer exist.
     chatService.stopConversation(conversationId)
+    // A Work task's auto-created workspace folder dies with it (user-granted
+    // folders are never touched — the service checks the path prefix).
+    const conversation = db.conversations.getById(conversationId)
+    if (conversation) deps.workspaceRoots.deleteIfAutoRegistered(conversation)
     db.conversations.remove(conversationId)
     return undefined
   })
@@ -701,6 +727,34 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       ],
       content
     )
+  })
+
+  register(CHANNELS.convFork, (req) => {
+    const parsed = parseInput(
+      z.object({ id: z.string().min(1), throughSeq: z.number().int().positive().optional() }),
+      req
+    )
+    const source = found(db.conversations.getById(parsed.id), 'Conversation')
+    const fork = db.conversations.create({
+      mode: source.mode,
+      title: `${source.title} (fork)`,
+      providerId: source.providerId,
+      modelId: source.modelId,
+      systemPrompt: source.systemPrompt,
+      // Forks get an independent task workspace on first use; sharing the
+      // source workspace would make one branch mutate the other's checklist.
+      workspaceId: null,
+      projectId: source.projectId,
+      projectRef: source.projectRef,
+      moaPresetId: source.moaPresetId,
+    })
+    const messages = db.messages
+      .listByConversation(source.id)
+      .filter((message) => parsed.throughSeq === undefined || message.seq <= parsed.throughSeq)
+    for (const message of messages) {
+      db.messages.insert({ ...message, id: randomUUID(), conversationId: fork.id })
+    }
+    return fork
   })
 
   // -- projects (per-mode organizational grouping) ---------------------------------
@@ -734,7 +788,11 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       db.conversations.deleteAll() // cascades messages + documents
       db.workspaces.deleteAll() // cascades workspace_items
       db.projects.deleteAll()
+      db.scheduledTasks.deleteAll()
     })
+    // After the rows are gone: sweep every auto-created task workspace folder
+    // (rows + dirs). User-granted folder rows survive as they always did.
+    deps.workspaceRoots.deleteAll()
     return undefined
   })
 
@@ -822,9 +880,13 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return undefined
   })
 
-  // -- code mode --------------------------------------------------------------------
+  // -- working folders + code pipeline ----------------------------------------------
 
-  register(CHANNELS.codeProjectsList, () => db.code.projectsList())
+  // autoCreated marks the app's own per-task workspace folders (derived from
+  // the path prefix) so the renderer can hide them from folder pickers.
+  register(CHANNELS.codeProjectsList, () =>
+    db.code.projectsList().map((project) => deps.workspaceRoots.withAutoFlag(project))
+  )
 
   // The path always comes from the OS folder picker — the explicit user grant.
   register(CHANNELS.codeProjectOpen, (path) =>
@@ -833,6 +895,14 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.codeProjectForget, (id) => {
     db.code.projectForget(requireString(id, 'Project id'))
+    return undefined
+  })
+
+  register(CHANNELS.codeProjectReveal, async (id) => {
+    const project = found(db.code.projectGetById(requireString(id, 'Project id')), 'Project')
+    if (!existsSync(project.path)) throw invalid('The folder no longer exists.')
+    const failure = await shell.openPath(project.path)
+    if (failure) throw invalid('Could not open the folder in the file explorer.')
     return undefined
   })
 
@@ -925,6 +995,36 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.codeGitGenerateCommitMessage, (projectId) =>
     gitService.generateCommitMessage(projectRoot(projectId))
+  )
+
+  register(CHANNELS.codeWorktreeCreate, async (req) => {
+    const parsed = parseInput(
+      z.object({ projectId: z.string().min(1), name: z.string().max(100).optional() }),
+      req
+    )
+    const created = await gitService.createWorktree(
+      projectRoot(parsed.projectId),
+      deps.worktreesDir,
+      parsed.projectId,
+      parsed.name
+    )
+    const registered = codeService.openProject(created.path)
+    return { ...created, projectId: registered.id }
+  })
+
+  register(CHANNELS.codeOpenInIde, (projectId) =>
+    gitService.openInEditor(
+      projectRoot(projectId),
+      db.settings.get().ideCommand
+    )
+  )
+
+  register(CHANNELS.codeCheckpointsList, (conversationId) =>
+    db.agentPlatform.checkpointsList(requireString(conversationId, 'Conversation id'))
+  )
+
+  register(CHANNELS.codeCheckpointRestore, (checkpointId) =>
+    codeService.restoreCheckpoint(requireString(checkpointId, 'Checkpoint id'))
   )
 
   // -- tools --------------------------------------------------------------------
@@ -1176,42 +1276,6 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return imBridgeManager.setWebhook(url as string | null)
   })
 
-  // -- Write / Design documents ----------------------------------------------
-
-  register(CHANNELS.documentsGet, (conversationId) =>
-    db.documents.getDoc(requireString(conversationId, 'Conversation id'))
-  )
-
-  register(CHANNELS.documentsSave, (conversationId, content) => {
-    const id = requireString(conversationId, 'Conversation id')
-    if (typeof content !== 'string') throw invalid('Document content must be a string.')
-    if (content.length > 2_000_000) throw invalid('Document is too large.')
-    return db.documents.upsertDoc(id, undefined, content)
-  })
-
-  register(CHANNELS.documentsListHtml, (conversationId) =>
-    db.documents.listByConversation(requireString(conversationId, 'Conversation id'), 'html')
-  )
-
-  register(CHANNELS.documentsExport, async (id, format) => {
-    const docId = requireString(id, 'Document id')
-    const fmt = parseInput(documentExportFormatSchema, format)
-    const doc = found(db.documents.getById(docId), 'Document')
-    const isHtml = fmt === 'html'
-    const content = isHtml ? documentToHtml(doc.title, doc.kind, doc.content) : doc.content
-    const ext = isHtml ? 'html' : doc.kind === 'html' ? 'html' : 'md'
-    const base = (doc.title || 'document').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '-') || 'document'
-    return saveTextFile(
-      `${base}.${ext}`,
-      [
-        isHtml
-          ? { name: 'HTML', extensions: ['html'] }
-          : { name: 'Markdown', extensions: ['md'] },
-      ],
-      content
-    )
-  })
-
   // -- workflows --------------------------------------------------------------
 
   const asGraph = (value: unknown): WorkflowGraph =>
@@ -1272,6 +1336,70 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     db.workflows.listRuns(requireString(id, 'Workflow id'))
   )
 
+  // One call for the Home overview + sidebar Scheduled section: every workflow
+  // with a schedule (paused included) paired with its latest run, plus recent
+  // runs across all workflows. Latest-run status comes from a dedicated
+  // per-workflow query so a frequent workflow can't evict the others.
+  register(CHANNELS.workflowsOverview, (): WorkflowsOverview => {
+    const latestByWorkflow = new Map(
+      db.workflows.latestRunsPerWorkflow().map((run) => [run.workflowId, run])
+    )
+    return {
+      scheduled: db.workflows
+        .list()
+        .filter((w) => w.schedule !== null)
+        .map((workflow) => ({
+          workflow,
+          latestRun: latestByWorkflow.get(workflow.id) ?? null,
+        })),
+      recentRuns: db.workflows.listRecentRunsWithNames(),
+    }
+  })
+
+  // -- standalone scheduled tasks --------------------------------------------
+
+  const scheduledTaskInputSchema = z.object({
+    title: z.string().trim().min(1).max(120),
+    prompt: z.string().trim().min(1).max(20_000),
+    recurrence: z.enum(['once', 'hourly', 'daily', 'weekly']),
+    runAt: z.number().int().positive(),
+  }) satisfies z.ZodType<ScheduledTaskInput>
+
+  const signalScheduledTasksChanged = (): void => {
+    for (const win of deps.getWindows()) {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send(CHANNELS.scheduledTasksChanged, {})
+      }
+    }
+  }
+
+  register(CHANNELS.scheduledTasksList, () => db.scheduledTasks.list())
+  register(CHANNELS.scheduledTasksCreate, (input) => {
+    const parsed = parseInput(scheduledTaskInputSchema, input)
+    if (parsed.runAt < Date.now() - 60_000) {
+      throw invalid('The first run time cannot be in the past.')
+    }
+    const task = db.scheduledTasks.create(parsed)
+    signalScheduledTasksChanged()
+    return task
+  })
+  register(CHANNELS.scheduledTasksSetEnabled, (id, enabled) => {
+    const task = found(
+      db.scheduledTasks.setEnabled(
+        requireString(id, 'Scheduled task id'),
+        requireBoolean(enabled, 'Enabled')
+      ),
+      'Scheduled task'
+    )
+    signalScheduledTasksChanged()
+    return task
+  })
+  register(CHANNELS.scheduledTasksDelete, (id) => {
+    db.scheduledTasks.remove(requireString(id, 'Scheduled task id'))
+    signalScheduledTasksChanged()
+    return undefined
+  })
+
   // -- agent profiles ----------------------------------------------------------
 
   const agentInputSchema = z.object({
@@ -1307,6 +1435,67 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.agentsDelete, (id) => {
     db.agents.remove(requireString(id, 'Agent id'))
     return undefined
+  })
+  register(CHANNELS.agentRunsList, (conversationId) =>
+    db.agentPlatform.runsList(
+      conversationId === undefined ? undefined : requireString(conversationId, 'Conversation id')
+    )
+  )
+  register(CHANNELS.agentRunStop, (runId) =>
+    chatService.stopAgentRun(requireString(runId, 'Agent run id'))
+  )
+
+  const packHookSchema = z.object({
+    id: z.string().min(1).max(200),
+    name: z.string().min(1).max(200),
+    event: z.enum(['afterAgent', 'afterApply', 'beforeCommit']),
+    command: z.string().min(1).max(2000),
+    enabled: z.boolean(),
+  })
+  const agentPackSchema = z.object({
+    format: z.literal('grasberg-agent-pack'),
+    version: z.literal(1),
+    agents: z.array(agentInputSchema).max(200),
+    skills: z.array(z.object({
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).optional(),
+      content: z.string().max(500_000),
+      pluginName: z.string().max(200).nullable().optional(),
+    })).max(500),
+    hooks: z.array(packHookSchema).max(100),
+  })
+
+  register(CHANNELS.agentPackExport, () => {
+    const pack = {
+      format: 'grasberg-agent-pack' as const,
+      version: 1 as const,
+      agents: db.agents.list().map(({ name, description, systemPrompt, providerId, modelId, toolIds, maxRounds, enabled }) =>
+        ({ name, description, systemPrompt, providerId, modelId, toolIds, maxRounds, enabled })),
+      skills: db.skills.list().map(({ name, description, content, pluginName }) =>
+        ({ name, description, content, pluginName })),
+      hooks: db.settings.get().projectHooks,
+    }
+    return saveTextFile(
+      'grasberg-agent-pack.json',
+      [{ name: 'Grasberg agent pack', extensions: ['json'] }],
+      JSON.stringify(pack, null, 2)
+    )
+  })
+
+  register(CHANNELS.agentPackImport, async () => {
+    const picked = await showOpen({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] })
+    if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
+    const parsed = parseInput(agentPackSchema, JSON.parse(await readFile(picked.filePaths[0], 'utf8')))
+    for (const agent of parsed.agents) {
+      const existing = db.agents.getByName(agent.name)
+      if (existing) db.agents.update(existing.id, agent)
+      else db.agents.create(agent)
+    }
+    for (const skill of parsed.skills) db.skills.upsertByName(skill)
+    const current = db.settings.get().projectHooks
+    const importedIds = new Set(parsed.hooks.map((hook) => hook.id))
+    db.settings.update({ projectHooks: [...current.filter((hook) => !importedIds.has(hook.id)), ...parsed.hooks] })
+    return { canceled: false, agents: parsed.agents.length, skills: parsed.skills.length, hooks: parsed.hooks.length }
   })
 
   // -- knowledge bases (RAG) ----------------------------------------------------

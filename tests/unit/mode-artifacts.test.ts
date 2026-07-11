@@ -1,48 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   extractCodeChanges,
-  extractDocument,
-  extractHtmlArtifacts,
   extractMemoryDirectives,
   extractWorkspaceItems,
 } from '../../src/main/services/mode-artifacts'
-
-describe('extractDocument (Write mode)', () => {
-  it('extracts the last uld-doc block with title and full body', () => {
-    const content = [
-      'Here is a draft:',
-      '```uld-doc',
-      '{"title":"My Essay"}',
-      '# Intro',
-      '',
-      'Body text.',
-      '```',
-    ].join('\n')
-    expect(extractDocument(content)).toEqual({
-      title: 'My Essay',
-      content: '# Intro\n\nBody text.',
-    })
-  })
-
-  it('returns null when there is no document block', () => {
-    expect(extractDocument('just chatting')).toBeNull()
-  })
-})
-
-describe('extractHtmlArtifacts (Design mode)', () => {
-  it('extracts uld-html prototypes', () => {
-    const content = [
-      '```uld-html',
-      '{"title":"Landing"}',
-      '<!doctype html><html><body>Hi</body></html>',
-      '```',
-    ].join('\n')
-    const arts = extractHtmlArtifacts(content)
-    expect(arts).toHaveLength(1)
-    expect(arts[0].title).toBe('Landing')
-    expect(arts[0].content).toContain('<!doctype html>')
-  })
-})
 
 describe('extractCodeChanges', () => {
   it('extracts a single create block with its full content', () => {

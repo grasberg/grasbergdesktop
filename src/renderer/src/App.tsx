@@ -1,16 +1,13 @@
 import { useEffect } from 'react'
 import type { ConversationMode } from '@shared/types'
 import ChatView from '@/components/chat/ChatView'
-import CodeView from '@/components/code/CodeView'
-import CoworkView from '@/components/cowork/CoworkView'
-import WriteView from '@/components/write/WriteView'
-import DesignView from '@/components/design/DesignView'
+import WorkView from '@/components/work/WorkView'
 import WorkflowsView from '@/components/workflows/WorkflowsView'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 import Onboarding from '@/components/onboarding/Onboarding'
 import CommandPalette from '@/components/CommandPalette'
 import ShortcutsHelp from '@/components/ShortcutsHelp'
-import EmptyState from '@/components/EmptyState'
+import HomeView from '@/components/home/HomeView'
 import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
 import UserQuestionDialog from '@/components/UserQuestionDialog'
@@ -24,13 +21,12 @@ import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
 import { useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
+import { useWorkflowsStore } from '@/stores/workflows'
+import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 
 /** The active conversation's mode picks which main view renders. */
 function ModeView({ mode }: { mode: ConversationMode }): React.JSX.Element {
-  if (mode === 'code') return <CodeView />
-  if (mode === 'cowork') return <CoworkView />
-  if (mode === 'write') return <WriteView />
-  if (mode === 'design') return <DesignView />
+  if (mode === 'work') return <WorkView />
   return <ChatView />
 }
 
@@ -47,7 +43,7 @@ export default function App(): React.JSX.Element {
     s.conversation && s.conversation.id === activeId ? s.conversation.mode : undefined
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
-  const workflowsOpen = useUiStore((s) => s.workflowsOpen)
+  const view = useUiStore((s) => s.view)
 
   useKeyboardShortcuts()
 
@@ -78,6 +74,10 @@ export default function App(): React.JSX.Element {
     void useSettingsStore.getState().load()
     void useProvidersStore.getState().load()
     void useConversationsStore.getState().load()
+    // Loaded at boot (not just when Home mounts) so the sidebar's Scheduled
+    // section and failure dot work from the first paint.
+    void useWorkflowsStore.getState().load()
+    void useScheduledTasksStore.getState().load()
     const unsubscribeStream = window.uld.chat.onStreamEvent((envelope) => {
       useChatStore.getState().handleStreamEvent(envelope)
     })
@@ -100,6 +100,14 @@ export default function App(): React.JSX.Element {
     const unsubscribeMcp = window.uld.mcp.onServersChanged((runtime) => {
       useMcpStore.getState().setRuntime(runtime)
     })
+    // Workflow runs (manual or scheduled) push their result the moment they
+    // are persisted — keeps Home + the sidebar Scheduled section live.
+    const unsubscribeRuns = window.uld.workflows.onRunFinished((evt) => {
+      useWorkflowsStore.getState().handleRunFinished(evt)
+    })
+    const unsubscribeScheduledTasks = window.uld.scheduledTasks.onChanged(() => {
+      void useScheduledTasksStore.getState().load()
+    })
     return () => {
       unsubscribeStream()
       unsubscribeApproval()
@@ -107,6 +115,8 @@ export default function App(): React.JSX.Element {
       unsubscribeQuestion()
       unsubscribeQuestionSettled()
       unsubscribeMcp()
+      unsubscribeRuns()
+      unsubscribeScheduledTasks()
     }
   }, [])
 
@@ -145,15 +155,27 @@ export default function App(): React.JSX.Element {
 
   return (
     <>
-      <div className="app-layout">
+      <div
+        className={`app-layout${view === 'conversation' && activeId ? ` app-mode-${mode}` : ''}`}
+      >
         <Sidebar />
-        <main className="app-main" aria-label={workflowsOpen ? 'Workflows' : 'Conversation'}>
-          {workflowsOpen ? (
+        <main
+          className="app-main"
+          aria-label={
+            view === 'workflows'
+              ? 'Workflows'
+              : view === 'conversation' && activeId
+                ? 'Conversation'
+                : 'Home overview'
+          }
+        >
+          {view === 'workflows' ? (
             <WorkflowsView />
-          ) : activeId ? (
+          ) : view === 'conversation' && activeId ? (
             <ModeView mode={mode} />
           ) : (
-            <EmptyState />
+            // 'home', plus the fallback while 'conversation' has no selection.
+            <HomeView />
           )}
         </main>
       </div>

@@ -19,6 +19,13 @@ const MAX_ATTACHMENT_TEXT_BYTES = 512 * 1024
  * and providers reject very large images, so keep the on-disk cap modest.
  */
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024
+export const MAX_IMAGE_BASE64_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4
+export const PASTED_IMAGE_MIME_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+] as const
 
 /** Raster image extensions we send to vision models (svg stays on the text path). */
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif'])
@@ -171,6 +178,33 @@ const EXTENSION_BY_IMAGE_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
+}
+
+/** Persists clipboard image bytes and returns an immediately previewable attachment. */
+export async function storePastedImage(
+  imageDir: string,
+  mimeType: (typeof PASTED_IMAGE_MIME_TYPES)[number],
+  dataBase64: string
+): Promise<Attachment> {
+  const bytes = Buffer.from(dataBase64, 'base64')
+  if (bytes.byteLength === 0) throw new Error('The pasted image is empty')
+  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error('The pasted image exceeds the 4 MB limit')
+
+  const id = randomUUID()
+  const ext = EXTENSION_BY_IMAGE_MIME[mimeType]
+  const storageKey = `${id}.${ext}`
+  await mkdir(imageDir, { recursive: true })
+  await writeFile(join(imageDir, storageKey), bytes)
+
+  return {
+    id,
+    name: `pasted-image-${id.slice(0, 8)}.${ext}`,
+    mimeType,
+    sizeBytes: bytes.byteLength,
+    kind: 'image',
+    storageKey,
+    dataUrl: `data:${mimeType};base64,${dataBase64}`,
+  }
 }
 
 /** Short filesystem-safe slug of a prompt for the display filename. */

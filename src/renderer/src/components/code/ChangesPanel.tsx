@@ -1,5 +1,7 @@
-import { useState, type ReactElement } from 'react'
-import type { CodeChange } from '@shared/types'
+import { useEffect, useState, type ReactElement } from 'react'
+import type { Checkpoint, CodeChange } from '@shared/types'
+import { unwrap } from '@/api/uld'
+import { useUiStore } from '@/stores/ui'
 import { useChatStore } from '@/stores/chat'
 import { useCodeStore } from '@/stores/code'
 import CommitBar from './CommitBar'
@@ -180,6 +182,18 @@ export default function ChangesPanel(): ReactElement {
   const loading = useCodeStore((s) => s.loadingChanges)
   const conversationId = useChatStore((s) => s.conversation?.id ?? null)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+
+  useEffect(() => {
+    if (!conversationId) {
+      setCheckpoints([])
+      return
+    }
+    void window.uld.code.checkpointsList(conversationId).then((result) => {
+      if (result.ok) setCheckpoints(result.data)
+    })
+  }, [conversationId, changes])
 
   const all = scope === 'all'
   const scoped = all
@@ -219,6 +233,41 @@ export default function ChangesPanel(): ReactElement {
       </div>
 
       <div className="code-changes-scroll">
+        {checkpoints.length > 0 ? (
+          <div className="code-changes-history">
+            <button
+              type="button"
+              className="code-changes-history-toggle"
+              aria-expanded={checkpointsOpen}
+              onClick={() => setCheckpointsOpen((value) => !value)}
+            >
+              <span className={`code-change-chevron ${checkpointsOpen ? 'open' : ''}`} aria-hidden>▸</span>
+              Checkpoints ({checkpoints.length})
+            </button>
+            {checkpointsOpen ? checkpoints.map((checkpoint) => (
+              <div className="code-change card code-change-past" key={checkpoint.id}>
+                <div className="code-change-head">
+                  <span className="code-change-path">{checkpoint.label}</span>
+                  <span className="badge">seq {checkpoint.messageSeq}</span>
+                </div>
+                <div className="code-change-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost code-change-btn"
+                    onClick={() => void unwrap(window.uld.code.checkpointRestore(checkpoint.id))
+                      .then(() => useCodeStore.getState().loadChanges())
+                      .catch((error: unknown) => useUiStore.getState().toast(
+                        error instanceof Error ? error.message : 'Could not restore checkpoint.',
+                        'error'
+                      ))}
+                  >
+                    Restore
+                  </button>
+                </div>
+              </div>
+            )) : null}
+          </div>
+        ) : null}
         {proposed.length === 0 && (
           <div className="code-changes-empty">
             {all

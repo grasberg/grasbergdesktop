@@ -3,7 +3,6 @@ import type { KnowledgeBase, ProviderErrorCode } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
 import { usePromptsStore } from '@/stores/prompts'
 import MessageItem from './MessageItem'
-import ModelSelector from './ModelSelector'
 import Composer from './Composer'
 import './chat.css'
 
@@ -268,7 +267,6 @@ export default function ChatView(): ReactElement {
           {conversation ? conversation.title : 'Chat'}
         </h1>
         <div className="chat-header-actions">
-          <ModelSelector />
           <ConversationSettingsButton />
         </div>
       </header>

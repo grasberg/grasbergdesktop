@@ -600,4 +600,186 @@ export const MIGRATIONS: Migration[] = [
     // widening a CHECK constraint).
     statements: [`ALTER TABLE messages ADD COLUMN research_json TEXT`],
   },
+  {
+    version: 24,
+    name: 'two-modes-delete-legacy-content',
+    // The five conversation modes collapse into 'chat' | 'work'. Per an
+    // explicit product decision the legacy cowork/code/write/design content is
+    // DELETED, not migrated: chat conversations survive untouched. Explicit
+    // child-first deletes (no cascade reliance) inside one transaction, so a
+    // crash mid-way rolls back cleanly. code_projects rows are NOT touched —
+    // user-granted folders remain grants for Work mode.
+    statements: [
+      `DELETE FROM messages WHERE conversation_id IN
+         (SELECT id FROM conversations WHERE mode <> 'chat')`,
+      `DELETE FROM documents WHERE conversation_id IN
+         (SELECT id FROM conversations WHERE mode <> 'chat')`,
+      // conversation_id has no FK on code_changes — explicit cleanup.
+      `DELETE FROM code_changes WHERE conversation_id IN
+         (SELECT id FROM conversations WHERE mode <> 'chat')`,
+      `DELETE FROM conversations WHERE mode <> 'chat'`,
+      // Workspaces were a cowork-only concept; every owner is gone.
+      `DELETE FROM workspace_items`,
+      `DELETE FROM workspaces`,
+      `UPDATE conversations SET workspace_id = NULL`,
+      // Chat holds no files by construction in the two-mode model.
+      `UPDATE conversations SET project_id = NULL WHERE mode = 'chat'`,
+      `DELETE FROM projects WHERE mode <> 'chat'`,
+      // Defensive unfiling: any task pointing at a deleted project.
+      `UPDATE conversations SET project_ref = NULL
+         WHERE project_ref IS NOT NULL
+           AND project_ref NOT IN (SELECT id FROM projects)`,
+    ],
+  },
+  {
+    version: 25,
+    name: 'two-modes-drop-mode-checks',
+    // Drop the mode CHECK on conversations and projects entirely (the v13
+    // precedent: the enum is enforced by zod at the IPC boundary, so future
+    // mode changes need no migration). CHECKs can't be altered in place —
+    // rebuild both tables. The conversations rebuild runs outside a
+    // transaction so PRAGMA foreign_keys can be toggled: the messages and
+    // documents FKs (ON DELETE CASCADE) would otherwise wipe children when the
+    // old table drops. Explicit column lists, never SELECT * (v13 pattern).
+    // projects has no FK children but rides along in the same migration.
+    noTransaction: true,
+    statements: [
+      `PRAGMA foreign_keys = OFF`,
+      `CREATE TABLE conversations_new (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL DEFAULT 'chat',
+        title TEXT NOT NULL DEFAULT 'New chat',
+        provider_id TEXT,
+        model_id TEXT,
+        system_prompt TEXT,
+        params_json TEXT NOT NULL DEFAULT '{}',
+        workspace_id TEXT,
+        project_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        summary_text TEXT,
+        summary_through_seq INTEGER,
+        project_ref TEXT,
+        moa_preset_id TEXT,
+        knowledge_base_id TEXT
+      )`,
+      `INSERT INTO conversations_new
+         (id, mode, title, provider_id, model_id, system_prompt, params_json,
+          workspace_id, project_id, created_at, updated_at, summary_text,
+          summary_through_seq, project_ref, moa_preset_id, knowledge_base_id)
+       SELECT id, mode, title, provider_id, model_id, system_prompt, params_json,
+          workspace_id, project_id, created_at, updated_at, summary_text,
+          summary_through_seq, project_ref, moa_preset_id, knowledge_base_id
+       FROM conversations`,
+      `DROP TABLE conversations`,
+      `ALTER TABLE conversations_new RENAME TO conversations`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_mode ON conversations(mode, updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_ref)`,
+      `CREATE TABLE projects_new (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `INSERT INTO projects_new (id, mode, name, created_at, updated_at)
+       SELECT id, mode, name, created_at, updated_at FROM projects`,
+      `DROP TABLE projects`,
+      `ALTER TABLE projects_new RENAME TO projects`,
+      `CREATE INDEX IF NOT EXISTS idx_projects_mode ON projects(mode, updated_at DESC)`,
+      `PRAGMA foreign_keys = ON`,
+    ],
+  },
+  {
+    version: 26,
+    name: 'agent-platform',
+    // Persistent control-plane records for background agents and reversible
+    // code checkpoints. Project hooks are declarative data; execution remains
+    // behind the same main-process policy/approval boundary as other tools.
+    statements: [
+      `CREATE TABLE agent_runs (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT,
+        project_id TEXT,
+        agent_name TEXT,
+        task TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running','done','error','stopped')),
+        result TEXT NOT NULL DEFAULT '',
+        worktree_path TEXT,
+        provider_id TEXT,
+        model_id TEXT,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER
+      )`,
+      `CREATE INDEX idx_agent_runs_started ON agent_runs(started_at DESC)`,
+      `CREATE INDEX idx_agent_runs_conversation ON agent_runs(conversation_id, started_at DESC)`,
+      `CREATE TABLE checkpoints (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        change_id TEXT,
+        label TEXT NOT NULL,
+        message_seq INTEGER NOT NULL DEFAULT 0,
+        files_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX idx_checkpoints_conversation ON checkpoints(conversation_id, created_at DESC)`,
+    ],
+  },
+  {
+    version: 27,
+    name: 'standalone-scheduled-tasks',
+    // Prompt-based tasks with their own clock schedule and result state. These
+    // are deliberately independent from workflow graphs/schedules.
+    statements: [
+      `CREATE TABLE scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        recurrence TEXT NOT NULL CHECK (recurrence IN ('once','daily','weekly')),
+        next_run_at INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_run_at INTEGER,
+        last_status TEXT NOT NULL DEFAULT 'idle'
+          CHECK (last_status IN ('idle','running','ok','error')),
+        last_output TEXT NOT NULL DEFAULT '',
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX idx_scheduled_tasks_due
+         ON scheduled_tasks(enabled, next_run_at)`,
+    ],
+  },
+  {
+    version: 28,
+    name: 'scheduled-task-recurrence-uncheck',
+    // Adds 'hourly' recurrence. Rebuild drops the recurrence CHECK entirely
+    // (v13 pattern: zod enforces the enum at the boundary), so future values
+    // need no migration. scheduled_tasks has no FK relationships — a plain
+    // transactional rebuild is safe.
+    statements: [
+      `CREATE TABLE scheduled_tasks_new (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        recurrence TEXT NOT NULL,
+        next_run_at INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_run_at INTEGER,
+        last_status TEXT NOT NULL DEFAULT 'idle'
+          CHECK (last_status IN ('idle','running','ok','error')),
+        last_output TEXT NOT NULL DEFAULT '',
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `INSERT INTO scheduled_tasks_new SELECT * FROM scheduled_tasks`,
+      `DROP TABLE scheduled_tasks`,
+      `ALTER TABLE scheduled_tasks_new RENAME TO scheduled_tasks`,
+      `CREATE INDEX idx_scheduled_tasks_due
+         ON scheduled_tasks(enabled, next_run_at)`,
+    ],
+  },
 ]

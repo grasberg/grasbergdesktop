@@ -16,6 +16,7 @@ import PrivacyTab from './PrivacyTab'
 import AboutTab from './AboutTab'
 import AgentsTab from './AgentsTab'
 import KnowledgeTab from './KnowledgeTab'
+import AgentPlatformTab from './AgentPlatformTab'
 import './settings.css'
 
 const TABS = [
@@ -23,6 +24,7 @@ const TABS = [
   { id: 'defaults', label: 'Defaults' },
   { id: 'moa', label: 'Mixture of Agents' },
   { id: 'agents', label: 'Agents' },
+  { id: 'agent-platform', label: 'Agent platform' },
   { id: 'knowledge', label: 'Knowledge' },
   { id: 'tools', label: 'Tools' },
   { id: 'mcp', label: 'MCP' },
@@ -122,6 +124,7 @@ export default function SettingsPanel() {
             {tab === 'defaults' ? <DefaultsTab /> : null}
             {tab === 'moa' ? <MoaTab /> : null}
             {tab === 'agents' ? <AgentsTab /> : null}
+            {tab === 'agent-platform' ? <AgentPlatformTab /> : null}
             {tab === 'knowledge' ? <KnowledgeTab /> : null}
             {tab === 'tools' ? <ToolsTab /> : null}
             {tab === 'mcp' ? <McpServersTab /> : null}

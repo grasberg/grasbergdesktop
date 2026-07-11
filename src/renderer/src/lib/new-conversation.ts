@@ -1,7 +1,7 @@
 /**
- * Shared "new conversation" behavior for the sidebar's New button/menu and the
- * global Ctrl/Cmd+N shortcut. (EmptyState and CommandPalette intentionally have
- * their own variants — do not funnel them through here.)
+ * Shared "new conversation" behavior for the sidebar's New button/menu, the
+ * global Ctrl/Cmd+N shortcut, and Home's quick actions. (CommandPalette
+ * intentionally has its own variant — do not funnel it through here.)
  */
 
 import type { ConversationMode } from '@shared/types'

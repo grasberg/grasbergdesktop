@@ -27,7 +27,7 @@ function CapabilityBadges({ model }: { model: ModelInfo }): ReactElement {
   )
 }
 
-export default function ModelSelector(): ReactElement {
+export default function ModelSelector({ placement = 'header' }: { placement?: 'header' | 'composer' }): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
   const updateConversation = useChatStore((s) => s.updateConversation)
   const providers = useProvidersStore((s) => s.providers)
@@ -57,6 +57,7 @@ export default function ModelSelector(): ReactElement {
   const buttonLabel = effectiveProvider
     ? `${effectiveProvider.label} · ${effectiveModelId || '?'}${isOverride ? '' : ' (default)'}`
     : 'Select model'
+  const compactLabel = effectiveModelId || effectiveProvider?.label || 'Select model'
 
   // Fetch (cached) model lists for usable providers when the popover opens.
   useEffect(() => {
@@ -125,11 +126,11 @@ export default function ModelSelector(): ReactElement {
   }
 
   return (
-    <div className="model-selector" ref={rootRef}>
+    <div className={`model-selector${placement === 'composer' ? ' model-selector-composer' : ''}`} ref={rootRef}>
       <button
         ref={triggerRef}
         type="button"
-        className="btn btn-ghost ms-trigger"
+        className={`btn btn-ghost ms-trigger${placement === 'composer' ? ' ms-trigger-composer' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`Model: ${buttonLabel}`}
@@ -142,14 +143,16 @@ export default function ModelSelector(): ReactElement {
           }
         }}
       >
-        <span className="ms-trigger-label">{buttonLabel}</span>
+        <span className="ms-trigger-label" title={buttonLabel}>
+          {placement === 'composer' ? compactLabel : buttonLabel}
+        </span>
         <span className="ms-trigger-caret" aria-hidden>
           ▾
         </span>
       </button>
 
       {open && (
-        <div className="ms-popover" ref={popRef} role="listbox" onKeyDown={onPopoverKeyDown}>
+        <div className={`ms-popover${placement === 'composer' ? ' ms-popover-composer' : ''}`} ref={popRef} role="listbox" onKeyDown={onPopoverKeyDown}>
           <button
             type="button"
             data-nav-row

@@ -17,20 +17,12 @@ describe('buildModeSystemPrompt', () => {
     expect(prompt).not.toContain('uld-memory')
   })
 
-  it('cowork mode instructs the uld-item format with upsert-by-title semantics', () => {
-    const prompt = buildModeSystemPrompt('cowork')
-    expect(prompt).toContain('Cowork mode')
-    expect(prompt).toContain('```uld-item')
-    // The update-instead-of-duplicate rule (matches itemUpsertByKindTitle).
-    expect(prompt).toContain('UPDATES that item')
-    expect(prompt).toContain('"status":"todo|doing|done"')
-    // Clarify-then-plan-then-verify workflow.
-    expect(prompt).toContain('clarifying questions')
-    expect(prompt).toContain('verification step')
-  })
-
-  it('code mode instructs the uld-change format and working practices', () => {
-    const prompt = buildModeSystemPrompt('code')
+  it('work mode instructs files-first delivery, uld-change and working practices', () => {
+    const prompt = buildModeSystemPrompt('work')
+    expect(prompt).toContain('Work mode')
+    // Deliverables are files; the workspace appears on first write.
+    expect(prompt).toContain('FILES')
+    expect(prompt).toContain('workspace folder automatically the first time you write a file')
     expect(prompt).toContain('```uld-change')
     // Read-before-propose, scope discipline, security, code references.
     expect(prompt).toContain('NEVER propose changes to code you have not read')
@@ -54,30 +46,42 @@ describe('buildModeSystemPrompt', () => {
     expect(prompt).toContain('web_search')
     expect(prompt).toContain('background=true')
     expect(prompt).toContain('ask_user_question')
+    // Legacy single-document / prototype-block formats are gone.
+    expect(prompt).not.toContain('uld-doc')
+    expect(prompt).not.toContain('uld-html')
   })
 
-  it('code mode appends the plan-mode section only when planMode is set', () => {
-    const planning = buildModeSystemPrompt('code', { planMode: true })
+  it('work mode instructs the uld-item format with upsert-by-title semantics', () => {
+    const prompt = buildModeSystemPrompt('work')
+    expect(prompt).toContain('```uld-item')
+    // The update-instead-of-duplicate rule (matches itemUpsertByKindTitle).
+    expect(prompt).toContain('UPDATES it')
+    expect(prompt).toContain('"status":"todo|doing|done"')
+    // Clarify-then-plan-then-verify workflow.
+    expect(prompt).toContain('clarifying questions')
+    expect(prompt).toContain('verification step')
+  })
+
+  it('work mode appends the plan-mode section only when planMode is set', () => {
+    const planning = buildModeSystemPrompt('work', { planMode: true })
     expect(planning).toContain('PLAN MODE IS ACTIVE')
     expect(planning).toContain('do not call edit_file, write_file or run_shell_command')
 
-    expect(buildModeSystemPrompt('code')).not.toContain('PLAN MODE IS ACTIVE')
-    // Plan mode is a code-mode concept only.
+    expect(buildModeSystemPrompt('work')).not.toContain('PLAN MODE IS ACTIVE')
+    // Plan mode is a work-mode concept only.
     expect(buildModeSystemPrompt('chat', { planMode: true })).not.toContain('PLAN MODE IS ACTIVE')
   })
 
-  it('design mode instructs the uld-html format and design approach', () => {
-    const prompt = buildModeSystemPrompt('design')
-    expect(prompt).toContain('```uld-html')
-    // Aesthetic-direction guidance adapted to the sandboxed (offline) preview.
+  it('work mode carries the design guidance as self-contained html files', () => {
+    const prompt = buildModeSystemPrompt('work')
+    expect(prompt).toContain('self-contained .html FILES')
     expect(prompt).toContain('aesthetic direction')
-    expect(prompt).toContain('External fonts cannot load in the sandboxed preview')
     expect(prompt).toContain('CSS variables')
     expect(prompt).toContain('AI-look tropes')
   })
 
   it('adds tool-usage guidance (untrusted results, sources) when tools are callable', () => {
-    const prompt = buildModeSystemPrompt('cowork', {
+    const prompt = buildModeSystemPrompt('work', {
       toolsAvailable: true,
       toolNames: ['fetch_url', 'browser'],
     })
@@ -119,7 +123,7 @@ describe('buildModeSystemPrompt', () => {
   })
 
   it('memory enabled with no memories still instructs the format', () => {
-    const prompt = buildModeSystemPrompt('cowork', { memoryEnabled: true, memories: [] })
+    const prompt = buildModeSystemPrompt('work', { memoryEnabled: true, memories: [] })
     expect(prompt).toContain('```uld-memory')
     expect(prompt).toContain('No memories are saved yet.')
     expect(prompt).not.toContain('Saved memories')
@@ -137,7 +141,7 @@ describe('buildModeSystemPrompt', () => {
   })
 
   it('omits all memory text in every mode when not enabled', () => {
-    for (const mode of ['chat', 'cowork', 'code', 'write', 'design'] as const) {
+    for (const mode of ['chat', 'work'] as const) {
       expect(buildModeSystemPrompt(mode)).not.toContain('uld-memory')
       expect(buildModeSystemPrompt(mode, { memoryEnabled: false })).not.toContain('uld-memory')
     }

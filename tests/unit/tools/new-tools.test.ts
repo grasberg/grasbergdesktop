@@ -34,7 +34,7 @@ beforeEach(() => {
   writeFileSync(join(projectDir, 'src', 'beta.ts'), 'export const value = 42\n')
   writeFileSync(join(projectDir, 'src', 'beta.test.ts'), 'test("beta", () => {})\n')
   projectId = db.code.projectUpsertByPath(projectDir, 'project').id
-  conversationId = db.conversations.create({ mode: 'code', projectId }).id
+  conversationId = db.conversations.create({ mode: 'work', projectId }).id
 })
 
 afterEach(() => {

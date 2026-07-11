@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
-import type { AgentProfile } from '@shared/types'
+import type { AgentProfile, AgentRun } from '@shared/types'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
@@ -184,12 +184,14 @@ export default function AgentsTab(): ReactElement {
   const toast = useUiStore((s) => s.toast)
   const toolsLoaded = useToolsStore((s) => s.loaded)
   const [agents, setAgents] = useState<AgentProfile[]>([])
+  const [runs, setRuns] = useState<AgentRun[]>([])
   const [loaded, setLoaded] = useState(false)
   const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<AgentProfile>()
 
   const load = useCallback(async () => {
-    const res = await window.uld.agents.list()
+    const [res, runRes] = await Promise.all([window.uld.agents.list(), window.uld.agents.runs()])
     if (res.ok) setAgents(res.data)
+    if (runRes.ok) setRuns(runRes.data)
     setLoaded(true)
   }, [])
 
@@ -197,6 +199,12 @@ export default function AgentsTab(): ReactElement {
     void load()
     if (!toolsLoaded) void useToolsStore.getState().load()
   }, [load, toolsLoaded])
+
+  useEffect(() => {
+    if (!runs.some((run) => run.status === 'running')) return
+    const timer = window.setInterval(() => void load(), 2000)
+    return () => window.clearInterval(timer)
+  }, [runs, load])
 
   const setEnabled = async (agent: AgentProfile, enabled: boolean): Promise<void> => {
     const res = await window.uld.agents.update(agent.id, { enabled })
@@ -277,6 +285,31 @@ export default function AgentsTab(): ReactElement {
           ))}
         </ul>
       )}
+
+      {runs.length > 0 ? (
+        <section className="agent-runs" aria-label="Recent agent runs">
+          <h4>Recent runs</h4>
+          <ul className="prompt-list">
+            {runs.slice(0, 20).map((run) => (
+              <li key={run.id} className="prompt-item card">
+                <div className="prompt-item-main">
+                  <strong className="prompt-item-title">
+                    {run.agentName ?? 'delegate'} · {run.status}
+                  </strong>
+                  <p className="prompt-item-body">{run.task}</p>
+                  {run.result ? <p className="field-hint">{run.result.slice(0, 240)}</p> : null}
+                </div>
+                <span className={`badge agent-run-${run.status}`}>{run.status}</span>
+                {run.status === 'running' ? (
+                  <button type="button" className="btn btn-ghost" onClick={() => void window.uld.agents.stopRun(run.id).then(() => load())}>
+                    Stop
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </section>
   )
 }

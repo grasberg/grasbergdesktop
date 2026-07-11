@@ -680,6 +680,71 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'schedule_task',
+    name: 'schedule_task',
+    description:
+      'Create, list or cancel scheduled tasks: saved prompts this app runs automatically at a ' +
+      'chosen local time, once or repeating hourly/daily/weekly (while the app is running). ' +
+      'The saved prompt runs headlessly in a FRESH context with tools enabled — it does not ' +
+      'see this conversation, so write it self-contained. Results land in the Scheduled tasks ' +
+      'panel, not in this chat. For "create": give title, prompt, recurrence, and when — ' +
+      'either time ("HH:MM", 24-hour local; a passed time rolls to the next occurrence), ' +
+      'optionally with date ("YYYY-MM-DD"), or in_minutes from now. "Every hour" needs no ' +
+      'time at all. Use "list" to see existing tasks with their ids, "cancel" with an id to ' +
+      'remove one. Each call needs the user\'s approval.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['create', 'list', 'cancel'],
+          description: 'The operation to perform.',
+        },
+        title: {
+          type: 'string',
+          description: 'For "create": a short task name shown to the user (max 120 chars).',
+        },
+        prompt: {
+          type: 'string',
+          description:
+            'For "create": the complete, self-contained instruction to run on schedule ' +
+            '(the runner has no access to this conversation).',
+        },
+        recurrence: {
+          type: 'string',
+          enum: ['once', 'hourly', 'daily', 'weekly'],
+          description: 'For "create": how often the task runs.',
+        },
+        time: {
+          type: 'string',
+          description:
+            'For "create": wall-clock run time "HH:MM" (24-hour, the user\'s local time). ' +
+            'Without a date this means the next occurrence of that time.',
+        },
+        date: {
+          type: 'string',
+          description:
+            'For "create": first-run calendar date "YYYY-MM-DD" (local), combined with time.',
+        },
+        in_minutes: {
+          type: 'integer',
+          minimum: 1,
+          description: 'For "create": run this many minutes from now (instead of time/date).',
+        },
+        id: {
+          type: 'string',
+          description: 'For "cancel": the task id (from "list" or a create result).',
+        },
+      },
+      required: ['action'],
+    },
+    // Creates standing autonomous runs => per-call approval is the consent
+    // gate. Not 'mutating': it writes app state, never project files.
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
+  },
+  {
     id: 'run_shell_command',
     name: 'run_shell_command',
     description:

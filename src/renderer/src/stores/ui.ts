@@ -9,7 +9,8 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   settingsOpen: false,
   paletteOpen: false,
   shortcutsOpen: false,
-  workflowsOpen: false,
+  // Boot lands on the Home overview; selecting a conversation switches away.
+  view: 'home',
   workflowsInitialId: null,
   artifactPreview: null,
   toasts: [],
@@ -18,11 +19,16 @@ export const useUiStore = create<UiStoreState>()((set) => ({
     set({ resolvedTheme: t })
   },
 
-  // The Workflows builder replaces the main area when open. An optional
-  // workflow id deep-links the builder to that workflow (and is cleared by
-  // any call without one, so it is consumed exactly once).
+  setView(view) {
+    set({ view })
+  },
+
+  // The Workflows builder replaces the main area when open; closing it returns
+  // to the conversation surface (which falls back to Home when none is open).
+  // An optional workflow id deep-links the builder to that workflow (and is
+  // cleared by any call without one, so it is consumed exactly once).
   openWorkflows(open, workflowId) {
-    set({ workflowsOpen: open, workflowsInitialId: workflowId ?? null })
+    set({ view: open ? 'workflows' : 'conversation', workflowsInitialId: workflowId ?? null })
   },
 
   openSettings(open) {

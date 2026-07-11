@@ -29,7 +29,8 @@ import type { AppDatabase } from '../db/database'
 export const BACKUP_FORMAT = 'grasberg-backup'
 /** Pre-rebrand marker ("Grasberg"); still accepted on import. */
 export const LEGACY_BACKUP_FORMAT = 'grasberg-desktop-backup'
-export const BACKUP_VERSION = 2
+/** v3: the two-mode model — legacy modes remap to 'work' on import. */
+export const BACKUP_VERSION = 3
 
 /** A conversation with its transcript, as exported. */
 interface BackupConversation extends Conversation {
@@ -134,10 +135,11 @@ const backupMessageSchema = z
   })
   .passthrough()
 
+// Accepts pre-v3 backups' legacy modes; anything non-chat imports as 'work'.
 const conversationItemSchema = z
   .object({
     id: z.string().min(1).max(100),
-    mode: z.enum(['chat', 'cowork', 'code', 'write', 'design']),
+    mode: z.enum(['chat', 'work', 'cowork', 'code', 'write', 'design']),
     title: z.string().max(500),
     providerId: z.string().max(100).nullable().optional(),
     modelId: z.string().max(200).nullable().optional(),
@@ -309,7 +311,7 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
     try {
       db.conversations.create({
         id: c.id,
-        mode: c.mode,
+        mode: c.mode === 'chat' ? 'chat' : 'work',
         title: c.title || 'Imported chat',
         providerId: c.providerId ?? null,
         modelId: c.modelId ?? null,

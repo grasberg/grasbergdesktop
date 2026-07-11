@@ -5,7 +5,8 @@
  * output (the output node's text, else the last executed node's).
  */
 
-import type { WorkflowGraph, WorkflowRun, WorkflowRunResult } from '@shared/types'
+import type { Workflow, WorkflowGraph, WorkflowRun, WorkflowRunResult } from '@shared/types'
+import { WORKFLOW_RUN_TIMEOUT_MS } from '@shared/workflow-status'
 import type { AppDatabase } from '../db/database'
 import { runWorkflow, type WorkflowEngineDeps } from './engine'
 
@@ -16,8 +17,13 @@ export interface WorkflowRunner {
   stopAll(): void
 }
 
-/** Wall-clock cap per run: a hung provider call must not wedge the workflow. */
-const RUN_TIMEOUT_MS = 10 * 60_000
+export interface WorkflowRunnerHooks {
+  /**
+   * Fires right after a run row is persisted (manual or scheduled trigger).
+   * Best-effort like the insert itself — a throwing hook never breaks the run.
+   */
+  onRunRecorded?: (run: WorkflowRun, workflow: Workflow) => void
+}
 
 /** The output node's text (last one in execution order), else the last output. */
 export function pickRunOutput(graph: WorkflowGraph, result: WorkflowRunResult): string {
@@ -37,7 +43,8 @@ export function pickRunOutput(graph: WorkflowGraph, result: WorkflowRunResult): 
 
 export function createWorkflowRunner(
   db: AppDatabase,
-  deps: WorkflowEngineDeps
+  deps: WorkflowEngineDeps,
+  hooks: WorkflowRunnerHooks = {}
 ): WorkflowRunner {
   /** A workflow never runs concurrently with itself (manual + schedule races). */
   const running = new Map<string, AbortController>()
@@ -49,7 +56,7 @@ export function createWorkflowRunner(
       if (running.has(workflowId)) throw new Error('This workflow is already running.')
       const controller = new AbortController()
       running.set(workflowId, controller)
-      const timeout = setTimeout(() => controller.abort(), RUN_TIMEOUT_MS)
+      const timeout = setTimeout(() => controller.abort(), WORKFLOW_RUN_TIMEOUT_MS)
       const startedAt = Date.now()
       // Stamped up front so the scheduler's due check can't double-fire a
       // long-running workflow on the next tick.
@@ -57,7 +64,7 @@ export function createWorkflowRunner(
       try {
         const result = await runWorkflow(workflow.graph, { ...deps, signal: controller.signal })
         try {
-          db.workflows.insertRun({
+          const run = db.workflows.insertRun({
             workflowId,
             trigger,
             status: result.ok ? 'ok' : 'error',
@@ -66,6 +73,7 @@ export function createWorkflowRunner(
             startedAt,
             finishedAt: Date.now(),
           })
+          hooks.onRunRecorded?.(run, workflow)
         } catch {
           // Run history is best-effort — the result still reaches the caller.
         }

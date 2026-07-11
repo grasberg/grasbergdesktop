@@ -28,12 +28,19 @@ import {
   type PromptTemplatesRepository,
 } from './repositories/prompt-templates'
 import { createMcpServersRepository, type McpServersRepository } from './repositories/mcp-servers'
-import { createDocumentsRepository, type DocumentsRepository } from './repositories/documents'
 import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
 import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
+import {
+  createScheduledTasksRepository,
+  type ScheduledTasksRepository,
+} from './repositories/scheduled-tasks'
 import { createKnowledgeRepository, type KnowledgeRepository } from './repositories/knowledge'
+import {
+  createAgentPlatformRepository,
+  type AgentPlatformRepository,
+} from './repositories/agent-platform'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -49,12 +56,13 @@ export interface AppDatabase {
   secrets: SecretsRepository
   prompts: PromptTemplatesRepository
   mcpServers: McpServersRepository
-  documents: DocumentsRepository
   workflows: WorkflowsRepository
   memories: MemoriesRepository
   skills: SkillsRepository
   agents: AgentsRepository
   knowledge: KnowledgeRepository
+  agentPlatform: AgentPlatformRepository
+  scheduledTasks: ScheduledTasksRepository
   close(): void
 }
 
@@ -158,12 +166,13 @@ export function openDatabase(filePath: string): AppDatabase {
     secrets: createSecretsRepository(driver),
     prompts: createPromptTemplatesRepository(driver),
     mcpServers: createMcpServersRepository(driver),
-    documents: createDocumentsRepository(driver),
     workflows: createWorkflowsRepository(driver),
     memories: createMemoriesRepository(driver),
     skills: createSkillsRepository(driver),
     agents: createAgentsRepository(driver),
     knowledge: createKnowledgeRepository(driver),
+    agentPlatform: createAgentPlatformRepository(driver),
+    scheduledTasks: createScheduledTasksRepository(driver),
     close() {
       driver.close()
     },

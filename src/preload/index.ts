@@ -6,7 +6,13 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
-import type { McpServerRuntime, StreamEventEnvelope, ToolApprovalRequest, UserQuestionRequest } from '@shared/types'
+import type {
+  McpServerRuntime,
+  StreamEventEnvelope,
+  ToolApprovalRequest,
+  UserQuestionRequest,
+  WorkflowRunFinishedEvent,
+} from '@shared/types'
 
 /** Subscribe wrapper for a push channel: `cb` gets the payload, returns unsubscribe. */
 const subscribe =
@@ -26,6 +32,7 @@ const api: UldApi = {
     getInfo: () => ipcRenderer.invoke(CHANNELS.appGetInfo),
     pickFolder: () => ipcRenderer.invoke(CHANNELS.appPickFolder),
     pickFiles: () => ipcRenderer.invoke(CHANNELS.appPickFiles),
+    storePastedImage: (input) => ipcRenderer.invoke(CHANNELS.appStorePastedImage, input),
     readAttachment: (storageKey) => ipcRenderer.invoke(CHANNELS.appReadAttachment, storageKey),
     saveAttachmentAs: (storageKey, suggestedName) =>
       ipcRenderer.invoke(CHANNELS.appSaveAttachmentAs, { storageKey, suggestedName }),
@@ -57,6 +64,7 @@ const api: UldApi = {
     delete: (id) => ipcRenderer.invoke(CHANNELS.convDelete, id),
     messages: (conversationId) => ipcRenderer.invoke(CHANNELS.convMessages, conversationId),
     export: (req) => ipcRenderer.invoke(CHANNELS.convExport, req),
+    fork: (id, throughSeq) => ipcRenderer.invoke(CHANNELS.convFork, { id, throughSeq }),
   },
   projects: {
     list: (req) => ipcRenderer.invoke(CHANNELS.projectsList, req),
@@ -91,6 +99,7 @@ const api: UldApi = {
     projectsList: () => ipcRenderer.invoke(CHANNELS.codeProjectsList),
     projectOpen: (path) => ipcRenderer.invoke(CHANNELS.codeProjectOpen, path),
     projectForget: (id) => ipcRenderer.invoke(CHANNELS.codeProjectForget, id),
+    projectReveal: (id) => ipcRenderer.invoke(CHANNELS.codeProjectReveal, id),
     fileTree: (projectId) => ipcRenderer.invoke(CHANNELS.codeFileTree, projectId),
     readFile: (req) => ipcRenderer.invoke(CHANNELS.codeReadFile, req),
     changesList: (projectId) => ipcRenderer.invoke(CHANNELS.codeChangesList, projectId),
@@ -111,6 +120,13 @@ const api: UldApi = {
       ipcRenderer.invoke(CHANNELS.codeGitCreateBranch, { projectId, name }),
     gitGenerateCommitMessage: (projectId) =>
       ipcRenderer.invoke(CHANNELS.codeGitGenerateCommitMessage, projectId),
+    worktreeCreate: (projectId, name) =>
+      ipcRenderer.invoke(CHANNELS.codeWorktreeCreate, { projectId, name }),
+    openInIde: (projectId) => ipcRenderer.invoke(CHANNELS.codeOpenInIde, projectId),
+    checkpointsList: (conversationId) =>
+      ipcRenderer.invoke(CHANNELS.codeCheckpointsList, conversationId),
+    checkpointRestore: (checkpointId) =>
+      ipcRenderer.invoke(CHANNELS.codeCheckpointRestore, checkpointId),
   },
   tools: {
     list: () => ipcRenderer.invoke(CHANNELS.toolsList),
@@ -170,12 +186,6 @@ const api: UldApi = {
     setTelegram: (input) => ipcRenderer.invoke(CHANNELS.imSetTelegram, input),
     setWebhook: (url) => ipcRenderer.invoke(CHANNELS.imSetWebhook, url),
   },
-  documents: {
-    get: (conversationId) => ipcRenderer.invoke(CHANNELS.documentsGet, conversationId),
-    save: (conversationId, content) => ipcRenderer.invoke(CHANNELS.documentsSave, conversationId, content),
-    listHtml: (conversationId) => ipcRenderer.invoke(CHANNELS.documentsListHtml, conversationId),
-    export: (id, format) => ipcRenderer.invoke(CHANNELS.documentsExport, id, format),
-  },
   workflows: {
     list: () => ipcRenderer.invoke(CHANNELS.workflowsList),
     get: (id) => ipcRenderer.invoke(CHANNELS.workflowsGet, id),
@@ -185,12 +195,26 @@ const api: UldApi = {
     run: (graph) => ipcRenderer.invoke(CHANNELS.workflowsRun, graph),
     runById: (id) => ipcRenderer.invoke(CHANNELS.workflowsRunById, id),
     runs: (id) => ipcRenderer.invoke(CHANNELS.workflowsRuns, id),
+    overview: () => ipcRenderer.invoke(CHANNELS.workflowsOverview),
+    onRunFinished: subscribe<WorkflowRunFinishedEvent>(CHANNELS.workflowRunFinished),
+  },
+  scheduledTasks: {
+    list: () => ipcRenderer.invoke(CHANNELS.scheduledTasksList),
+    create: (input) => ipcRenderer.invoke(CHANNELS.scheduledTasksCreate, input),
+    setEnabled: (id, enabled) =>
+      ipcRenderer.invoke(CHANNELS.scheduledTasksSetEnabled, id, enabled),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksDelete, id),
+    onChanged: (cb) => subscribe<unknown>(CHANNELS.scheduledTasksChanged)(() => cb()),
   },
   agents: {
     list: () => ipcRenderer.invoke(CHANNELS.agentsList),
     create: (input) => ipcRenderer.invoke(CHANNELS.agentsCreate, input),
     update: (id, patch) => ipcRenderer.invoke(CHANNELS.agentsUpdate, id, patch),
     delete: (id) => ipcRenderer.invoke(CHANNELS.agentsDelete, id),
+    runs: (conversationId) => ipcRenderer.invoke(CHANNELS.agentRunsList, conversationId),
+    stopRun: (runId) => ipcRenderer.invoke(CHANNELS.agentRunStop, runId),
+    packExport: () => ipcRenderer.invoke(CHANNELS.agentPackExport),
+    packImport: () => ipcRenderer.invoke(CHANNELS.agentPackImport),
   },
   knowledge: {
     list: () => ipcRenderer.invoke(CHANNELS.kbList),

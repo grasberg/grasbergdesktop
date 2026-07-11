@@ -107,6 +107,54 @@ describe('WorkflowRunner', () => {
     expect(runs[0].status).toBe('error')
     expect(runs[0].error).toMatch(/delivery channel/i)
   })
+
+  it('fires onRunRecorded with the persisted run for ok and error runs', async () => {
+    const onRunRecorded = vi.fn()
+    const runner = createWorkflowRunner(db, { runAgent: async () => '' }, { onRunRecorded })
+
+    const good = db.workflows.create({ name: 'Good', graph: SIMPLE_GRAPH })
+    await runner.runById(good.id, 'manual')
+    expect(onRunRecorded).toHaveBeenCalledTimes(1)
+    const [okRun, okWorkflow] = onRunRecorded.mock.calls[0]
+    expect(okRun).toMatchObject({ workflowId: good.id, trigger: 'manual', status: 'ok' })
+    expect(db.workflows.listRuns(good.id)[0].id).toBe(okRun.id)
+    expect(okWorkflow.name).toBe('Good')
+
+    const broken = db.workflows.create({
+      name: 'Broken',
+      graph: { nodes: [node('n', 'notify', {})], edges: [] },
+    })
+    await runner.runById(broken.id, 'schedule')
+    expect(onRunRecorded).toHaveBeenCalledTimes(2)
+    expect(onRunRecorded.mock.calls[1][0]).toMatchObject({
+      workflowId: broken.id,
+      trigger: 'schedule',
+      status: 'error',
+    })
+  })
+
+  it('does not fire onRunRecorded when the run never persists', async () => {
+    const onRunRecorded = vi.fn()
+    const runner = createWorkflowRunner(db, { runAgent: async () => '' }, { onRunRecorded })
+    await expect(runner.runById('missing-id', 'manual')).rejects.toThrow(/not found/i)
+    expect(onRunRecorded).not.toHaveBeenCalled()
+  })
+
+  it('a throwing hook never breaks the run result', async () => {
+    const runner = createWorkflowRunner(
+      db,
+      { runAgent: async () => '' },
+      {
+        onRunRecorded: () => {
+          throw new Error('listener bug')
+        },
+      }
+    )
+    const wf = db.workflows.create({ name: 'W', graph: SIMPLE_GRAPH })
+    const result = await runner.runById(wf.id, 'manual')
+    expect(result.ok).toBe(true)
+    expect(db.workflows.listRuns(wf.id)).toHaveLength(1)
+  })
 })
 
 describe('scheduler due check + tick', () => {
@@ -144,5 +192,21 @@ describe('scheduler due check + tick', () => {
     await scheduler.tick()
     expect(db.workflows.listRuns(wf.id)).toHaveLength(1)
     expect(onError).not.toHaveBeenCalled()
+  })
+
+  it('a scheduled tick fires onRunRecorded with the schedule trigger', async () => {
+    db.workflows.create({
+      name: 'Tick',
+      graph: SIMPLE_GRAPH,
+      schedule: { everyMinutes: 60 },
+      scheduleEnabled: true,
+    })
+    const onRunRecorded = vi.fn()
+    const runner = createWorkflowRunner(db, { runAgent: async () => '' }, { onRunRecorded })
+    const scheduler = new WorkflowScheduler({ db, runner })
+
+    await scheduler.tick()
+    expect(onRunRecorded).toHaveBeenCalledTimes(1)
+    expect(onRunRecorded.mock.calls[0][0]).toMatchObject({ trigger: 'schedule', status: 'ok' })
   })
 })

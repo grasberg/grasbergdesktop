@@ -1,5 +1,5 @@
 /**
- * Workspace item list for Cowork mode: items grouped by kind, with
+ * Workspace item list for the Work panel's Tasks tab: items grouped by kind, with
  * kind-specific bodies (task status, interactive checklists, markdown docs),
  * an origin badge separating user items from assistant proposals, inline
  * delete confirmation and an "Add" menu for user-created items.
@@ -8,8 +8,8 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type { WorkspaceItem, WorkspaceItemKind } from '@shared/types'
 import Markdown from '@/components/chat/Markdown'
-import { useCoworkStore } from '@/stores/cowork'
-import './cowork.css'
+import { useWorkspaceStore } from '@/stores/workspace'
+import './work.css'
 
 const KIND_SECTIONS: Array<{ kind: WorkspaceItemKind; heading: string }> = [
   { kind: 'plan', heading: 'Plan' },
@@ -44,7 +44,7 @@ function OriginBadge({ origin }: { origin: WorkspaceItem['origin'] }): ReactElem
 }
 
 function ChecklistBody({ item }: { item: WorkspaceItem }): ReactElement {
-  const toggleChecklistLine = useCoworkStore((s) => s.toggleChecklistLine)
+  const toggleChecklistLine = useWorkspaceStore((s) => s.toggleChecklistLine)
   const lines = item.content.split('\n')
   const hasBoxes = lines.some((l) => CHECKBOX_LINE.test(l))
   if (!hasBoxes) {
@@ -81,7 +81,7 @@ function ChecklistBody({ item }: { item: WorkspaceItem }): ReactElement {
 }
 
 function TaskBody({ item }: { item: WorkspaceItem }): ReactElement {
-  const setTaskStatus = useCoworkStore((s) => s.setTaskStatus)
+  const setTaskStatus = useWorkspaceStore((s) => s.setTaskStatus)
   return (
     <div className="cowork-task-body">
       <select
@@ -102,8 +102,8 @@ function TaskBody({ item }: { item: WorkspaceItem }): ReactElement {
 }
 
 function ItemCard({ item }: { item: WorkspaceItem }): ReactElement {
-  const updateItem = useCoworkStore((s) => s.updateItem)
-  const deleteItem = useCoworkStore((s) => s.deleteItem)
+  const updateItem = useWorkspaceStore((s) => s.updateItem)
+  const deleteItem = useWorkspaceStore((s) => s.deleteItem)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -241,7 +241,7 @@ function ItemCard({ item }: { item: WorkspaceItem }): ReactElement {
 }
 
 function AddItemMenu(): ReactElement {
-  const createItem = useCoworkStore((s) => s.createItem)
+  const createItem = useWorkspaceStore((s) => s.createItem)
   const [open, setOpen] = useState(false)
   const [kind, setKind] = useState<WorkspaceItemKind>('task')
   const [title, setTitle] = useState('')
@@ -338,8 +338,8 @@ function AddItemMenu(): ReactElement {
 }
 
 export default function WorkspaceItems(): ReactElement {
-  const items = useCoworkStore((s) => s.items)
-  const loading = useCoworkStore((s) => s.loading)
+  const items = useWorkspaceStore((s) => s.items)
+  const loading = useWorkspaceStore((s) => s.loading)
 
   const sections = KIND_SECTIONS.map(({ kind, heading }) => ({
     kind,

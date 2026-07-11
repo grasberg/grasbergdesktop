@@ -15,8 +15,9 @@
  */
 
 import { execFile } from 'node:child_process'
-import { isAbsolute } from 'node:path'
-import type { GitFileChange, GitStatus } from '@shared/types'
+import { mkdirSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
+import type { GitFileChange, GitStatus, WorktreeInfo } from '@shared/types'
 import { ProviderError } from '../providers/errors'
 
 const GIT_TIMEOUT_MS = 20_000
@@ -117,10 +118,49 @@ export interface GitServiceOptions {
    * Absent => generateCommitMessage reports unavailable.
    */
   generateText?: (prompt: string) => Promise<string>
+  beforeCommit?: (root: string) => Promise<void>
 }
 
 export class GitService {
   constructor(private readonly options: GitServiceOptions = {}) {}
+
+  /** Creates an isolated worktree beneath the app-owned data directory. */
+  async createWorktree(
+    root: string,
+    worktreesDir: string,
+    projectId: string,
+    requestedName?: string
+  ): Promise<WorktreeInfo> {
+    const suffix = Date.now().toString(36)
+    const base = (requestedName?.trim() || `agent-${suffix}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || `agent-${suffix}`
+    const branch = `grasberg/${base}-${suffix}`
+    if (!BRANCH_NAME_RE.test(branch)) throw invalid('Invalid worktree branch name.')
+    mkdirSync(worktreesDir, { recursive: true })
+    const target = join(worktreesDir, `${projectId}-${base}-${suffix}`)
+    const result = await runGit(['worktree', 'add', '-b', branch, target, 'HEAD'], root)
+    if (!result.ok) throw invalid(`git worktree add failed: ${result.stderr || 'unknown error'}`)
+    return { path: target, branch, projectId }
+  }
+
+  /** Opens a project/worktree in a supported editor without invoking a shell. */
+  async openInEditor(
+    root: string,
+    preferred: 'auto' | 'code' | 'cursor' | 'zed'
+  ): Promise<{ command: string }> {
+    const commands = preferred === 'auto' ? ['code', 'cursor', 'zed'] : [preferred]
+    for (const command of commands) {
+      const ok = await new Promise<boolean>((resolvePromise) => {
+        const argv = command === 'zed' ? [root] : ['-n', root]
+        execFile(command, argv, { windowsHide: true }, (error) => resolvePromise(!error))
+      })
+      if (ok) return { command }
+    }
+    throw invalid('No supported editor command was found (tried VS Code, Cursor and Zed).')
+  }
 
   /** Full working-tree status for the commit bar. Cheap, read-only. */
   async status(root: string): Promise<GitStatus> {
@@ -198,6 +238,7 @@ export class GitService {
     const trimmed = message.trim()
     if (trimmed.length === 0) throw invalid('Commit message must not be empty.')
     if (trimmed.length > 5000) throw invalid('Commit message is too long (max 5000 characters).')
+    await this.options.beforeCommit?.(root)
 
     const stagedCheck = await runGit(['diff', '--cached', '--name-only'], root)
     if (stagedCheck.ok && stagedCheck.stdout.trim().length === 0) {

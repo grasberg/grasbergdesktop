@@ -33,7 +33,7 @@ afterEach(() => {
 function conv(planMode = false): Conversation {
   return {
     id: 'conv-git',
-    mode: 'code',
+    mode: 'work',
     title: 'Git',
     providerId: null,
     modelId: null,
@@ -216,7 +216,7 @@ describe('review queue backend', () => {
   it('listChangesWithContext joins conversation titles and notify fires on propose', () => {
     const notifications: string[] = []
     const conversation = db.conversations.create({
-      mode: 'code',
+      mode: 'work',
       title: 'Fix the parser',
       projectId,
     })

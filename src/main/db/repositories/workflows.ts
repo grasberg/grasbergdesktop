@@ -10,8 +10,10 @@ import type {
   WorkflowGraph,
   WorkflowInput,
   WorkflowRun,
+  WorkflowRunListItem,
   WorkflowSchedule,
 } from '@shared/types'
+import { WORKFLOW_RUN_SNIPPET_MAX } from '@shared/workflow-status'
 import type { SqliteDriver } from '../driver'
 import { parseJson } from './util'
 
@@ -43,6 +45,13 @@ export interface WorkflowsRepository {
   /** Persists a finished run and prunes history beyond the per-workflow cap. */
   insertRun(input: WorkflowRunInput): WorkflowRun
   listRuns(workflowId: string, limit?: number): WorkflowRun[]
+  /**
+   * The single most recent run of each workflow that has any (output/error
+   * truncated to the list snippet cap) — the overview's latest-status source.
+   */
+  latestRunsPerWorkflow(): WorkflowRun[]
+  /** Recent runs across ALL workflows joined with their names, newest first. */
+  listRecentRunsWithNames(limit?: number): WorkflowRunListItem[]
 }
 
 interface WorkflowRow {
@@ -230,6 +239,47 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
           [workflowId, Math.max(1, Math.min(limit, MAX_RUNS_PER_WORKFLOW))]
         )
         .map(toRun)
+    },
+
+    latestRunsPerWorkflow() {
+      return driver
+        .all<WorkflowRunRow>(
+          `SELECT id, workflow_id, trigger, status,
+                  substr(output, 1, ?) AS output,
+                  substr(error, 1, ?) AS error,
+                  started_at, finished_at
+           FROM (
+             SELECT r.*,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY workflow_id ORDER BY started_at DESC, id DESC
+                    ) AS rn
+             FROM workflow_runs r
+           )
+           WHERE rn = 1`,
+          [WORKFLOW_RUN_SNIPPET_MAX, WORKFLOW_RUN_SNIPPET_MAX]
+        )
+        .map(toRun)
+    },
+
+    listRecentRunsWithNames(limit = 20) {
+      return driver
+        .all<WorkflowRunRow & { workflow_name: string }>(
+          `SELECT r.id, r.workflow_id, r.trigger, r.status,
+                  substr(r.output, 1, ?) AS output,
+                  substr(r.error, 1, ?) AS error,
+                  r.started_at, r.finished_at,
+                  w.name AS workflow_name
+           FROM workflow_runs r
+           JOIN workflows w ON w.id = r.workflow_id
+           ORDER BY r.started_at DESC, r.id DESC
+           LIMIT ?`,
+          [
+            WORKFLOW_RUN_SNIPPET_MAX,
+            WORKFLOW_RUN_SNIPPET_MAX,
+            Math.max(1, Math.min(limit, MAX_RUNS_PER_WORKFLOW)),
+          ]
+        )
+        .map((row) => ({ ...toRun(row), workflowName: row.workflow_name }))
     },
   }
 }

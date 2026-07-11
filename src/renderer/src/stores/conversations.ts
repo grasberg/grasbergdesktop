@@ -3,7 +3,7 @@ import type { ConversationSummary } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import type { ConversationsStoreState } from './contracts'
 import { useChatStore } from './chat'
-import { toastError } from './ui'
+import { toastError, useUiStore } from './ui'
 
 /**
  * Upper bound on the sidebar list so the (unindexed, leading-wildcard) search
@@ -31,7 +31,7 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
     const { search, modeFilter } = get()
     try {
       // Load the mode's most-recent tasks (bounded); the sidebar groups them
-      // under their projects (and a "No project" group) client-side.
+      // under their projects (and a standalone "Tasks" group) client-side.
       const summaries = await unwrap(
         window.uld.conversations.list({
           search: search.trim() ? search.trim() : undefined,
@@ -108,6 +108,9 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   },
 
   select(id) {
+    // Selecting is also navigation: leave Home/Workflows for the conversation
+    // surface, or land back on Home when the selection is cleared.
+    useUiStore.getState().setView(id ? 'conversation' : 'home')
     set({ activeId: id })
     void useChatStore.getState().openConversation(id)
   },

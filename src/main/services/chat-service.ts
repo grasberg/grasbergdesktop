@@ -74,10 +74,55 @@ import { isValidStorageKey } from '@shared/schemas'
 import { formatSourcesSection } from '@shared/citations'
 import { storeGeneratedImage } from '../ipc/attachments'
 import { runCompletionHooks } from './completion-hooks'
+import { findPricing } from '@shared/pricing'
 import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
 
 const DEFAULT_TITLE = 'New chat'
 const TITLE_MAX_CHARS = 60
+
+/** Pure policy core used by Auto routing and unit tests. */
+export function pickAutoRouteProvider(
+  providers: ProviderConfig[],
+  settings: Pick<AppSettings, 'autoRoutingPolicy' | 'autoRoutingMaxCostUsd'>
+): string | null {
+  const isLocal = (provider: ProviderConfig): boolean => {
+    try {
+      const host = new URL(provider.baseUrl).hostname
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+    } catch {
+      return false
+    }
+  }
+  const cost = (provider: ProviderConfig): number | null => {
+    if (isLocal(provider)) return 0
+    const pricing = findPricing(provider.type, provider.defaultModelId)
+    return pricing ? pricing.inputPerMTok + pricing.outputPerMTok * 2 : null
+  }
+  let candidates = providers.filter(
+    (provider) => provider.enabled && (provider.hasKey || provider.oauthConnected)
+  )
+  if (settings.autoRoutingPolicy === 'local_only') {
+    candidates = candidates.filter(isLocal)
+  }
+  if (settings.autoRoutingMaxCostUsd !== null) {
+    // Conservative preflight: assume 2k input + 2k output tokens for the
+    // first model call. Unknown-priced remote models cannot satisfy a budget.
+    candidates = candidates.filter((provider) => {
+      const score = cost(provider)
+      if (score === null) return false
+      return (score * 2_000) / 1_000_000 <= settings.autoRoutingMaxCostUsd!
+    })
+  }
+  candidates.sort((a, b) => {
+    const aCost = cost(a)
+    const bCost = cost(b)
+    if (settings.autoRoutingPolicy === 'highest_quality') {
+      return (bCost ?? -1) - (aCost ?? -1)
+    }
+    return (aCost ?? Number.POSITIVE_INFINITY) - (bCost ?? Number.POSITIVE_INFINITY)
+  })
+  return candidates[0]?.id ?? null
+}
 
 /**
  * Maximum number of tool-execution rounds per generation. Each round is one
@@ -107,7 +152,7 @@ function truncateToolResultForReplay(result: string): string {
   return `${result.slice(0, REPLAY_TOOL_RESULT_MAX_CHARS)}\n…[truncated for replay]`
 }
 
-/** Repo-root instruction files injected into code-mode prompts (first found wins). */
+/** Repo-root instruction files injected into work-mode prompts (first found wins). */
 const PROJECT_INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const
 const PROJECT_INSTRUCTIONS_MAX_CHARS = 16_000
 
@@ -134,12 +179,12 @@ Create the file at the repository root with the write_file tool (path "AGENTS.md
 
 /**
  * Expands a slash command in a user message to its full prompt for the wire.
- * '/init' (code mode) and '/skill <name> [task]' expand; everything else
+ * '/init' (work mode) and '/skill <name> [task]' expand; everything else
  * passes through verbatim. The transcript keeps the short command.
  */
 export function expandSlashCommand(content: string, mode: ConversationMode): string {
   const trimmed = content.trim()
-  if (mode === 'code' && trimmed === '/init') return INIT_COMMAND_PROMPT
+  if (mode === 'work' && trimmed === '/init') return INIT_COMMAND_PROMPT
   const skillMatch = /^\/skill\s+(\S+)(?:\s+([\s\S]+))?$/.exec(trimmed)
   if (skillMatch) {
     const [, name, task] = skillMatch
@@ -177,6 +222,8 @@ interface BackgroundTask {
   controller: AbortController
   /** Shell jobs: output captured so far (task_output shows it while running). */
   getPartial?: () => string
+  /** Persistent control-plane row for delegate jobs (shell jobs omit it). */
+  runId?: string
 }
 
 type Broadcast = (channel: string, payload: unknown) => void
@@ -711,7 +758,10 @@ export class ChatService {
     overrides: ChatSendRequest['overrides']
   ): Promise<ResolvedTarget> {
     const providerId =
-      overrides?.providerId ?? conversation.providerId ?? settings.defaultProviderId
+      overrides?.providerId ??
+      conversation.providerId ??
+      (settings.autoRoutingEnabled ? this.autoRouteProvider(settings) : null) ??
+      settings.defaultProviderId
     if (!providerId) {
       throw new ProviderError('invalid_request', 'No provider configured. Open Settings to add one.')
     }
@@ -770,6 +820,16 @@ export class ChatService {
       ...overrides?.params,
     }
     return { provider, modelId, params, apiKey, accountId }
+  }
+
+  /**
+   * Deterministic provider-neutral router. Explicit per-send and
+   * per-conversation choices always win; Auto only fills an otherwise empty
+   * target. Unknown prices sort behind known prices, while local endpoints are
+   * treated as zero-cost for local-only routing.
+   */
+  private autoRouteProvider(settings: AppSettings): string | null {
+    return pickAutoRouteProvider(this.db.providers.list(), settings)
   }
 
   /**
@@ -1027,8 +1087,14 @@ export class ChatService {
     // generations alike.
     const enabledSkills = this.db.skills.listEnabled()
     const effectiveOpts: ModePromptOptions = {
+      localDate: new Date().toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }),
       ...promptOpts,
-      ...(conversation.mode === 'code' && conversation.params.planMode === true
+      ...(conversation.mode === 'work' && conversation.params.planMode === true
         ? { planMode: true }
         : {}),
       ...(enabledSkills.length > 0
@@ -1059,9 +1125,9 @@ export class ChatService {
     if (systemPrompt) {
       history.push({ role: 'system', content: systemPrompt })
     }
-    // Code mode: repo-root project instructions (GRASBERG.md and friends) ride
+    // Work mode: repo-root project instructions (AGENTS.md and friends) ride
     // along as a system note so the model follows the project's conventions.
-    if (conversation.mode === 'code' && conversation.projectId) {
+    if (conversation.mode === 'work' && conversation.projectId) {
       const instructions = this.readProjectInstructions(conversation.projectId)
       if (instructions) history.push({ role: 'system', content: instructions })
     }
@@ -1616,19 +1682,36 @@ export class ChatService {
     this.backgroundTaskSeq += 1
     const taskId = `task-${this.backgroundTaskSeq}`
     const controller = new AbortController()
-    const record: BackgroundTask = { status: 'running', result: '', controller }
+    const profile = agentName ? this.db.agents.getByName(agentName) : null
+    const persisted = this.db.agentPlatform.runStart({
+      conversationId: ctx.conversation.id,
+      projectId: ctx.conversation.projectId,
+      agentName: profile?.name ?? agentName ?? null,
+      task,
+      worktreePath: null,
+      providerId: profile?.providerId ?? ctx.conversation.providerId,
+      modelId: profile?.modelId ?? ctx.conversation.modelId,
+    })
+    const record: BackgroundTask = {
+      status: 'running',
+      result: '',
+      controller,
+      runId: persisted.id,
+    }
     this.backgroundTasks.set(taskId, record)
     void this.runDelegate(task, ctx, controller.signal, agentName)
       .then((result) => {
         if (record.status === 'running') {
           record.status = 'done'
           record.result = result
+          this.db.agentPlatform.runFinish(persisted.id, 'done', result)
         }
       })
       .catch((e: unknown) => {
         if (record.status === 'running') {
           record.status = 'error'
           record.result = toNormalizedError(e).message
+          this.db.agentPlatform.runFinish(persisted.id, 'error', record.result)
         }
       })
     return `Started background task '${taskId}'. Poll it with task_output({"taskId":"${taskId}"}); continue other work meanwhile.`
@@ -1720,7 +1803,18 @@ export class ChatService {
     }
     record.status = 'stopped'
     record.controller.abort()
+    if (record.runId) this.db.agentPlatform.runFinish(record.runId, 'stopped', record.result)
     return `Task '${taskId}' stopped.`
+  }
+
+  /** User-facing stop by persistent run id (Agent Control Center). */
+  stopAgentRun(runId: string): boolean {
+    for (const [taskId, record] of this.backgroundTasks) {
+      if (record.runId !== runId || record.status !== 'running') continue
+      this.delegateTaskStop(taskId)
+      return true
+    }
+    return false
   }
 
   /**
@@ -2408,7 +2502,7 @@ export class ChatService {
                 controller.signal
               )
           : undefined
-        const planMode = conversation.mode === 'code' && conversation.params.planMode === true
+        const planMode = conversation.mode === 'work' && conversation.params.planMode === true
         const autoAcceptEdits = !planMode && conversation.params.autoAcceptEdits === true
         // Live tool output (shell commands) streams into the same envelope
         // channel so the renderer can show it while the tool runs.

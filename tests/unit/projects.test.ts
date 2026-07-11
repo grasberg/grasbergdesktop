@@ -20,11 +20,11 @@ afterEach(() => {
 describe('projects repository', () => {
   it('creates a project scoped to a mode and lists it per mode', () => {
     const chat = db.projects.create({ mode: 'chat', name: 'Chat A' })
-    db.projects.create({ mode: 'code', name: 'Code A' })
+    db.projects.create({ mode: 'work', name: 'Code A' })
 
     expect(chat.mode).toBe('chat')
     expect(db.projects.list('chat').map((p) => p.name)).toEqual(['Chat A'])
-    expect(db.projects.list('code').map((p) => p.name)).toEqual(['Code A'])
+    expect(db.projects.list('work').map((p) => p.name)).toEqual(['Code A'])
     expect(db.projects.list()).toHaveLength(2)
   })
 
@@ -36,7 +36,7 @@ describe('projects repository', () => {
   })
 
   it('renames a project', () => {
-    const p = db.projects.create({ mode: 'write', name: 'Draft' })
+    const p = db.projects.create({ mode: 'work', name: 'Draft' })
     const updated = db.projects.update(p.id, { name: 'Final' })
     expect(updated?.name).toBe('Final')
     expect(db.projects.getById(p.id)?.name).toBe('Final')
@@ -99,8 +99,8 @@ describe('projects repository', () => {
   })
 
   it('deleting a project unfiles its tasks instead of deleting them', () => {
-    const project = db.projects.create({ mode: 'code', name: 'Doomed' })
-    const conv = db.conversations.create({ mode: 'code', title: 'Survivor', projectRef: project.id })
+    const project = db.projects.create({ mode: 'work', name: 'Doomed' })
+    const conv = db.conversations.create({ mode: 'work', title: 'Survivor', projectRef: project.id })
 
     db.projects.remove(project.id)
 

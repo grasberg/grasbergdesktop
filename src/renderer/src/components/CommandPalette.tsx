@@ -3,12 +3,13 @@ import type { KeyboardEvent } from 'react'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useConversationsStore } from '@/stores/conversations'
+import { useWorkflowsStore } from '@/stores/workflows'
 import { errorMessage } from '@/api/uld'
 import './settings/settings.css'
 
 interface PaletteItem {
   id: string
-  section: 'Actions' | 'Conversations'
+  section: 'Actions' | 'Scheduled' | 'Conversations'
   label: string
   hint?: string
   run: () => void
@@ -38,12 +39,14 @@ export default function CommandPalette() {
   const resolvedTheme = useUiStore((s) => s.resolvedTheme)
   const toast = useUiStore((s) => s.toast)
   const updateSettings = useSettingsStore((s) => s.update)
+  const setView = useUiStore((s) => s.setView)
   const summaries = useConversationsStore((s) => s.summaries)
   const convLoaded = useConversationsStore((s) => s.loaded)
   const activeId = useConversationsStore((s) => s.activeId)
   const loadConversations = useConversationsStore((s) => s.load)
   const selectConversation = useConversationsStore((s) => s.select)
   const createConversation = useConversationsStore((s) => s.create)
+  const scheduled = useWorkflowsStore((s) => s.scheduled)
 
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -65,12 +68,33 @@ export default function CommandPalette() {
 
     const actions: PaletteItem[] = [
       {
+        id: 'act-home',
+        section: 'Actions',
+        label: 'Go to Home',
+        hint: 'Overview of scheduled tasks, recent work and projects',
+        run: () => {
+          close()
+          setView('home')
+        },
+      },
+      {
         id: 'act-new-chat',
         section: 'Actions',
         label: 'New chat',
         run: () => {
           close()
           void createConversation('chat').catch(catchToast)
+        },
+      },
+      {
+        id: 'act-new-work',
+        section: 'Actions',
+        label: 'New work task',
+        hint: 'Files, code, designs and task lists',
+        run: () => {
+          close()
+          useConversationsStore.getState().setModeFilter('work')
+          void createConversation('work').catch(catchToast)
         },
       },
       {
@@ -151,6 +175,19 @@ export default function CommandPalette() {
       )
     }
 
+    const scheduledItems: PaletteItem[] = scheduled
+      .filter((entry) => fuzzyMatch(query, entry.workflow.name))
+      .map((entry) => ({
+        id: `sched-${entry.workflow.id}`,
+        section: 'Scheduled' as const,
+        label: entry.workflow.name,
+        hint: entry.workflow.scheduleEnabled ? 'Open in the workflow builder' : 'Paused',
+        run: () => {
+          close()
+          openWorkflows(true, entry.workflow.id)
+        },
+      }))
+
     const conversations: PaletteItem[] = [...summaries]
       .filter((c) => fuzzyMatch(query, c.title))
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -166,17 +203,19 @@ export default function CommandPalette() {
         },
       }))
 
-    return [...actions.filter((a) => fuzzyMatch(query, a.label)), ...conversations]
+    return [...actions.filter((a) => fuzzyMatch(query, a.label)), ...scheduledItems, ...conversations]
   }, [
     open,
     query,
     summaries,
+    scheduled,
     activeId,
     resolvedTheme,
     openPalette,
     openSettings,
     openShortcuts,
     openWorkflows,
+    setView,
     updateSettings,
     createConversation,
     selectConversation,

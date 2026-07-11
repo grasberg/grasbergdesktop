@@ -2,7 +2,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { MAX_IMAGE_BYTES, readAttachment, readStoredImage } from '../../src/main/ipc/attachments'
+import {
+  MAX_IMAGE_BYTES,
+  readAttachment,
+  readStoredImage,
+  storePastedImage,
+} from '../../src/main/ipc/attachments'
 import { isValidStorageKey } from '@shared/schemas'
 
 let dir: string
@@ -64,6 +69,27 @@ describe('readStoredImage', () => {
     expect(await readStoredImage(imageDir, 'a/b.png')).toBeNull()
     expect(await readStoredImage(imageDir, 'notes.txt')).toBeNull()
     expect(await readStoredImage(imageDir, 'missing.png')).toBeNull()
+  })
+})
+
+describe('storePastedImage', () => {
+  it('persists clipboard bytes and returns a previewable image attachment', async () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+    const att = await storePastedImage(imageDir, 'image/png', bytes.toString('base64'))
+
+    expect(att.kind).toBe('image')
+    expect(att.mimeType).toBe('image/png')
+    expect(att.sizeBytes).toBe(bytes.byteLength)
+    expect(att.storageKey).toMatch(/\.png$/)
+    expect(att.dataUrl).toBe(`data:image/png;base64,${bytes.toString('base64')}`)
+    expect(existsSync(join(imageDir, att.storageKey!))).toBe(true)
+  })
+
+  it('rejects empty and oversized clipboard images', async () => {
+    await expect(storePastedImage(imageDir, 'image/png', '')).rejects.toThrow('empty')
+    await expect(
+      storePastedImage(imageDir, 'image/png', Buffer.alloc(MAX_IMAGE_BYTES + 1).toString('base64'))
+    ).rejects.toThrow('4 MB')
   })
 })
 

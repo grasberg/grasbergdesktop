@@ -1,7 +1,9 @@
 /**
- * Cowork workspace store: the workspace bound to the open cowork conversation
- * plus its items (plans, tasks, checklists, notes, docs). All mutations go
- * through window.uld.workspaces; failures surface as UI toasts.
+ * Workspace store for Work mode's Tasks panel: the workspace bound to the open
+ * conversation plus its items (plans, tasks, checklists, notes, docs). Binding
+ * is LAZY — a fresh Work task has no workspace until the assistant creates one
+ * (update_task_list / uld-item) or the user adds a first item. All mutations
+ * go through window.uld.workspaces; failures surface as UI toasts.
  */
 
 import { create } from 'zustand'
@@ -22,14 +24,18 @@ export type WorkspaceItemPatch = Partial<
   Pick<WorkspaceItem, 'title' | 'content' | 'status' | 'sort' | 'kind'>
 >
 
-export interface CoworkStoreState {
+export interface WorkspaceStoreState {
   workspace: Workspace | null
   items: WorkspaceItem[]
   loading: boolean
   /**
-   * Binds the store to the given cowork conversation: loads its workspace, or
-   * creates one (named after the conversation) and links it back onto the
-   * conversation when it has none yet.
+   * Binds the store to the conversation WITHOUT creating anything: loads the
+   * linked workspace when one exists, otherwise clears to empty. Mount-safe.
+   */
+  bindConversation(conversation: Conversation | null): Promise<void>
+  /**
+   * Creates + links a workspace when the conversation has none (the explicit
+   * "add the first item" path — never called on mount).
    */
   ensureWorkspaceForConversation(conversation: Conversation): Promise<void>
   loadItems(): Promise<void>
@@ -45,12 +51,11 @@ export interface CoworkStoreState {
   toggleChecklistLine(itemId: string, lineIndex: number): Promise<void>
   setTaskStatus(id: string, status: 'todo' | 'doing' | 'done'): Promise<void>
   updateGoal(goal: string): Promise<void>
-  renameWorkspace(name: string): Promise<void>
   /** Re-fetches the current workspace and its items. */
   refresh(): Promise<void>
 }
 
-/** Guards ensure/refresh against out-of-order responses when switching fast. */
+/** Guards bind/ensure/refresh against out-of-order responses when switching fast. */
 let ensureToken = 0
 
 /** In-flight ensure per conversation, so StrictMode double-invokes and rapid
@@ -60,7 +65,7 @@ const ensureInFlight = new Map<string, Promise<void>>()
 const CHECKBOX_UNCHECKED = /^(\s*[-*]\s*)\[ \]/
 const CHECKBOX_CHECKED = /^(\s*[-*]\s*)\[[xX]\]/
 
-export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
+export const useWorkspaceStore = create<WorkspaceStoreState>()((set, get) => {
   /** Replaces one item in place (or appends it if unknown). */
   const putItem = (item: WorkspaceItem): void => {
     set((s) => {
@@ -74,6 +79,24 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
     items: [],
     loading: false,
 
+    async bindConversation(conversation) {
+      const token = ++ensureToken
+      if (!conversation?.workspaceId) {
+        set({ workspace: null, items: [], loading: false })
+        return
+      }
+      set({ loading: true })
+      try {
+        const workspace = await unwrap(window.uld.workspaces.get(conversation.workspaceId))
+        const items = await unwrap(window.uld.workspaces.itemsList(workspace.id))
+        if (token !== ensureToken) return
+        set({ workspace, items, loading: false })
+      } catch (e) {
+        if (token === ensureToken) set({ workspace: null, items: [], loading: false })
+        toastError('Could not open the workspace', e)
+      }
+    },
+
     async ensureWorkspaceForConversation(conversation) {
       const existing = ensureInFlight.get(conversation.id)
       if (existing) return existing
@@ -86,7 +109,7 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
           if (conversation.workspaceId) {
             workspace = await unwrap(window.uld.workspaces.get(conversation.workspaceId))
           } else {
-            const name = conversation.title.trim() || 'New workspace'
+            const name = conversation.title.trim() || 'Tasks'
             workspace = await unwrap(window.uld.workspaces.create({ name }))
             // Link the conversation to its new workspace.
             const patch: ConvPatchWithWorkspace = { workspaceId: workspace.id }
@@ -188,19 +211,6 @@ export const useCoworkStore = create<CoworkStoreState>()((set, get) => {
         if (get().workspace?.id === workspace.id) set({ workspace: updated })
       } catch (e) {
         toastError('Could not save the goal', e)
-      }
-    },
-
-    async renameWorkspace(name) {
-      const { workspace } = get()
-      if (!workspace) return
-      const trimmed = name.trim()
-      if (!trimmed || trimmed === workspace.name) return
-      try {
-        const updated = await unwrap(window.uld.workspaces.update(workspace.id, { name: trimmed }))
-        if (get().workspace?.id === workspace.id) set({ workspace: updated })
-      } catch (e) {
-        toastError('Could not rename the workspace', e)
       }
     },
 

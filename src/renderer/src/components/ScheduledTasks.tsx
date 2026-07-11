@@ -1,113 +1,288 @@
-/**
- * Sidebar "Scheduled tasks" section: every workflow with an interval
- * schedule, with a pause/resume switch and a deep link into the Workflows
- * builder. The list re-syncs whenever the builder closes (the only surface
- * where schedules are created or edited) and after each toggle here.
- */
+/** Standalone clock-task popover beside Home (independent from Workflows). */
 
-import { useCallback, useEffect, useState } from 'react'
-import type { Workflow } from '@shared/types'
-import { unwrap } from '@/api/uld'
-import { relativeTime } from '@/lib/format'
-import { Switch } from '@/components/common/controls'
-import { toastError, useUiStore } from '@/stores/ui'
+import { useEffect, useRef, useState } from 'react'
+import type { ScheduledTaskRecurrence } from '@shared/types'
+import { useNow } from '@/hooks/useNow'
+import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
+import { useUiStore } from '@/stores/ui'
 
-/** "every 90m" → "every 1.5h" style label for the schedule interval. */
-function intervalLabel(everyMinutes: number): string {
-  if (everyMinutes < 60) return `every ${everyMinutes}m`
-  if (everyMinutes % 60 === 0) return `every ${everyMinutes / 60}h`
-  return `every ${(everyMinutes / 60).toFixed(1)}h`
+const ClockIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5V12l3 2" />
+  </svg>
+)
+
+const TrashIcon = (
+  <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.5 6.8v4M9.5 6.8v4" />
+  </svg>
+)
+
+const RECURRENCE_LABEL: Record<ScheduledTaskRecurrence, string> = {
+  once: 'Once',
+  hourly: 'Hourly',
+  daily: 'Daily',
+  weekly: 'Weekly',
+}
+
+function initialDateTime(): string {
+  const date = new Date(Date.now() + 60 * 60_000)
+  date.setSeconds(0, 0)
+  const offset = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16)
+}
+
+function dateTimeLabel(value: number | null): string {
+  if (value === null) return 'No next run'
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(value)
 }
 
 export default function ScheduledTasks(): React.JSX.Element {
-  const workflowsOpen = useUiStore((s) => s.workflowsOpen)
-  const [scheduled, setScheduled] = useState<Workflow[]>([])
-  const [busyId, setBusyId] = useState<string | null>(null)
+  const tasks = useScheduledTasksStore((state) => state.tasks)
+  const [open, setOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [title, setTitle] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [runAt, setRunAt] = useState(initialDateTime)
+  const [recurrence, setRecurrence] = useState<ScheduledTaskRecurrence>('once')
+  const [saving, setSaving] = useState(false)
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useNow()
 
-  const load = useCallback(async () => {
-    try {
-      const workflows = await unwrap(window.uld.workflows.list())
-      setScheduled(workflows.filter((w) => w.schedule !== null))
-    } catch {
-      // The section is a convenience view — stay quiet on load failures.
-    }
-  }, [])
+  const failed = tasks.some((task) => task.lastStatus === 'error')
 
-  // Initial load, and a re-sync each time the Workflows builder closes.
   useEffect(() => {
-    if (!workflowsOpen) void load()
-  }, [workflowsOpen, load])
+    if (!open) return
+    const onPointerDown = (event: MouseEvent): void => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpen(false)
+        setCreating(false)
+        setConfirmingId(null)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setOpen(false)
+        setCreating(false)
+        setConfirmingId(null)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [open])
 
-  const toggle = async (workflow: Workflow, enabled: boolean): Promise<void> => {
-    setBusyId(workflow.id)
-    try {
-      await unwrap(
-        window.uld.workflows.update(workflow.id, {
-          name: workflow.name,
-          graph: workflow.graph,
-          schedule: workflow.schedule,
-          scheduleEnabled: enabled,
-        })
-      )
-      await load()
-    } catch (e) {
-      toastError('Could not update the schedule', e)
-    } finally {
-      setBusyId(null)
+  const resetForm = (): void => {
+    setTitle('')
+    setPrompt('')
+    setRunAt(initialDateTime())
+    setRecurrence('once')
+  }
+
+  const createTask = async (): Promise<void> => {
+    const timestamp = new Date(runAt).getTime()
+    if (!title.trim() || !prompt.trim() || !Number.isFinite(timestamp)) {
+      useUiStore.getState().toast('Add a title, instructions and a valid time.', 'error')
+      return
+    }
+    setSaving(true)
+    const created = await useScheduledTasksStore.getState().create({
+      title: title.trim(),
+      prompt: prompt.trim(),
+      recurrence,
+      runAt: timestamp,
+    })
+    setSaving(false)
+    if (created) {
+      resetForm()
+      setCreating(false)
     }
   }
 
   return (
-    <div className="sched-section">
-      <div className="sidebar-section-head">
-        <span className="sidebar-section-title">Scheduled tasks</span>
-        <button
-          type="button"
-          className="btn-icon"
-          aria-label="Open workflows to schedule a task"
-          title="Schedule a workflow"
-          onClick={() => useUiStore.getState().openWorkflows(true)}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
+    <div className="sched-menu-wrap" ref={menuRef}>
+      <button
+        type="button"
+        className={`btn-icon sidebar-clock-btn${open ? ' active' : ''}`}
+        aria-label="Scheduled tasks"
+        title="Scheduled tasks"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen((value) => !value)
+          setCreating(false)
+          setConfirmingId(null)
+          if (!open) void useScheduledTasksStore.getState().load()
+        }}
+      >
+        {ClockIcon}
+        {failed ? <span className="sched-clock-alert" aria-hidden="true" /> : null}
+      </button>
 
-      {scheduled.length === 0 ? (
-        <div className="sched-empty">
-          None yet — open a workflow and turn on its schedule.
-        </div>
-      ) : (
-        <ul className="sched-list">
-          {scheduled.map((w) => (
-            <li key={w.id} className={`sched-item${w.scheduleEnabled ? '' : ' sched-item-paused'}`}>
+      {open ? (
+        <div className="sched-popover" role="dialog" aria-label="Scheduled tasks">
+          <div className="sched-popover-head">
+            <div>
+              <strong>Scheduled tasks</strong>
+              <span>Run any instruction at a chosen time</span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-ghost sched-manage"
+              onClick={() => {
+                setCreating((value) => !value)
+                setConfirmingId(null)
+              }}
+            >
+              {creating ? 'Cancel' : '+ Add'}
+            </button>
+          </div>
+
+          {creating ? (
+            <div className="sched-create-form">
+              <input
+                className="input"
+                value={title}
+                maxLength={120}
+                placeholder="Task name"
+                aria-label="Scheduled task name"
+                onChange={(event) => setTitle(event.target.value)}
+              />
+              <textarea
+                className="textarea"
+                value={prompt}
+                maxLength={20_000}
+                placeholder="What should be done?"
+                aria-label="Scheduled task instructions"
+                onChange={(event) => setPrompt(event.target.value)}
+              />
+              <div className="sched-create-row">
+                <input
+                  className="input"
+                  type="datetime-local"
+                  value={runAt}
+                  aria-label="First run time"
+                  onChange={(event) => setRunAt(event.target.value)}
+                />
+                <select
+                  className="select"
+                  value={recurrence}
+                  aria-label="Repeat schedule"
+                  onChange={(event) =>
+                    setRecurrence(event.target.value as ScheduledTaskRecurrence)
+                  }
+                >
+                  <option value="once">Once</option>
+                  <option value="hourly">Hourly</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+              </div>
               <button
                 type="button"
-                className="sched-item-main"
-                title={`Open "${w.name}" in the workflow builder`}
-                onClick={() => useUiStore.getState().openWorkflows(true, w.id)}
+                className="btn btn-primary sched-create-submit"
+                disabled={saving || !title.trim() || !prompt.trim()}
+                onClick={() => void createTask()}
               >
-                <span className="sched-item-name">{w.name}</span>
-                <span className="sched-item-meta">
-                  {intervalLabel(w.schedule?.everyMinutes ?? 60)}
-                  {w.scheduleEnabled
-                    ? w.lastRunAt
-                      ? ` · last run ${relativeTime(w.lastRunAt)}`
-                      : ' · not run yet'
-                    : ' · paused'}
-                </span>
+                {saving ? 'Saving…' : 'Schedule task'}
               </button>
-              <Switch
-                checked={w.scheduleEnabled}
-                disabled={busyId === w.id}
-                label={`Schedule "${w.name}" ${w.scheduleEnabled ? 'on — click to pause' : 'off — click to resume'}`}
-                onChange={(checked) => void toggle(w, checked)}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
+            </div>
+          ) : null}
+
+          {tasks.length === 0 ? (
+            <div className="sched-popover-empty">No scheduled tasks.</div>
+          ) : (
+            <ul className="sched-popover-list">
+              {tasks.map((task) => {
+                const running = task.lastStatus === 'running'
+                const dot = running
+                  ? 'running'
+                  : task.lastStatus === 'error'
+                    ? 'error'
+                    : task.lastStatus === 'ok'
+                      ? 'ok'
+                      : 'never'
+                const completed = task.recurrence === 'once' && task.nextRunAt === null
+                const confirming = confirmingId === task.id
+                return (
+                  <li
+                    key={task.id}
+                    className={`sched-popover-item${task.enabled ? '' : ' paused'}`}
+                    title={task.lastError ?? (task.lastOutput || task.prompt)}
+                  >
+                    <span className={`run-dot ${dot}`} aria-hidden="true" />
+                    <div className="sched-popover-main">
+                      <span className="sched-item-name">{task.title}</span>
+                      <span className="sched-item-meta">
+                        {completed
+                          ? 'Completed'
+                          : `${RECURRENCE_LABEL[task.recurrence]} · ${dateTimeLabel(task.nextRunAt)}${task.enabled ? '' : ' · paused'}`}
+                      </span>
+                    </div>
+                    {!completed ? (
+                      <button
+                        type="button"
+                        className="sched-action"
+                        disabled={running}
+                        onClick={() =>
+                          void useScheduledTasksStore
+                            .getState()
+                            .setEnabled(task.id, !task.enabled)
+                        }
+                      >
+                        {task.enabled ? 'Pause' : 'Resume'}
+                      </button>
+                    ) : null}
+                    {confirming ? (
+                      <div className="sched-remove-confirm">
+                        <button
+                          type="button"
+                          className="sched-confirm-remove"
+                          onClick={() => {
+                            setConfirmingId(null)
+                            void useScheduledTasksStore.getState().remove(task.id)
+                          }}
+                        >
+                          Remove
+                        </button>
+                        <button
+                          type="button"
+                          className="sched-confirm-cancel"
+                          aria-label={`Cancel removing ${task.title}`}
+                          onClick={() => setConfirmingId(null)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-icon sched-remove"
+                        aria-label={`Remove scheduled task ${task.title}`}
+                        title="Remove task"
+                        onClick={() => setConfirmingId(task.id)}
+                      >
+                        {TrashIcon}
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -25,6 +25,7 @@
 
 import type { Conversation } from '@shared/types'
 import type { AppDatabase } from '../db/database'
+import { ensureConversationWorkspace } from '../services/artifact-hooks'
 import { ToolRegistry, type DynamicToolSource } from './registry'
 import {
   ToolExecutor,
@@ -91,6 +92,16 @@ export interface CreateToolSystemOptions {
   delegateBackground?: NonNullable<ToolExecutorDeps['delegateBackground']>
   /** Approval-gated project writes for edit_file/write_file (wired to CodeService). */
   codeChanges?: NonNullable<ToolExecutorDeps['codeChanges']>
+  /**
+   * Lazily creates + links a Work task's own workspace folder so file tools
+   * work without a user-granted folder (wired to WorkspaceRootService).
+   */
+  ensureWorkspaceRoot?: NonNullable<ToolExecutorDeps['ensureWorkspaceRoot']>
+  /**
+   * Called after schedule_task mutates the scheduled-tasks table, so main can
+   * push CHANNELS.scheduledTasksChanged to the renderer.
+   */
+  onScheduledTasksChanged?: () => void
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }
@@ -109,8 +120,14 @@ export function createToolSystem(
   const getProjectRoot =
     options.getProjectRoot ??
     ((conversation: Conversation): string | null => {
-      if (!conversation.projectId) return null
-      return db.code.projectGetById(conversation.projectId)?.path ?? null
+      // Re-read from the DB: a Work task's workspace folder can be linked
+      // mid-stream (first write), and the caller's conversation object would
+      // otherwise be stale for the read tools that follow in the same loop.
+      // Headless stubs (synthetic ids) miss and fall back to the given object.
+      const fresh = db.conversations.getById(conversation.id)
+      const projectId = fresh ? fresh.projectId : conversation.projectId
+      if (!projectId) return null
+      return db.code.projectGetById(projectId)?.path ?? null
     })
   const executor = new ToolExecutor({
     registry,
@@ -128,18 +145,14 @@ export function createToolSystem(
     gitWrite: options.gitWrite ?? null,
     delegateBackground: options.delegateBackground ?? null,
     codeChanges: options.codeChanges ?? null,
+    ensureWorkspaceRoot: options.ensureWorkspaceRoot ?? null,
     // update_task_list: persists the list as a 'Task list' checklist item in
-    // the conversation's workspace (created and linked on first use).
+    // the conversation's workspace (created and linked on first use — the
+    // same shared helper the uld-item artifact hook uses).
     taskList: {
       update: (conversationId, markdown) => {
-        const conversation = db.conversations.getById(conversationId)
-        if (!conversation) return 'Error: conversation not found.'
-        let workspaceId = conversation.workspaceId
-        if (!workspaceId) {
-          const workspace = db.workspaces.create({ name: conversation.title || 'Tasks' })
-          workspaceId = workspace.id
-          db.conversations.update(conversationId, { workspaceId })
-        }
+        const workspaceId = ensureConversationWorkspace(db, conversationId)
+        if (!workspaceId) return 'Error: conversation not found.'
         db.workspaces.itemUpsertByKindTitle({
           workspaceId,
           kind: 'checklist',
@@ -148,6 +161,22 @@ export function createToolSystem(
           origin: 'assistant',
         })
         return 'Task list updated.'
+      },
+    },
+    // schedule_task: reads/writes db.scheduledTasks directly; the 30 s clock
+    // scheduler queries the table each tick, so created tasks just get picked
+    // up. Mutations signal main so the renderer's popover stays live.
+    scheduledTasks: {
+      create: (input) => {
+        const task = db.scheduledTasks.create(input)
+        options.onScheduledTasksChanged?.()
+        return task
+      },
+      list: () => db.scheduledTasks.list(),
+      getById: (id) => db.scheduledTasks.getById(id),
+      remove: (id) => {
+        db.scheduledTasks.remove(id)
+        options.onScheduledTasksChanged?.()
       },
     },
     skills: {

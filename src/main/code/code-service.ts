@@ -74,7 +74,8 @@ export class CodeService {
      * status, so every window's review queue can refresh live — including for
      * changes proposed by OTHER conversations or background work. Best-effort.
      */
-    private readonly onChangesChanged?: (projectId: string) => void
+    private readonly onChangesChanged?: (projectId: string) => void,
+    private readonly onAfterApply?: (conversationId: string) => void
   ) {}
 
   /** Best-effort review-queue nudge; a broken renderer must never break IO. */
@@ -257,6 +258,21 @@ export class CodeService {
     // SECURITY: re-validate the stored path against the root before writing.
     const abs = this.resolveInsideRoot(project.path, change.filePath)
 
+    // Capture the complete pre-edit state before the first write. This is a
+    // persistent, conversation-aware checkpoint (the existing old_content is
+    // still retained on the change row for the fast single-change revert).
+    if (change.conversationId) {
+      const messages = this.db.messages.listByConversation(change.conversationId)
+      this.db.agentPlatform.checkpointCreate({
+        conversationId: change.conversationId,
+        projectId: change.projectId,
+        changeId: change.id,
+        label: `Before ${change.changeType} ${change.filePath}`,
+        messageSeq: messages.at(-1)?.seq ?? 0,
+        files: [{ relPath: change.filePath, content: change.oldContent ?? null }],
+      })
+    }
+
     switch (change.changeType) {
       case 'create': {
         if (change.newContent === null) throw invalid('This change has no content to write.')
@@ -296,6 +312,7 @@ export class CodeService {
     const updated = this.db.code.changeSetStatus(changeId, 'applied')
     if (!updated) throw invalid('Change not found.')
     this.notifyChanges(updated.projectId)
+    if (updated.conversationId) this.onAfterApply?.(updated.conversationId)
     return updated
   }
 
@@ -365,6 +382,13 @@ export class CodeService {
     if (!updated) throw invalid('Change not found.')
     this.notifyChanges(updated.projectId)
     return updated
+  }
+
+  /** Restores the change associated with a persistent checkpoint. */
+  restoreCheckpoint(checkpointId: string): CodeChange {
+    const checkpoint = this.db.agentPlatform.checkpointGet(checkpointId)
+    if (!checkpoint || !checkpoint.changeId) throw invalid('Checkpoint not found.')
+    return this.revertChange(checkpoint.changeId)
   }
 
   /**

@@ -58,7 +58,7 @@ function openTestProject() {
 }
 
 function createCodeConversation(projectId: string | null): Conversation {
-  return db.conversations.create({ mode: 'code', projectId })
+  return db.conversations.create({ mode: 'work', projectId })
 }
 
 describe('CodeService.openProject', () => {
@@ -324,6 +324,23 @@ describe('CodeService.registerProposedChanges + apply/reject', () => {
 })
 
 describe('CodeService.revertChange', () => {
+  it('creates a persistent checkpoint and restores through it', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const edit = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'edit')!
+
+    service.applyChange(edit.id)
+    const checkpoint = db!.agentPlatform.checkpointsList(conversation.id)[0]
+    expect(checkpoint).toMatchObject({
+      changeId: edit.id,
+      files: [{ relPath: 'README.md', content: '# Readme\nold line\n' }],
+    })
+    service.restoreCheckpoint(checkpoint.id)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nold line\n')
+  })
+
   it('restores an applied edit to its pre-change content', () => {
     const project = openTestProject()
     const conversation = createCodeConversation(project.id)

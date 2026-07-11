@@ -10,10 +10,7 @@ const CUSTOM = '__custom__'
 
 const MODE_LABELS: ReadonlyArray<{ mode: ConversationMode; label: string }> = [
   { mode: 'chat', label: 'Chat' },
-  { mode: 'cowork', label: 'Cowork' },
-  { mode: 'code', label: 'Code' },
-  { mode: 'write', label: 'Write' },
-  { mode: 'design', label: 'Design' },
+  { mode: 'work', label: 'Work' },
 ]
 
 function clamp(n: number, min: number, max: number): number {

@@ -43,7 +43,7 @@ afterEach(() => {
 function conv(withProject: boolean): Conversation {
   return {
     id: 'conv-1',
-    mode: 'code',
+    mode: 'work',
     title: 'Test',
     providerId: null,
     modelId: null,
@@ -257,7 +257,7 @@ describe('project-file tools — root confinement', () => {
         conversation: conv(false),
         approval: approveAll,
       })
-      expect(result).toMatch(/no project folder/i)
+      expect(result).toMatch(/no working folder/i)
     }
   })
 
@@ -563,7 +563,7 @@ describe('repo_map tool', () => {
       conversation: conv(false),
       approval: approveAll,
     })
-    expect(result).toMatch(/no project folder/i)
+    expect(result).toMatch(/no working folder/i)
   })
 })
 

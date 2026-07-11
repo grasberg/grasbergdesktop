@@ -175,7 +175,13 @@ export interface NormalizedError {
 // Chat
 // ---------------------------------------------------------------------------
 
-export type ConversationMode = 'chat' | 'cowork' | 'code' | 'write' | 'design'
+/**
+ * 'chat' = plain conversation. 'work' = agentic mode: the assistant can create
+ * real files (in the task's workspace folder or a user-granted folder), edit
+ * code through the reviewable change pipeline, build HTML prototypes, and keep
+ * a task list — surfaced on demand in the Work panel.
+ */
+export type ConversationMode = 'chat' | 'work'
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
 
@@ -287,7 +293,7 @@ export interface ChatParams {
   topP?: number
   frequencyPenalty?: number
   presencePenalty?: number
-  /** Code mode: read-only investigation + plan first (mutating tools blocked). */
+  /** Work mode: read-only investigation + plan first (mutating tools blocked). */
   planMode?: boolean
   /**
    * Auto-accept file edits: edit_file/write_file run without the per-call
@@ -313,15 +319,18 @@ export interface Conversation {
   modelId: string | null
   systemPrompt: string | null
   params: ChatParams
-  /** Cowork workspace this conversation belongs to (cowork mode). */
+  /** Workspace holding the task's goal/plans/checklists (work mode). */
   workspaceId: string | null
-  /** Code project (folder) this conversation belongs to (code mode). */
+  /**
+   * Folder this task works in (work mode): a user-granted folder, or the
+   * task's auto-created workspace folder once the assistant writes files.
+   */
   projectId: string | null
   /**
    * Organizational Project (see the `Project` type / `projects` table) this
    * task belongs to, or null = unfiled. Available in every mode and always of
    * the same mode as the conversation. Distinct from `projectId`, which is the
-   * Code-mode granted folder.
+   * working folder.
    */
   projectRef: string | null
   /**
@@ -353,9 +362,9 @@ export interface ConversationSummary {
 
 /**
  * A per-mode organizational Project: a lightweight folder that groups tasks
- * (conversations) within one mode. Every mode (chat/cowork/code/write/design)
- * has its own project list. Orthogonal to Cowork workspaces and Code folders —
- * a project just organizes the sidebar; it holds no working state of its own.
+ * (conversations) within one mode. Chat and Work each have their own project
+ * list. Orthogonal to workspaces and working folders — a project just
+ * organizes the sidebar; it holds no working state of its own.
  */
 export interface Project {
   id: string
@@ -634,6 +643,17 @@ export interface AppSettings {
    */
   defaultImageProviderId: string | null
   defaultImageModelId: string | null
+  /** Automatically choose the cheapest configured default model when a task
+   * has no explicit conversation/provider override. */
+  autoRoutingEnabled: boolean
+  autoRoutingPolicy: 'balanced' | 'lowest_cost' | 'highest_quality' | 'local_only'
+  /** Optional soft budget displayed/enforced by future multi-round routing. */
+  autoRoutingMaxCostUsd: number | null
+  /** User-configurable lifecycle hooks. Commands remain disabled unless shell
+   * execution is enabled and the exact command matches the allowlist. */
+  projectHooks: ProjectHook[]
+  /** Preferred editor command for the IDE bridge. */
+  ideCommand: 'auto' | 'code' | 'cursor' | 'zed'
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -643,10 +663,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   perModeModelsEnabled: false,
   modeModels: {
     chat: { providerId: null, modelId: null },
-    cowork: { providerId: null, modelId: null },
-    code: { providerId: null, modelId: null },
-    write: { providerId: null, modelId: null },
-    design: { providerId: null, modelId: null },
+    work: { providerId: null, modelId: null },
   },
   moaPresets: [],
   defaultMoaPresetId: null,
@@ -674,6 +691,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   researchDefaultDepth: 'standard',
   defaultImageProviderId: null,
   defaultImageModelId: null,
+  autoRoutingEnabled: false,
+  autoRoutingPolicy: 'balanced',
+  autoRoutingMaxCostUsd: null,
+  projectHooks: [],
+  ideCommand: 'auto',
 }
 
 /**
@@ -693,10 +715,62 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'telegramBridgeConversationId',
   'telegramBridgeAllowedChatId',
   'telegramBridgePairingCode',
+  'projectHooks',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
-// Cowork
+// Agent control plane, checkpoints, hooks and IDE bridge
+// ---------------------------------------------------------------------------
+
+export interface AgentRun {
+  id: string
+  conversationId: string | null
+  projectId: string | null
+  agentName: string | null
+  task: string
+  status: 'running' | 'done' | 'error' | 'stopped'
+  result: string
+  worktreePath: string | null
+  providerId: string | null
+  modelId: string | null
+  startedAt: number
+  finishedAt: number | null
+}
+
+export interface CheckpointFile {
+  relPath: string
+  /** null means the file did not exist at checkpoint time. */
+  content: string | null
+}
+
+export interface Checkpoint {
+  id: string
+  conversationId: string
+  projectId: string
+  changeId: string | null
+  label: string
+  messageSeq: number
+  files: CheckpointFile[]
+  createdAt: number
+}
+
+export type ProjectHookEvent = 'afterAgent' | 'afterApply' | 'beforeCommit'
+export interface ProjectHook {
+  id: string
+  name: string
+  event: ProjectHookEvent
+  command: string
+  enabled: boolean
+}
+
+export interface WorktreeInfo {
+  path: string
+  branch: string
+  projectId: string
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (Work-mode goal/plans/checklists — the Tasks panel)
 // ---------------------------------------------------------------------------
 
 export interface Workspace {
@@ -727,16 +801,25 @@ export interface WorkspaceItem {
 }
 
 // ---------------------------------------------------------------------------
-// Code mode
+// Working folders (Work mode: granted folders + auto task workspaces)
 // ---------------------------------------------------------------------------
 
 export interface CodeProject {
   id: string
-  /** Absolute path, granted explicitly by the user via folder picker. */
+  /**
+   * Absolute path: granted explicitly by the user via folder picker, or the
+   * app-owned workspace folder auto-created for a Work task's files.
+   */
   path: string
   name: string
   approvedAt: number
   lastOpenedAt: number | null
+  /**
+   * True when the path is the app's own per-task workspace folder (derived in
+   * main from the path prefix; never persisted). Auto rows are hidden from
+   * folder pickers and deleted with their conversation.
+   */
+  autoCreated?: boolean
 }
 
 export interface FileTreeNode {
@@ -1009,25 +1092,6 @@ export interface McpServerRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// Write / Design documents
-// ---------------------------------------------------------------------------
-
-export type DocumentKind = 'doc' | 'html'
-
-export interface Document {
-  id: string
-  conversationId: string
-  /** 'doc' = Write-mode Markdown document; 'html' = Design-mode prototype. */
-  kind: DocumentKind
-  title: string
-  content: string
-  createdAt: number
-  updatedAt: number
-}
-
-export type DocumentExportFormat = 'markdown' | 'html'
-
-// ---------------------------------------------------------------------------
 // Knowledge bases (RAG)
 // ---------------------------------------------------------------------------
 
@@ -1190,6 +1254,64 @@ export interface WorkflowRunResult {
   error?: string
   /** nodeId where it failed, when applicable. */
   failedNodeId?: string
+}
+
+/**
+ * A run joined with its workflow's name, for cross-workflow list surfaces.
+ * output/error are truncated to WORKFLOW_RUN_SNIPPET_MAX (workflow-status.ts);
+ * the full text stays available via workflows.runs(id).
+ */
+export interface WorkflowRunListItem extends WorkflowRun {
+  workflowName: string
+}
+
+/** A workflow that has a schedule, paired with its most recent persisted run. */
+export interface ScheduledWorkflowStatus {
+  workflow: Workflow
+  /** null until the first run finishes; output/error truncated as above. */
+  latestRun: WorkflowRun | null
+}
+
+/** One call that powers the Home overview and the sidebar Scheduled section. */
+export interface WorkflowsOverview {
+  /** Every workflow with a schedule (paused included), newest-updated first. */
+  scheduled: ScheduledWorkflowStatus[]
+  /** Latest persisted runs across ALL workflows, newest first. */
+  recentRuns: WorkflowRunListItem[]
+}
+
+/** Push payload sent when a saved-workflow run is persisted (any trigger). */
+export interface WorkflowRunFinishedEvent {
+  run: WorkflowRunListItem
+}
+
+// ---------------------------------------------------------------------------
+// Standalone scheduled tasks (independent from workflows)
+// ---------------------------------------------------------------------------
+
+export type ScheduledTaskRecurrence = 'once' | 'hourly' | 'daily' | 'weekly'
+export type ScheduledTaskStatus = 'idle' | 'running' | 'ok' | 'error'
+
+export interface ScheduledTask {
+  id: string
+  title: string
+  prompt: string
+  recurrence: ScheduledTaskRecurrence
+  nextRunAt: number | null
+  enabled: boolean
+  lastRunAt: number | null
+  lastStatus: ScheduledTaskStatus
+  lastOutput: string
+  lastError: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ScheduledTaskInput {
+  title: string
+  prompt: string
+  recurrence: ScheduledTaskRecurrence
+  runAt: number
 }
 
 // ---------------------------------------------------------------------------

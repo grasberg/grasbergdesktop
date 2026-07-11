@@ -46,6 +46,8 @@ The schema is currently at **version 10**:
 | 16 | `projects` | `projects` table (per-mode task grouping) + `conversations.project_ref` |
 | 17 | `mixture-of-agents` | `conversations.moa_preset_id` + `messages.moa_references_json` (Mixture of Agents; presets live in `settings`) |
 | 18 | `code-change-reverted-status` | widens `code_changes.status` CHECK with `'reverted'` (in-app undo of applied changes; table rebuild — no FK-off dance needed, `code_changes` has no FK children) |
+| 24 | `two-modes-delete-legacy-content` | the five modes collapse into `chat`/`work`: DELETES all cowork/code/write/design conversations (messages/documents/code_changes included), all workspaces + items, and non-chat projects (explicit product decision; chat content and `code_projects` grants survive) |
+| 25 | `two-modes-drop-mode-checks` | drops the mode CHECK on `conversations` and `projects` entirely (v13 pattern — zod enforces the enum; FK-safe rebuild for conversations) |
 
 ## Tables
 
@@ -107,9 +109,12 @@ non-secret env/headers are stored here.
 | `enabled` | INTEGER | 0/1, default 1 |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
-### `documents` (v9, Write / Design modes)
+### `documents` (v9 — DORMANT since v24/v25)
 
-Write-mode Markdown documents and Design-mode HTML prototypes, keyed to a
+The table remains (append-only migrations) but has no reader or writer since
+the two-mode collapse: Work-mode deliverables are real files on disk. Old rows
+were deleted by v24. Originally: Write-mode Markdown documents and Design-mode
+HTML prototypes, keyed to a
 conversation. A conversation has at most one `doc` and any number of `html`
 prototypes.
 
@@ -175,14 +180,14 @@ One row per conversation in any mode (maps to `Conversation`).
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `mode` | TEXT | `chat` \| `cowork` \| `code` \| `write` \| `design` (CHECK, v8), default `chat` |
+| `mode` | TEXT | `chat` \| `work` (no CHECK since v25 — zod enforces), default `chat` |
 | `title` | TEXT | default `'New chat'` |
 | `provider_id` | TEXT nullable | per-conversation override; NULL = global default |
 | `model_id` | TEXT nullable | per-conversation override |
 | `system_prompt` | TEXT nullable | |
 | `params_json` | TEXT | `ChatParams` JSON, default `'{}'` |
-| `workspace_id` | TEXT nullable | owning Cowork workspace (cowork mode) |
-| `project_id` | TEXT nullable | owning Code project/folder (code mode) |
+| `workspace_id` | TEXT nullable | the task's workspace — goal/plans/checklists (work mode) |
+| `project_id` | TEXT nullable | working folder: user-granted or the auto task workspace (work mode) |
 | `project_ref` | TEXT nullable | organizational Project this task is filed under (v16); NULL = unfiled |
 | `moa_preset_id` | TEXT nullable | Mixture-of-Agents preset this conversation runs through (v17); NULL = ordinary single-model. The preset itself lives in `settings.moaPresets` |
 | `summary_text` | TEXT nullable | context-compaction summary of older turns (v6) |
@@ -204,7 +209,7 @@ sets their `project_ref` to NULL — there is no FK/cascade).
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `mode` | TEXT | `chat` \| `cowork` \| `code` \| `write` \| `design` (CHECK) |
+| `mode` | TEXT | `chat` \| `work` (no CHECK since v25 — zod enforces) |
 | `name` | TEXT | display name |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
@@ -376,3 +381,6 @@ standalone: settings, meta, tool_permissions, tool_settings, custom_tools
 
 `conversations.workspace_id` / `project_id` are plain nullable columns (not FK
 constraints) so a conversation can outlive its workspace/project gracefully.
+# Agent platform (v26)
+
+`agent_runs` persists background delegate status/results for the Agent Control Center. `checkpoints` stores the pre-edit file payload and conversation sequence associated with each applied code change. Both are local-only and contain no provider credentials.

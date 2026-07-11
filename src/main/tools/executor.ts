@@ -30,6 +30,9 @@ import type {
   Attachment,
   Conversation,
   GitStatus,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskRecurrence,
   ToolApprovalAnswer,
   ToolApprovalRequest,
   ToolCallRecord,
@@ -45,6 +48,7 @@ import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
 import { commandMatchesAllowlist } from './shell-allowlist'
 import { runGitQuery } from './git'
+import { formatLocalRunTime, resolveFirstRun } from '../scheduled-tasks/resolve'
 import type { ToolRegistry } from './registry'
 
 // ---------------------------------------------------------------------------
@@ -155,6 +159,23 @@ export interface ToolExecutorDeps {
   } | null
   /** Persists the conversation task list (update_task_list). */
   taskList?: { update(conversationId: string, markdown: string): string } | null
+  /**
+   * Standalone scheduled tasks for the 'schedule_task' tool (wired to
+   * db.scheduledTasks; the repository satisfies this directly). Absent =>
+   * the tool reports itself unavailable.
+   */
+  scheduledTasks?: {
+    create(input: ScheduledTaskInput): ScheduledTask
+    list(): ScheduledTask[]
+    getById(id: string): ScheduledTask | null
+    remove(id: string): void
+  } | null
+  /**
+   * Lazily creates + links a Work task's own workspace folder (registered as
+   * a code_projects row) so edit_file/write_file work without a user-granted
+   * folder. Absent => the tools require an explicitly granted folder.
+   */
+  ensureWorkspaceRoot?: ((conversationId: string) => { projectId: string; root: string }) | null
   /** Skill lookup for the 'use_skill' tool (wired to db.skills). */
   skills?: {
     getEnabledByName(name: string): { name: string; content: string } | null
@@ -509,6 +530,16 @@ function requireStringArg(
 }
 
 /** Integer argument floored and clamped to [1, max]; `def` when absent/not a number. */
+/** schedule_task limits — mirror the Scheduled tasks IPC schema. */
+const SCHEDULE_TITLE_MAX_CHARS = 120
+const SCHEDULE_PROMPT_MAX_CHARS = 20_000
+
+const SCHEDULE_RECURRENCES: readonly string[] = ['once', 'hourly', 'daily', 'weekly']
+
+function isRecurrence(value: string): value is ScheduledTaskRecurrence {
+  return SCHEDULE_RECURRENCES.includes(value)
+}
+
 function clampIntArg(args: Record<string, unknown>, key: string, def: number, max: number): number {
   const value = args[key]
   const raw = typeof value === 'number' ? Math.floor(value) : NaN
@@ -776,14 +807,16 @@ export class ToolExecutor {
 
   /**
    * Main-computed context line shown prominently in the approval dialog —
-   * currently the git_write "what exactly will this do, on which branch"
-   * summary. Best-effort; never blocks the approval on a failure.
+   * the git_write "what exactly will this do, on which branch" summary and
+   * the schedule_task "what standing job would this create" summary.
+   * Best-effort; never blocks the approval on a failure.
    */
   private async approvalNoteFor(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
   ): Promise<string | undefined> {
+    if (definition.id === 'schedule_task') return this.scheduleTaskNote(args)
     if (definition.id !== 'git_write' || !this.deps.gitWrite) return undefined
     const root = this.deps.getProjectRoot(ctx.conversation)
     if (!root) return undefined
@@ -875,6 +908,8 @@ export class ToolExecutor {
         return this.runTaskStop(args)
       case 'update_task_list':
         return this.runUpdateTaskList(args, ctx)
+      case 'schedule_task':
+        return this.runScheduleTask(args)
       case 'ask_user_question':
         return this.runAskUserQuestion(args, ctx)
       case 'repo_map':
@@ -915,8 +950,9 @@ export class ToolExecutor {
   }
 
   private static readonly NO_PROJECT =
-    'Error: no project folder has been granted for this conversation. ' +
-    'Ask the user to open a project folder (Code mode) before using file tools.'
+    'Error: no working folder is attached to this conversation yet. ' +
+    'In a Work task, write a file first (write_file) to start its workspace, ' +
+    'or ask the user to connect a folder.'
 
   private async runFileSearch(
     args: Record<string, unknown>,
@@ -1223,9 +1259,26 @@ export class ToolExecutor {
   private requireCodeChanges(
     ctx: ToolExecuteContext
   ): { conversationId: string; projectId: string; root: string } | string {
+    if (!this.deps.codeChanges || !this.deps.codeService) {
+      return 'Error: file editing is unavailable in this build.'
+    }
+    // Work tasks get their own workspace folder on first write (idempotent:
+    // an already-linked folder — granted or auto — is simply returned).
+    if (ctx.conversation.mode === 'work' && this.deps.ensureWorkspaceRoot) {
+      try {
+        const workspace = this.deps.ensureWorkspaceRoot(ctx.conversation.id)
+        return {
+          conversationId: ctx.conversation.id,
+          projectId: workspace.projectId,
+          root: workspace.root,
+        }
+      } catch (e) {
+        return redactSecrets('Error preparing the task workspace: ' + errorMessage(e))
+      }
+    }
     const root = this.requireProjectRoot(ctx)
     if (!root) return ToolExecutor.NO_PROJECT
-    if (!this.deps.codeChanges || !this.deps.codeService || !ctx.conversation.projectId) {
+    if (!ctx.conversation.projectId) {
       return 'Error: file editing is unavailable in this build.'
     }
     return { conversationId: ctx.conversation.id, projectId: ctx.conversation.projectId, root }
@@ -1354,6 +1407,90 @@ export class ToolExecutor {
       tasks.push({ content, status })
     }
     return this.deps.taskList.update(ctx.conversation.id, encodeTaskList(tasks))
+  }
+
+  // -- scheduled tasks ------------------------------------------------------------
+
+  /** Approval-dialog context line for schedule_task (best-effort). */
+  private scheduleTaskNote(args: Record<string, unknown>): string | undefined {
+    try {
+      const action = getString(args, 'action')
+      if (action === 'create') {
+        const title = getString(args, 'title') ?? ''
+        const recurrence = getString(args, 'recurrence') ?? ''
+        const cadence = recurrence === 'once' ? 'one-time' : recurrence
+        return `Creates a ${cadence} scheduled task "${title}" that runs its prompt automatically with tools enabled`
+      }
+      if (action === 'cancel') {
+        const task = this.deps.scheduledTasks?.getById(getString(args, 'id') ?? '')
+        if (task) return `Removes the scheduled task "${task.title}"`
+      }
+    } catch {
+      // The dialog still shows the raw arguments.
+    }
+    return undefined
+  }
+
+  private runScheduleTask(args: Record<string, unknown>): string {
+    const tasks = this.deps.scheduledTasks
+    if (!tasks) return 'Error: scheduled tasks are unavailable in this context.'
+    const [action, actionError] = requireStringArg(args, 'action')
+    if (actionError) return actionError
+
+    if (action === 'list') {
+      const all = tasks.list()
+      if (all.length === 0) return 'No scheduled tasks exist.'
+      const lines = all.map((task) => {
+        const next = task.nextRunAt === null ? 'none' : formatLocalRunTime(task.nextRunAt)
+        return `- "${task.title}" — ${task.recurrence}, next run: ${next}${task.enabled ? '' : ' (paused)'}, last status: ${task.lastStatus} (id: ${task.id})`
+      })
+      return `Scheduled tasks:\n${lines.join('\n')}`
+    }
+
+    if (action === 'cancel') {
+      const [id, idError] = requireStringArg(args, 'id')
+      if (idError) return idError
+      const task = tasks.getById(id)
+      if (!task) return `Error: no scheduled task with id '${id}'. Use action "list" to see ids.`
+      tasks.remove(id)
+      return `Cancelled scheduled task "${task.title}".`
+    }
+
+    if (action !== 'create') {
+      return `Error: unknown action '${action}'. Use "create", "list" or "cancel".`
+    }
+
+    const [title, titleError] = requireStringArg(args, 'title')
+    if (titleError) return titleError
+    const [prompt, promptError] = requireStringArg(args, 'prompt')
+    if (promptError) return promptError
+    if (title.length > SCHEDULE_TITLE_MAX_CHARS) {
+      return `Error: 'title' must be at most ${SCHEDULE_TITLE_MAX_CHARS} characters.`
+    }
+    if (prompt.length > SCHEDULE_PROMPT_MAX_CHARS) {
+      return `Error: 'prompt' must be at most ${SCHEDULE_PROMPT_MAX_CHARS} characters.`
+    }
+    const recurrence = getString(args, 'recurrence')
+    if (!recurrence || !isRecurrence(recurrence)) {
+      return 'Error: recurrence must be one of "once", "hourly", "daily", "weekly".'
+    }
+    const resolved = resolveFirstRun(
+      {
+        recurrence,
+        time: getString(args, 'time'),
+        date: getString(args, 'date'),
+        inMinutes: typeof args.in_minutes === 'number' ? args.in_minutes : null,
+      },
+      Date.now()
+    )
+    if ('error' in resolved) return resolved.error
+    const task = tasks.create({ title, prompt, recurrence, runAt: resolved.runAt })
+    const cadence = recurrence === 'once' ? 'It runs once' : `It repeats ${recurrence}`
+    return (
+      `Scheduled task "${task.title}" created (id: ${task.id}). ` +
+      `First run: ${formatLocalRunTime(resolved.runAt)}. ${cadence}; the user can pause or ` +
+      'remove it from the Scheduled tasks panel.'
+    )
   }
 
   private async runAskUserQuestion(

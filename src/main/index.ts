@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { BrowserWindow, Menu, Tray, app, globalShortcut, session, shell } from 'electron'
 import { CHANNELS } from '@shared/ipc'
+import { toRunSnippet } from '@shared/workflow-status'
 import { openDatabase, type AppDatabase } from './db/database'
 import { keystore } from './keys/keystore'
 import { ChatService } from './services/chat-service'
@@ -21,15 +22,18 @@ import { createMemoryCompletionHook } from './services/memory-hook'
 import { DreamingService } from './services/dreaming'
 import { CodeService } from './code/code-service'
 import { GitService } from './code/git-service'
+import { WorkspaceRootService } from './code/workspace-root'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
 import { ImBridgeManager } from './im/manager'
 import { KnowledgeService } from './services/knowledge'
 import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
 import { WorkflowScheduler } from './workflows/scheduler'
+import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSession } from './browser/session'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
+import { ProjectHookService } from './services/project-hooks'
 
 const PRODUCTION_CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
@@ -43,6 +47,7 @@ let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let workflowScheduler: WorkflowScheduler | null = null
+let scheduledTaskScheduler: ScheduledTaskScheduler | null = null
 let dreamingService: DreamingService | null = null
 let workflowRunnerRef: WorkflowRunner | null = null
 /**
@@ -83,6 +88,7 @@ async function cleanup(): Promise<void> {
   questionBroker?.stopAll()
   imBridgeManager?.stopAll()
   workflowScheduler?.stop()
+  scheduledTaskScheduler?.stop()
   dreamingService?.stop()
   workflowRunnerRef?.stopAll()
   oauthManager?.stopAll()
@@ -259,6 +265,9 @@ function bootstrap(): void {
   mkdirSync(dataDir, { recursive: true })
   const attachmentsDir = join(dataDir, 'attachments')
   mkdirSync(attachmentsDir, { recursive: true })
+  // Per-task workspace folders for Work mode (created lazily per task).
+  const workspacesDir = join(dataDir, 'workspaces')
+  const worktreesDir = join(dataDir, 'worktrees')
   const database = openDatabase(join(dataDir, 'uld.sqlite3'))
   db = database
   // Recover generations interrupted by a crash or hard quit.
@@ -274,9 +283,16 @@ function bootstrap(): void {
   // safeStorage encryption now that Electron's crypto is available.
   keystore.reencryptInsecureKeys(database)
 
-  const codeService = new CodeService(database, (projectId) =>
-    broadcast(CHANNELS.codeChangesChanged, { projectId })
+  const projectHooks = new ProjectHookService(database)
+  const codeService = new CodeService(
+    database,
+    (projectId) => broadcast(CHANNELS.codeChangesChanged, { projectId }),
+    (conversationId) => {
+      const conversation = database.conversations.getById(conversationId)
+      if (conversation) void projectHooks.run('afterApply', conversation)
+    }
   )
+  const workspaceRoots = new WorkspaceRootService(database, workspacesDir)
   // Mutating git lives ONLY in GitService; commit-message suggestions reuse
   // the headless one-shot generation path (default model, no tools).
   const gitService = new GitService({
@@ -284,6 +300,7 @@ function bootstrap(): void {
       chatService
         ? chatService.generateForWorkflow(prompt)
         : Promise.reject(new Error('Generation unavailable during startup.')),
+    beforeCommit: (root) => projectHooks.runForRoot('beforeCommit', root),
   })
   // MCP manager: connects to user-configured MCP servers and exposes their
   // tools to the registry/executor. Connections open only on explicit enable
@@ -358,6 +375,9 @@ function bootstrap(): void {
         codeService.proposeChange(conversationId, relPath, changeType, newContent),
       apply: (changeId) => codeService.applyChange(changeId),
     },
+    // Work tasks without a folder get their own workspace on first write.
+    ensureWorkspaceRoot: (conversationId) => workspaceRoots.ensure(conversationId),
+    onScheduledTasksChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
     resolveSecretHeaders: (toolId) => {
       const out: Record<string, string> = {}
       for (const cipher of database.secrets.listCiphers('custom_tool', customToolDbId(toolId))) {
@@ -398,14 +418,30 @@ function bootstrap(): void {
   imBridgeManager = imBridge
 
   // Saved-workflow execution (manual runs + the interval scheduler share it).
-  const workflowRunner = createWorkflowRunner(database, {
-    runAgent: (prompt, providerId, modelId, opts) =>
-      chatService!.generateForWorkflow(prompt, providerId, modelId, opts),
-    notify: (text) => imBridge.notify(text),
-  })
+  const workflowRunner = createWorkflowRunner(
+    database,
+    {
+      runAgent: (prompt, providerId, modelId, opts) =>
+        chatService!.generateForWorkflow(prompt, providerId, modelId, opts),
+      notify: (text) => imBridge.notify(text),
+    },
+    {
+      // Keeps the Home overview / sidebar Scheduled section live the moment a
+      // run lands (scheduled runs happen with no renderer request in flight).
+      onRunRecorded: (run, workflow) =>
+        broadcast(CHANNELS.workflowRunFinished, { run: toRunSnippet(run, workflow.name) }),
+    }
+  )
   const scheduler = new WorkflowScheduler({ db: database, runner: workflowRunner })
   workflowScheduler = scheduler
   workflowRunnerRef = workflowRunner
+
+  const clockScheduler = new ScheduledTaskScheduler({
+    db: database,
+    run: (prompt) => chatService!.generateForWorkflow(prompt, undefined, undefined, { useTools: true }),
+    onChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
+  })
+  scheduledTaskScheduler = clockScheduler
 
   // Dreaming: daily memory consolidation on the default model (settings-gated
   // inside the service; the manual Settings → Memory action bypasses gates).
@@ -419,9 +455,15 @@ function bootstrap(): void {
   // assistant message (gated on settings.memoryEnabled inside the hook).
   registerCompletionHook(createMemoryCompletionHook(database))
 
-  // Per-mode artifact side effects (proposed code changes, documents, HTML
-  // artifacts, workspace items) plus the generic outbound webhook.
-  registerCompletionHook(createArtifactCompletionHook(database, codeService, imBridge))
+  registerCompletionHook((conversation) => projectHooks.run('afterAgent', conversation))
+
+  // Work-mode artifact side effects (proposed code changes, workspace items)
+  // plus the generic outbound webhook.
+  registerCompletionHook(
+    createArtifactCompletionHook(database, codeService, imBridge, (conversationId) =>
+      workspaceRoots.ensure(conversationId)
+    )
+  )
 
   registerIpc({
     db: database,
@@ -436,9 +478,11 @@ function bootstrap(): void {
     imBridgeManager: imBridge,
     oauthManager: oauth,
     workflowRunner,
+    workspaceRoots,
     dreamingService: dreaming,
     knowledgeService,
     attachmentsDir,
+    worktreesDir,
     getWindows: () => BrowserWindow.getAllWindows(),
   })
 
@@ -447,6 +491,7 @@ function bootstrap(): void {
   imBridge.start()
   if (process.env.SMOKE_TEST !== '1') {
     scheduler.start()
+    clockScheduler.start()
     dreaming.start()
   }
 

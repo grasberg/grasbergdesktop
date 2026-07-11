@@ -106,9 +106,9 @@ function DeleteAllSection() {
       <div className="toggle-row-text">
         <span className="toggle-row-title">Delete all projects and chats</span>
         <span className="field-hint">
-          Permanently removes every conversation in all modes (with their messages and documents),
-          every project, and every cowork workspace. Your API keys, providers, settings, memories,
-          skills and granted code folders are kept. This cannot be undone.
+          Permanently removes every chat and work task (with their messages and task-workspace
+          files), every project, and every workspace. Your API keys, providers, settings,
+          memories, skills and connected folders are kept. This cannot be undone.
         </span>
       </div>
       <div className="prompt-form-actions">

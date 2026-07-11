@@ -56,6 +56,7 @@ describe('ToolRegistry.listDefinitions', () => {
       'task_stop',
       'update_task_list',
       'ask_user_question',
+      'schedule_task',
     ])
     for (const def of definitions) {
       expect(def.builtin).toBe(true)

@@ -1,10 +1,10 @@
 /**
- * Parsers for the mode-specific artifact blocks assistants emit (formats are
- * instructed in prompts.ts): ```uld-change blocks in Code mode, ```uld-item
- * blocks in Cowork mode, and mode-independent ```uld-memory blocks (assistant
- * memories). Parsing is tolerant — malformed blocks are silently skipped,
- * never thrown on — and the message content itself is left untouched (the
- * renderer renders the blocks specially).
+ * Parsers for the artifact blocks assistants emit (formats are instructed in
+ * prompts.ts): ```uld-change and ```uld-item blocks in Work mode, and
+ * mode-independent ```uld-memory blocks (assistant memories). Parsing is
+ * tolerant — malformed blocks are silently skipped, never thrown on — and the
+ * message content itself is left untouched (the renderer renders the blocks
+ * specially).
  */
 
 import type { CodeChangeType, WorkspaceItemKind } from '@shared/types'
@@ -90,38 +90,6 @@ export function extractCodeChanges(content: string): ExtractedCodeChange[] {
     })
   }
   return changes
-}
-
-export interface ExtractedDocument {
-  title: string
-  /** Complete document content (Markdown for docs, HTML for prototypes). */
-  content: string
-}
-
-/** Extracts the LAST ```uld-doc block: {"title"} header + full Markdown body. */
-export function extractDocument(content: string): ExtractedDocument | null {
-  const blocks = parseRawBlocks(content, 'uld-doc')
-  const last = blocks[blocks.length - 1]
-  if (!last) return null
-  const title = last.header['title']
-  return {
-    title: typeof title === 'string' ? title.trim() : 'Document',
-    content: last.body.trimEnd(),
-  }
-}
-
-/** Extracts all ```uld-html prototype blocks: {"title"} header + full HTML body. */
-export function extractHtmlArtifacts(content: string): ExtractedDocument[] {
-  const out: ExtractedDocument[] = []
-  for (const { header, body } of parseRawBlocks(content, 'uld-html')) {
-    if (body.trim().length === 0) continue
-    const title = header['title']
-    out.push({
-      title: typeof title === 'string' && title.trim() ? title.trim() : 'Prototype',
-      content: body.trimEnd(),
-    })
-  }
-  return out
 }
 
 export interface ExtractedMemoryDirective {

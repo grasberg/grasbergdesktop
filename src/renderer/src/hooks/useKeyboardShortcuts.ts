@@ -18,7 +18,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 /**
  * Global shortcuts:
- *   Ctrl/Cmd+N  new task in the active mode tab ('All' falls back to chat)
+ *   Ctrl/Cmd+N  new task in the active mode tab (Chat or Work)
  *   Ctrl/Cmd+K  toggle command palette
  *   Ctrl/Cmd+,  toggle settings
  *   Escape      close palette/settings/shortcuts, else stop generation
