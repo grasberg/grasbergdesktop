@@ -22,6 +22,7 @@ import type {
   ResearchDepth,
   ScheduledTask,
   ScheduledTaskInput,
+  ScheduledTasksChangedEvent,
   ScheduledWorkflowStatus,
   StreamEventEnvelope,
   TestConnectionResult,
@@ -224,4 +225,5 @@ export interface ScheduledTasksStoreState {
   create(input: ScheduledTaskInput): Promise<ScheduledTask | null>
   setEnabled(id: string, enabled: boolean): Promise<void>
   remove(id: string): Promise<void>
+  handleChanged(event: ScheduledTasksChangedEvent): void
 }

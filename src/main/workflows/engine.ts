@@ -29,6 +29,7 @@
 import type { WorkflowGraph, WorkflowNode, WorkflowRunResult } from '@shared/types'
 
 const MAX_NODES = 100
+const MAX_PARALLEL_ASYNC_NODES = 3
 const HTTP_TIMEOUT_MS = 15_000
 const HTTP_MAX_BYTES = 256 * 1024
 
@@ -144,6 +145,9 @@ async function runHttp(
   }
   const fetchImpl = deps.fetchImpl ?? fetch
   const controller = new AbortController()
+  const abortFromParent = (): void => controller.abort(deps.signal?.reason)
+  if (deps.signal?.aborted) abortFromParent()
+  else deps.signal?.addEventListener('abort', abortFromParent, { once: true })
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS)
   try {
     const init: RequestInit = { method, signal: controller.signal }
@@ -156,6 +160,7 @@ async function runHttp(
     return `HTTP ${res.status}\n${text}`
   } finally {
     clearTimeout(timer)
+    deps.signal?.removeEventListener('abort', abortFromParent)
   }
 }
 
@@ -181,6 +186,25 @@ export async function runWorkflow(
   }
 
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
+  const incoming = new Map<string, WorkflowGraph['edges']>()
+  for (const id of order) incoming.set(id, [])
+  for (const edge of graph.edges) {
+    if (byId.has(edge.source) && byId.has(edge.target)) incoming.get(edge.target)!.push(edge)
+  }
+
+  // Group the stable topological order into dependency levels. Nodes in one
+  // level never depend on each other, so its AI/HTTP work is safe to overlap.
+  const depth = new Map<string, number>()
+  const levels: string[][] = []
+  for (const id of order) {
+    const nodeDepth = (incoming.get(id) ?? []).reduce(
+      (max, edge) => Math.max(max, (depth.get(edge.source) ?? 0) + 1),
+      0
+    )
+    depth.set(id, nodeDepth)
+    ;(levels[nodeDepth] ??= []).push(id)
+  }
+
   const skipped = new Set<string>()
   /** Condition results by node id (set when the condition executes). */
   const conditionResults = new Map<string, boolean>()
@@ -197,24 +221,29 @@ export async function runWorkflow(
     return true
   }
 
-  for (const id of order) {
-    if (deps.signal?.aborted) {
-      return { ok: false, nodeOutputs: outputs, order, error: 'Aborted.', failedNodeId: id }
-    }
+  const controller = new AbortController()
+  const abortFromParent = (): void => controller.abort(deps.signal?.reason)
+  if (deps.signal?.aborted) abortFromParent()
+  else deps.signal?.addEventListener('abort', abortFromParent, { once: true })
+  const runDeps: WorkflowEngineDeps = { ...deps, signal: controller.signal }
+
+  let failure: { id: string; error: unknown } | null = null
+
+  const executeNode = async (id: string): Promise<void> => {
+    if (controller.signal.aborted) throw new Error('Aborted.')
     const node = byId.get(id)!
-    const incomingEdges = graph.edges.filter((e) => e.target === id && byId.has(e.source))
+    const incomingEdges = incoming.get(id) ?? []
     const activeEdges = incomingEdges.filter(edgeActive)
     if (incomingEdges.length > 0 && activeEdges.length === 0) {
       skipped.add(id)
-      continue
+      return
     }
     const input = activeEdges
       .map((e) => outputs[e.source] ?? '')
       .filter((s) => s.length > 0)
       .join('\n')
-    try {
-      let output = ''
-      switch (node.kind) {
+    let output = ''
+    switch (node.kind) {
         case 'manual':
           output = str(node.config, 'text')
           break
@@ -225,24 +254,24 @@ export async function runWorkflow(
           output = input
           break
         case 'http_request':
-          output = await runHttp(node, input, outputs, deps)
+          output = await runHttp(node, input, outputs, runDeps)
           break
         case 'condition':
           conditionResults.set(id, evaluateCondition(node, input))
           output = input
           break
         case 'notify': {
-          if (!deps.notify) {
+          if (!runDeps.notify) {
             throw new Error('No delivery channel is configured (Telegram bridge or webhook).')
           }
-          await deps.notify(input)
+          await runDeps.notify(input)
           output = input
           break
         }
         case 'ai_agent': {
           const prompt = interpolate(str(node.config, 'prompt'), input, outputs)
           const agentId = str(node.config, 'agentId')
-          output = await deps.runAgent(
+          output = await runDeps.runAgent(
             prompt,
             str(node.config, 'providerId') || undefined,
             str(node.config, 'modelId') || undefined,
@@ -250,30 +279,88 @@ export async function runWorkflow(
               useTools: node.config.useTools === true,
               ...(agentId ? { agentId } : {}),
               ...(node.config.jsonOutput === true ? { json: true } : {}),
-              ...(deps.signal ? { signal: deps.signal } : {}),
+              signal: controller.signal,
             }
           )
           break
         }
         default:
           output = ''
-      }
-      outputs[id] = output
-    } catch (e) {
-      return {
-        ok: false,
-        nodeOutputs: outputs,
-        order,
-        skipped: skipped.size > 0 ? [...skipped] : undefined,
-        error: e instanceof Error ? e.message : String(e),
-        failedNodeId: id,
+    }
+    outputs[id] = output
+  }
+
+  const fail = (id: string, error: unknown): void => {
+    if (failure) return
+    failure = { id, error }
+    controller.abort()
+  }
+
+  const runAsyncNodes = async (ids: string[]): Promise<void> => {
+    let cursor = 0
+    const worker = async (): Promise<void> => {
+      while (!failure && cursor < ids.length) {
+        const id = ids[cursor++]!
+        try {
+          await executeNode(id)
+        } catch (error) {
+          fail(id, error)
+        }
       }
     }
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_PARALLEL_ASYNC_NODES, ids.length) }, () => worker())
+    )
   }
-  return {
-    ok: true,
-    nodeOutputs: outputs,
-    order,
-    skipped: skipped.size > 0 ? [...skipped] : undefined,
+
+  try {
+    for (const level of levels) {
+      if (controller.signal.aborted) {
+        if (!failure) fail(level[0] ?? order[0]!, new Error('Aborted.'))
+        break
+      }
+      let asyncNodes: string[] = []
+      const flushAsync = async (): Promise<void> => {
+        if (asyncNodes.length === 0 || failure) return
+        const queued = asyncNodes
+        asyncNodes = []
+        await runAsyncNodes(queued)
+      }
+
+      for (const id of level) {
+        if (failure) break
+        const kind = byId.get(id)!.kind
+        if (kind === 'ai_agent' || kind === 'http_request') {
+          asyncNodes.push(id)
+          continue
+        }
+        // Notifications are serialized barriers so externally visible sends
+        // keep the same stable topological order.
+        if (kind === 'notify') await flushAsync()
+        if (failure) break
+        try {
+          await executeNode(id)
+        } catch (error) {
+          fail(id, error)
+        }
+      }
+      await flushAsync()
+      if (failure) break
+    }
+  } finally {
+    deps.signal?.removeEventListener('abort', abortFromParent)
   }
+
+  if (failure) {
+    const failed = failure as { id: string; error: unknown }
+    return {
+      ok: false,
+      nodeOutputs: outputs,
+      order,
+      skipped: skipped.size > 0 ? [...skipped] : undefined,
+      error: failed.error instanceof Error ? failed.error.message : String(failed.error),
+      failedNodeId: failed.id,
+    }
+  }
+  return { ok: true, nodeOutputs: outputs, order, skipped: skipped.size > 0 ? [...skipped] : undefined }
 }

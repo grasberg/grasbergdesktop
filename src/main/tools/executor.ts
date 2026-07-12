@@ -30,6 +30,8 @@ import type {
   Attachment,
   Conversation,
   GitStatus,
+  GitHubPrInput,
+  GitHubPrResult,
   ScheduledTask,
   ScheduledTaskInput,
   ScheduledTaskRecurrence,
@@ -136,6 +138,11 @@ export interface ToolExecutorDeps {
     stage(root: string, paths: string[]): Promise<string>
     commit(root: string, message: string): Promise<{ sha: string; branch: string | null }>
     createBranch(root: string, name: string): Promise<string>
+    setOrigin(root: string, url: string): Promise<GitStatus>
+    fetch(root: string): Promise<GitStatus>
+    pull(root: string): Promise<GitStatus>
+    push(root: string, confirmDefaultBranch?: boolean): Promise<GitStatus>
+    createPullRequest(root: string, input: GitHubPrInput): Promise<GitHubPrResult>
   } | null
   /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
   delegateBackground?: {
@@ -1083,6 +1090,18 @@ export class ToolExecutor {
           (isDefault ? ' — the DEFAULT branch' : '')
         )
       }
+      if (action === 'push') {
+        const status = await this.deps.gitWrite.status(root)
+        const branch = status.branch ?? 'detached HEAD'
+        const isDefault = status.branch !== null && status.branch === status.defaultBranch
+        return `Pushes branch '${branch}' to origin${isDefault ? ' — the DEFAULT branch' : ''}. Force-push is disabled.`
+      }
+      if (action === 'pull') return 'Fast-forwards the current clean branch from its upstream.'
+      if (action === 'fetch') return 'Fetches and prunes remote refs from origin.'
+      if (action === 'set_origin') return 'Sets the repository remote named origin.'
+      if (action === 'create_pull_request') {
+        return `Creates a${args.draft === true ? ' draft' : ''} GitHub pull request titled '${getString(args, 'title') ?? ''}'.`
+      }
       if (action === 'stage') {
         const paths = Array.isArray(args.paths)
           ? args.paths.filter((p): p is string => typeof p === 'string')
@@ -1954,8 +1973,49 @@ export class ToolExecutor {
           if (branchError) return branchError
           return await gitWrite.createBranch(root, branch)
         }
+        case 'fetch': {
+          const status = await gitWrite.fetch(root)
+          return `Fetched origin. Branch is ${status.ahead} ahead / ${status.behind} behind.`
+        }
+        case 'set_origin': {
+          const [url, urlError] = requireStringArg(args, 'url')
+          if (urlError) return urlError
+          await gitWrite.setOrigin(root, url)
+          return 'Configured the origin remote.'
+        }
+        case 'pull': {
+          const status = await gitWrite.pull(root)
+          return `Pulled with fast-forward only. Branch is ${status.ahead} ahead / ${status.behind} behind.`
+        }
+        case 'push': {
+          const status = await gitWrite.status(root)
+          const onDefault = status.branch !== null && status.branch === status.defaultBranch
+          if (onDefault && args.confirm_default_branch !== true) {
+            return (
+              `Refused: HEAD is on the default branch ('${status.branch}'). Create a branch first, ` +
+              'or retry with confirm_default_branch: true only when the user explicitly requested it.'
+            )
+          }
+          const updated = await gitWrite.push(root, args.confirm_default_branch === true)
+          return `Pushed '${updated.branch ?? 'current branch'}' to ${updated.upstream ?? 'origin'}.`
+        }
+        case 'create_pull_request': {
+          const [title, titleError] = requireStringArg(args, 'title')
+          if (titleError) return titleError
+          const input: GitHubPrInput = {
+            title,
+            ...(typeof args.body === 'string' ? { body: args.body.slice(0, 20_000) } : {}),
+            ...(typeof args.base === 'string' ? { base: args.base } : {}),
+            ...(args.draft === true ? { draft: true } : {}),
+          }
+          const result = await gitWrite.createPullRequest(root, input)
+          return `Created pull request: ${result.url}`
+        }
         default:
-          return "Error: 'action' must be one of stage | commit | create_branch."
+          return (
+            "Error: 'action' must be one of stage | commit | create_branch | set_origin | fetch | " +
+            'pull | push | create_pull_request.'
+          )
       }
     } catch (e) {
       return redactSecrets(`git_write failed: ${errorMessage(e)}`)

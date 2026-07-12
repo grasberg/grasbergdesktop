@@ -6,7 +6,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -196,6 +196,114 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
 
     await expect(service.createBranch(dir, '-evil')).rejects.toThrow(/branch names/i)
     await expect(service.createBranch(dir, 'has space')).rejects.toThrow(/branch names/i)
+  })
+
+  it('configures a credential-free HTTPS or SSH origin', async () => {
+    let status = await service.setOrigin(dir, 'https://github.com/acme/repo.git')
+    expect(status.hasOrigin).toBe(true)
+    expect(git(dir, 'remote', 'get-url', 'origin').trim()).toBe(
+      'https://github.com/acme/repo.git'
+    )
+    status = await service.setOrigin(dir, 'git@github.com:acme/other.git')
+    expect(status.hasOrigin).toBe(true)
+    expect(git(dir, 'remote', 'get-url', 'origin').trim()).toBe('git@github.com:acme/other.git')
+    await expect(
+      service.setOrigin(dir, 'https://secret-token@github.com/acme/repo.git')
+    ).rejects.toThrow(/credentials/i)
+    await expect(service.setOrigin(dir, 'file:///tmp/repo')).rejects.toThrow(/HTTPS or SSH/i)
+  })
+
+  it('pushes without force, fetches, and pulls remote commits with fast-forward only', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    await service.stage(dir, ['a.txt'])
+    await service.commit(dir, 'initial')
+    const remote = mkdtempSync(join(tmpdir(), 'uld-git-remote-'))
+    const peer = mkdtempSync(join(tmpdir(), 'uld-git-peer-'))
+    try {
+      execFileSync('git', ['init', '--bare'], { cwd: remote, stdio: 'ignore', windowsHide: true })
+      git(dir, 'remote', 'add', 'origin', remote)
+
+      await expect(service.push(dir)).rejects.toThrow(/default branch.*confirmation/i)
+      let status = await service.push(dir, true)
+      expect(status.upstream).toBe('origin/main')
+      expect(status.ahead).toBe(0)
+      git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+
+      execFileSync('git', ['clone', remote, '.'], { cwd: peer, stdio: 'ignore', windowsHide: true })
+      git(peer, 'config', 'user.email', 'peer@example.com')
+      git(peer, 'config', 'user.name', 'Peer')
+      git(peer, 'config', 'commit.gpgsign', 'false')
+      writeFileSync(join(peer, 'a.txt'), 'two\n')
+      git(peer, 'add', 'a.txt')
+      git(peer, 'commit', '-m', 'remote update')
+      git(peer, 'push')
+
+      status = await service.fetch(dir)
+      expect(status.behind).toBe(1)
+      status = await service.pull(dir)
+      expect(status.behind).toBe(0)
+      expect(readFileSync(join(dir, 'a.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('two\n')
+    } finally {
+      rmSync(remote, { recursive: true, force: true })
+      rmSync(peer, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses pull with a dirty working tree', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    await service.stage(dir, ['a.txt'])
+    await service.commit(dir, 'initial')
+    const remote = mkdtempSync(join(tmpdir(), 'uld-git-remote-'))
+    try {
+      execFileSync('git', ['init', '--bare'], { cwd: remote, stdio: 'ignore', windowsHide: true })
+      git(dir, 'remote', 'add', 'origin', remote)
+      await service.push(dir, true)
+      writeFileSync(join(dir, 'dirty.txt'), 'dirty\n')
+      await expect(service.pull(dir)).rejects.toThrow(/clean working tree/i)
+    } finally {
+      rmSync(remote, { recursive: true, force: true })
+    }
+  })
+
+  it('creates a pull request with gh only after the feature branch is pushed', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    await service.stage(dir, ['a.txt'])
+    await service.commit(dir, 'initial')
+    const remote = mkdtempSync(join(tmpdir(), 'uld-git-remote-'))
+    try {
+      execFileSync('git', ['init', '--bare'], { cwd: remote, stdio: 'ignore', windowsHide: true })
+      git(dir, 'remote', 'add', 'origin', remote)
+      await service.push(dir, true)
+      await service.createBranch(dir, 'feature/pr')
+      writeFileSync(join(dir, 'a.txt'), 'feature\n')
+      await service.stage(dir, ['a.txt'])
+      await service.commit(dir, 'feature')
+
+      const githubCommand = vi.fn(async () => ({
+        ok: true,
+        stdout: 'https://github.com/acme/repo/pull/42\n',
+        stderr: '',
+      }))
+      const withGithub = new GitService({ githubCommand })
+      await expect(
+        withGithub.createPullRequest(dir, { title: 'Feature' })
+      ).rejects.toThrow(/push.*before/i)
+
+      await service.push(dir)
+      const result = await withGithub.createPullRequest(dir, {
+        title: 'Feature',
+        body: 'Description',
+        base: 'main',
+        draft: true,
+      })
+      expect(result.url).toBe('https://github.com/acme/repo/pull/42')
+      expect(githubCommand).toHaveBeenCalledWith(
+        ['pr', 'create', '--title', 'Feature', '--body', 'Description', '--base', 'main', '--draft'],
+        dir
+      )
+    } finally {
+      rmSync(remote, { recursive: true, force: true })
+    }
   })
 
   it('creates an isolated app-owned worktree on a grasberg branch', async () => {

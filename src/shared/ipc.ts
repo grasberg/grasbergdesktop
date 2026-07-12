@@ -25,6 +25,8 @@ import type {
   CheckpointLite,
   CodeProject,
   GitStatus,
+  GitHubPrInput,
+  GitHubPrResult,
   Conversation,
   ConversationMode,
   ProviderType,
@@ -69,6 +71,7 @@ import type {
   ProviderTypeMeta,
   ResearchDepth,
   ScheduledTask,
+  ScheduledTasksChangedEvent,
   ScheduledTaskInput,
   PromptTemplate,
   PromptTemplateInput,
@@ -191,6 +194,11 @@ export const CHANNELS = {
   codeGitUnstage: 'code:git:unstage',
   codeGitCommit: 'code:git:commit',
   codeGitCreateBranch: 'code:git:createBranch',
+  codeGitFetch: 'code:git:fetch',
+  codeGitSetOrigin: 'code:git:setOrigin',
+  codeGitPull: 'code:git:pull',
+  codeGitPush: 'code:git:push',
+  codeGithubPrCreate: 'code:github:pr:create',
   codeGitGenerateCommitMessage: 'code:git:generateCommitMessage',
   codeWorktreeCreate: 'code:worktree:create',
   codeOpenInIde: 'code:ide:open',
@@ -631,6 +639,11 @@ export interface UldApi {
       message: string
     ): Promise<IpcResult<{ sha: string; branch: string | null }>>
     gitCreateBranch(projectId: string, name: string): Promise<IpcResult<GitStatus>>
+    gitFetch(projectId: string): Promise<IpcResult<GitStatus>>
+    gitSetOrigin(projectId: string, url: string): Promise<IpcResult<GitStatus>>
+    gitPull(projectId: string): Promise<IpcResult<GitStatus>>
+    gitPush(projectId: string, confirmDefaultBranch: boolean): Promise<IpcResult<GitStatus>>
+    githubPrCreate(projectId: string, input: GitHubPrInput): Promise<IpcResult<GitHubPrResult>>
     /** Suggests a commit message from the staged diff (default model). */
     gitGenerateCommitMessage(projectId: string): Promise<IpcResult<{ message: string }>>
     worktreeCreate(projectId: string, name?: string): Promise<IpcResult<WorktreeInfo>>
@@ -731,7 +744,7 @@ export interface UldApi {
     create(input: ScheduledTaskInput): Promise<IpcResult<ScheduledTask>>
     setEnabled(id: string, enabled: boolean): Promise<IpcResult<ScheduledTask>>
     delete(id: string): Promise<IpcResult<void>>
-    onChanged(cb: () => void): () => void
+      onChanged(cb: (event: ScheduledTasksChangedEvent) => void): () => void
   }
   agents: {
     list(): Promise<IpcResult<AgentProfile[]>>

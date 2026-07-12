@@ -59,6 +59,7 @@ export interface ScheduledTasksRepository {
   remove(id: string): void
   deleteAll(): void
   listDue(now: number): ScheduledTask[]
+  nextEnabledRunAt(): number | null
   markRunning(id: string, startedAt: number): void
   finish(
     id: string,
@@ -155,6 +156,14 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
           [now]
         )
         .map(toTask)
+    },
+
+    nextEnabledRunAt() {
+      const row = driver.get<{ next_run_at: number | null }>(
+        `SELECT MIN(next_run_at) AS next_run_at FROM scheduled_tasks
+         WHERE enabled = 1 AND next_run_at IS NOT NULL`
+      )
+      return row?.next_run_at ?? null
     },
 
     markRunning(id, startedAt) {

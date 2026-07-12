@@ -15,10 +15,22 @@ export default function CommitBar(): ReactElement | null {
   const gitCommit = useCodeStore((s) => s.gitCommit)
   const gitCreateBranch = useCodeStore((s) => s.gitCreateBranch)
   const gitGenerateMessage = useCodeStore((s) => s.gitGenerateMessage)
+  const gitFetch = useCodeStore((s) => s.gitFetch)
+  const gitSetOrigin = useCodeStore((s) => s.gitSetOrigin)
+  const gitPull = useCodeStore((s) => s.gitPull)
+  const gitPush = useCodeStore((s) => s.gitPush)
+  const gitCreatePullRequest = useCodeStore((s) => s.gitCreatePullRequest)
 
   const [message, setMessage] = useState('')
   const [branchDraft, setBranchDraft] = useState<string | null>(null)
   const [confirmDefault, setConfirmDefault] = useState(false)
+  const [confirmPushDefault, setConfirmPushDefault] = useState(false)
+  const [prOpen, setPrOpen] = useState(false)
+  const [prTitle, setPrTitle] = useState('')
+  const [prBody, setPrBody] = useState('')
+  const [prDraft, setPrDraft] = useState(false)
+  const [prUrl, setPrUrl] = useState<string | null>(null)
+  const [remoteDraft, setRemoteDraft] = useState<string | null>(null)
 
   if (!gitStatus || !gitStatus.isRepo) return null
 
@@ -26,6 +38,7 @@ export default function CommitBar(): ReactElement | null {
   const unstagedTotal = gitStatus.unstaged.length + gitStatus.untracked.length
   const onDefault =
     gitStatus.branch !== null && gitStatus.branch === gitStatus.defaultBranch
+  const dirty = staged > 0 || unstagedTotal > 0
 
   const commit = async (): Promise<void> => {
     if (onDefault && !confirmDefault) {
@@ -34,6 +47,24 @@ export default function CommitBar(): ReactElement | null {
     }
     setConfirmDefault(false)
     if (await gitCommit(message.trim())) setMessage('')
+  }
+
+  const push = async (): Promise<void> => {
+    if (onDefault && !confirmPushDefault) {
+      setConfirmPushDefault(true)
+      return
+    }
+    if (await gitPush(confirmPushDefault)) setConfirmPushDefault(false)
+  }
+
+  const createPr = async (): Promise<void> => {
+    const url = await gitCreatePullRequest({
+      title: prTitle.trim(),
+      body: prBody,
+      base: gitStatus.defaultBranch ?? undefined,
+      draft: prDraft,
+    })
+    if (url) setPrUrl(url)
   }
 
   return (
@@ -52,6 +83,11 @@ export default function CommitBar(): ReactElement | null {
         </span>
         <span className="commit-bar-counts">
           {staged} staged · {unstagedTotal} unstaged
+          {gitStatus.upstream
+            ? ` · ${gitStatus.ahead} ahead / ${gitStatus.behind} behind`
+            : gitStatus.hasOrigin
+              ? ' · not pushed'
+              : ' · local only'}
         </span>
         {unstagedTotal > 0 && (
           <button
@@ -99,7 +135,148 @@ export default function CommitBar(): ReactElement | null {
             </button>
           </span>
         )}
+        {gitStatus.hasOrigin && (
+          <>
+            <button
+              type="button"
+              className="btn-link commit-bar-action"
+              disabled={gitBusy}
+              onClick={() => void gitFetch()}
+            >
+              Fetch
+            </button>
+            {gitStatus.upstream && gitStatus.behind > 0 && (
+              <button
+                type="button"
+                className="btn-link commit-bar-action"
+                title={dirty ? 'Commit or discard local changes before pulling.' : undefined}
+                disabled={gitBusy || dirty}
+                onClick={() => void gitPull()}
+              >
+                Pull ({gitStatus.behind})
+              </button>
+            )}
+            {gitStatus.branch && (!gitStatus.upstream || gitStatus.ahead > 0) && (
+              <button
+                type="button"
+                className="btn-link commit-bar-action"
+                disabled={gitBusy}
+                onClick={() => void push()}
+              >
+                {confirmPushDefault
+                  ? `Push to ${gitStatus.branch}?`
+                  : `Push${gitStatus.ahead > 0 ? ` (${gitStatus.ahead})` : ''}`}
+              </button>
+            )}
+            {gitStatus.branch && !onDefault && gitStatus.upstream && (
+              <button
+                type="button"
+                className="btn-link commit-bar-action"
+                disabled={gitBusy || gitStatus.ahead > 0}
+                title={gitStatus.ahead > 0 ? 'Push the latest commits first.' : undefined}
+                onClick={() => {
+                  setPrOpen((open) => !open)
+                  setPrUrl(null)
+                }}
+              >
+                Pull request…
+              </button>
+            )}
+          </>
+        )}
+        {!gitStatus.hasOrigin &&
+          (remoteDraft === null ? (
+            <button
+              type="button"
+              className="btn-link commit-bar-action"
+              disabled={gitBusy}
+              onClick={() => setRemoteDraft('')}
+            >
+              Connect remote…
+            </button>
+          ) : (
+            <span className="commit-bar-newbranch">
+              <input
+                className="input mono commit-bar-remote-input"
+                value={remoteDraft}
+                placeholder="https://github.com/owner/repo.git"
+                spellCheck={false}
+                autoFocus
+                onChange={(event) => setRemoteDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setRemoteDraft(null)
+                  if (event.key === 'Enter' && remoteDraft.trim()) {
+                    void gitSetOrigin(remoteDraft).then((ok) => {
+                      if (ok) setRemoteDraft(null)
+                    })
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="btn-link commit-bar-action"
+                disabled={gitBusy || !remoteDraft.trim()}
+                onClick={() =>
+                  void gitSetOrigin(remoteDraft).then((ok) => {
+                    if (ok) setRemoteDraft(null)
+                  })
+                }
+              >
+                Connect
+              </button>
+              <button
+                type="button"
+                className="btn-link commit-bar-action"
+                onClick={() => setRemoteDraft(null)}
+              >
+                Cancel
+              </button>
+            </span>
+          ))}
       </div>
+
+      {prOpen && (
+        <div className="commit-bar-pr">
+          <input
+            className="input"
+            value={prTitle}
+            maxLength={200}
+            placeholder="Pull request title"
+            onChange={(event) => setPrTitle(event.target.value)}
+          />
+          <textarea
+            className="textarea"
+            rows={3}
+            value={prBody}
+            maxLength={20_000}
+            placeholder="Description (optional)"
+            onChange={(event) => setPrBody(event.target.value)}
+          />
+          <div className="commit-bar-pr-actions">
+            <label>
+              <input
+                type="checkbox"
+                checked={prDraft}
+                onChange={(event) => setPrDraft(event.target.checked)}
+              />{' '}
+              Draft
+            </label>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={gitBusy || !prTitle.trim()}
+              onClick={() => void createPr()}
+            >
+              Create pull request
+            </button>
+            {prUrl && (
+              <a href={prUrl} target="_blank" rel="noreferrer">
+                Open pull request
+              </a>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="commit-bar-compose">
         <textarea

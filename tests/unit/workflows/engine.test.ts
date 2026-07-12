@@ -48,6 +48,7 @@ describe('runWorkflow', () => {
     expect(res.nodeOutputs.t).toBe('Hello world')
     expect(runAgent).toHaveBeenCalledWith('Say: Hello world', undefined, undefined, {
       useTools: false,
+      signal: expect.any(AbortSignal),
     })
     expect(res.nodeOutputs.a).toBe('AI(Say: Hello world)')
     expect(res.nodeOutputs.o).toBe('AI(Say: Hello world)')
@@ -170,7 +171,7 @@ describe('runWorkflow', () => {
       nodes: [node('m', 'manual', { text: 'hello' }), node('n', 'notify', {})],
       edges: [{ id: 'e1', source: 'm', target: 'n' }],
     }
-    const notify = vi.fn(async () => undefined)
+    const notify = vi.fn(async (_text: string) => undefined)
     const ok = await runWorkflow(graph, { runAgent: async () => '', notify })
     expect(ok.ok).toBe(true)
     expect(notify).toHaveBeenCalledWith('hello')
@@ -188,6 +189,83 @@ describe('runWorkflow', () => {
     }
     const runAgent = vi.fn(async () => 'done')
     await runWorkflow(graph, { runAgent })
-    expect(runAgent).toHaveBeenCalledWith('go', undefined, undefined, { useTools: true })
+    expect(runAgent).toHaveBeenCalledWith('go', undefined, undefined, {
+      useTools: true,
+      signal: expect.any(AbortSignal),
+    })
+  })
+
+  it('runs independent AI branches concurrently with a maximum of three', async () => {
+    const graph: WorkflowGraph = {
+      nodes: Array.from({ length: 5 }, (_, i) => node(`a${i}`, 'ai_agent', { prompt: `p${i}` })),
+      edges: [],
+    }
+    let active = 0
+    let peak = 0
+    const releases: Array<() => void> = []
+    const runAgent = vi.fn(async () => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      active -= 1
+      return 'done'
+    })
+
+    const running = runWorkflow(graph, { runAgent })
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(3))
+    expect(peak).toBe(3)
+    releases.splice(0).forEach((release) => release())
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(5))
+    releases.splice(0).forEach((release) => release())
+    expect((await running).ok).toBe(true)
+    expect(peak).toBe(3)
+  })
+
+  it('waits for dependencies and serializes notifications in topological order', async () => {
+    const graph: WorkflowGraph = {
+      nodes: [
+        node('a', 'ai_agent', { prompt: 'a' }),
+        node('b', 'ai_agent', { prompt: 'b' }),
+        node('na', 'notify', {}),
+        node('nb', 'notify', {}),
+      ],
+      edges: [
+        { id: 'e1', source: 'a', target: 'na' },
+        { id: 'e2', source: 'b', target: 'nb' },
+      ],
+    }
+    const notify = vi.fn(async (_text: string) => undefined)
+    const result = await runWorkflow(graph, {
+      runAgent: async (prompt) => prompt.toUpperCase(),
+      notify,
+    })
+    expect(result.ok).toBe(true)
+    expect(notify.mock.calls.map(([value]) => value)).toEqual(['A', 'B'])
+  })
+
+  it('propagates workflow abort to an in-flight HTTP node', async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      await new Promise<void>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('http aborted')), {
+          once: true,
+        })
+      })
+      return new Response('never')
+    })
+    const graph: WorkflowGraph = {
+      nodes: [node('h', 'http_request', { url: 'https://example.com/slow' })],
+      edges: [],
+    }
+    const running = runWorkflow(graph, {
+      runAgent: async () => '',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      signal: controller.signal,
+    })
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled())
+    controller.abort()
+    const result = await running
+    expect(result.ok).toBe(false)
+    expect(result.failedNodeId).toBe('h')
   })
 })

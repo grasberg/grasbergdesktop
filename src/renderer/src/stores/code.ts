@@ -16,6 +16,7 @@ import type {
   Conversation,
   FileTreeNode,
   GitStatus,
+  GitHubPrInput,
 } from '@shared/types'
 import type { CodeChangeWithContext } from '@shared/ipc'
 import { toNormalized, unwrap } from '@/api/uld'
@@ -74,6 +75,11 @@ export interface CodeStoreState {
   gitStageAll(): Promise<void>
   gitCommit(message: string): Promise<boolean>
   gitCreateBranch(name: string): Promise<boolean>
+  gitFetch(): Promise<void>
+  gitSetOrigin(url: string): Promise<boolean>
+  gitPull(): Promise<void>
+  gitPush(confirmDefaultBranch: boolean): Promise<boolean>
+  gitCreatePullRequest(input: GitHubPrInput): Promise<string | null>
   /** Suggested commit message from the staged diff, or null on failure. */
   gitGenerateMessage(): Promise<string | null>
   reset(): void
@@ -372,6 +378,84 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       set({ gitBusy: false })
       toastError(e, 'Creating the branch')
       return false
+    }
+  },
+
+  async gitFetch() {
+    const { project } = get()
+    if (!project) return
+    set({ gitBusy: true })
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitFetch(project.id))
+      set({ gitStatus, gitBusy: false })
+      useUiStore.getState().toast('Fetched origin.', 'success')
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Fetching origin')
+    }
+  },
+
+  async gitSetOrigin(url) {
+    const { project } = get()
+    if (!project) return false
+    set({ gitBusy: true })
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitSetOrigin(project.id, url))
+      set({ gitStatus, gitBusy: false })
+      useUiStore.getState().toast('Configured the origin remote.', 'success')
+      return true
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Configuring origin')
+      return false
+    }
+  },
+
+  async gitPull() {
+    const { project } = get()
+    if (!project) return
+    set({ gitBusy: true })
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitPull(project.id))
+      set({ gitStatus, gitBusy: false })
+      useUiStore.getState().toast('Pulled the upstream branch.', 'success')
+      void get().loadTree()
+      void get().loadChanges()
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Pulling the upstream branch')
+    }
+  },
+
+  async gitPush(confirmDefaultBranch) {
+    const { project } = get()
+    if (!project) return false
+    set({ gitBusy: true })
+    try {
+      const gitStatus = await unwrap(window.uld.code.gitPush(project.id, confirmDefaultBranch))
+      set({ gitStatus, gitBusy: false })
+      useUiStore.getState().toast(`Pushed '${gitStatus.branch ?? 'current branch'}'.`, 'success')
+      return true
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Pushing the branch')
+      return false
+    }
+  },
+
+  async gitCreatePullRequest(input) {
+    const { project } = get()
+    if (!project) return null
+    set({ gitBusy: true })
+    try {
+      const result = await unwrap(window.uld.code.githubPrCreate(project.id, input))
+      set({ gitBusy: false })
+      useUiStore.getState().toast('GitHub pull request created.', 'success')
+      return result.url
+    } catch (e) {
+      set({ gitBusy: false })
+      toastError(e, 'Creating the GitHub pull request')
+      return null
     }
   },
 

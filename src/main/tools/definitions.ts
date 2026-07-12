@@ -322,19 +322,30 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     id: 'git_write',
     name: 'git_write',
     description:
-      'Perform ONE local git write operation in the granted project: "stage" (git add the ' +
+      'Perform ONE git operation in the granted project: "stage" (git add the ' +
       'given relative paths), "commit" (commit what is staged with the given message), or ' +
-      '"create_branch" (create and switch to a new branch). EVERY call requires the user\'s ' +
+      '"create_branch" (create and switch to a new branch), "set_origin" (connect an HTTPS/SSH remote), ' +
+      'plus remote "fetch", fast-forward-only ' +
+      '"pull", non-force "push", and "create_pull_request" through GitHub CLI. EVERY call requires the user\'s ' +
       'explicit approval — there are no standing grants. Committing on the repository\'s ' +
-      'default branch additionally requires confirm_default_branch: true, and you should ' +
-      'prefer creating a branch instead. This tool can NEVER push, pull, merge, rebase or ' +
-      'switch to an existing branch.',
+      'default branch and pushing it additionally require confirm_default_branch: true. Pull ' +
+      'requires a clean worktree and can never create a merge commit. Push can never force. ' +
+      'Merge, rebase and switching to an existing branch remain unavailable.',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['stage', 'commit', 'create_branch'],
+          enum: [
+            'stage',
+            'commit',
+            'create_branch',
+            'set_origin',
+            'fetch',
+            'pull',
+            'push',
+            'create_pull_request',
+          ],
           description: 'The single git operation to perform.',
         },
         paths: {
@@ -344,10 +355,15 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
         message: { type: 'string', description: 'For "commit": the commit message.' },
         branch: { type: 'string', description: 'For "create_branch": the new branch name.' },
+        url: { type: 'string', description: 'For "set_origin": HTTPS or SSH repository URL.' },
+        title: { type: 'string', description: 'For "create_pull_request": PR title.' },
+        body: { type: 'string', description: 'For "create_pull_request": optional PR body.' },
+        base: { type: 'string', description: 'For "create_pull_request": optional base branch.' },
+        draft: { type: 'boolean', description: 'For "create_pull_request": create as draft.' },
         confirm_default_branch: {
           type: 'boolean',
           description:
-            'Set true ONLY when the user explicitly asked to commit on the default branch.',
+            'Set true ONLY when the user explicitly asked to commit on or push the default branch.',
         },
       },
       required: ['action'],

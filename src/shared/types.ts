@@ -851,9 +851,24 @@ export interface GitStatus {
   /** Commits ahead/behind the upstream (0 when no upstream). */
   ahead: number
   behind: number
+  /** Whether a remote named origin exists (the URL itself may contain secrets and never crosses IPC). */
+  hasOrigin: boolean
+  /** Tracking branch such as origin/feature; null until the branch has been pushed. */
+  upstream: string | null
   staged: GitFileChange[]
   unstaged: GitFileChange[]
   untracked: string[]
+}
+
+export interface GitHubPrInput {
+  title: string
+  body?: string
+  base?: string
+  draft?: boolean
+}
+
+export interface GitHubPrResult {
+  url: string
 }
 
 export interface CodeChange {
@@ -1322,6 +1337,11 @@ export interface ScheduledTaskInput {
   approvedToolIds?: string[]
   projectId?: string | null
 }
+
+/** Incremental renderer update for the standalone scheduled-task list. */
+export type ScheduledTasksChangedEvent =
+  | { type: 'upsert'; task: ScheduledTask }
+  | { type: 'delete'; id: string }
 
 // ---------------------------------------------------------------------------
 // IM bridges

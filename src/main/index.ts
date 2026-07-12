@@ -35,6 +35,7 @@ import { BrowserSession } from './browser/session'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
 import { ProjectHookService } from './services/project-hooks'
+import { ScheduledRunQueue } from './scheduling/run-queue'
 
 const PRODUCTION_CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
@@ -365,6 +366,11 @@ function bootstrap(): void {
       stage: (root, paths) => gitService.stage(root, paths),
       commit: (root, message) => gitService.commit(root, message),
       createBranch: (root, name) => gitService.createBranch(root, name),
+      setOrigin: (root, url) => gitService.setOrigin(root, url),
+      fetch: (root) => gitService.fetch(root),
+      pull: (root) => gitService.pull(root),
+      push: (root, confirmDefaultBranch) => gitService.push(root, confirmDefaultBranch),
+      createPullRequest: (root, input) => gitService.createPullRequest(root, input),
     },
     delegateBackground: {
       start: (task, ctx, agentName) =>
@@ -440,7 +446,12 @@ function bootstrap(): void {
         broadcast(CHANNELS.workflowRunFinished, { run: toRunSnippet(run, workflow.name) }),
     }
   )
-  const scheduler = new WorkflowScheduler({ db: database, runner: workflowRunner })
+  const scheduledRunQueue = new ScheduledRunQueue(2)
+  const scheduler = new WorkflowScheduler({
+    db: database,
+    runner: workflowRunner,
+    queue: scheduledRunQueue,
+  })
   workflowScheduler = scheduler
   workflowRunnerRef = workflowRunner
 
@@ -452,7 +463,8 @@ function bootstrap(): void {
         approvedToolIds: task.approvedToolIds,
         projectId: task.projectId,
       }),
-    onChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
+    onChanged: (event) => broadcast(CHANNELS.scheduledTasksChanged, event),
+    queue: scheduledRunQueue,
   })
   scheduledTaskScheduler = clockScheduler
 
@@ -491,6 +503,8 @@ function bootstrap(): void {
     imBridgeManager: imBridge,
     oauthManager: oauth,
     workflowRunner,
+    wakeWorkflowScheduler: () => scheduler.wake(),
+    wakeScheduledTaskScheduler: () => clockScheduler.wake(),
     workspaceRoots,
     dreamingService: dreaming,
     knowledgeService,

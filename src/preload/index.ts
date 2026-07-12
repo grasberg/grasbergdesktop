@@ -119,6 +119,14 @@ const api: UldApi = {
       ipcRenderer.invoke(CHANNELS.codeGitCommit, { projectId, message }),
     gitCreateBranch: (projectId, name) =>
       ipcRenderer.invoke(CHANNELS.codeGitCreateBranch, { projectId, name }),
+    gitFetch: (projectId) => ipcRenderer.invoke(CHANNELS.codeGitFetch, projectId),
+    gitSetOrigin: (projectId, url) =>
+      ipcRenderer.invoke(CHANNELS.codeGitSetOrigin, { projectId, url }),
+    gitPull: (projectId) => ipcRenderer.invoke(CHANNELS.codeGitPull, projectId),
+    gitPush: (projectId, confirmDefaultBranch) =>
+      ipcRenderer.invoke(CHANNELS.codeGitPush, { projectId, confirmDefaultBranch }),
+    githubPrCreate: (projectId, input) =>
+      ipcRenderer.invoke(CHANNELS.codeGithubPrCreate, { projectId, input }),
     gitGenerateCommitMessage: (projectId) =>
       ipcRenderer.invoke(CHANNELS.codeGitGenerateCommitMessage, projectId),
     worktreeCreate: (projectId, name) =>
@@ -205,7 +213,7 @@ const api: UldApi = {
     setEnabled: (id, enabled) =>
       ipcRenderer.invoke(CHANNELS.scheduledTasksSetEnabled, id, enabled),
     delete: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksDelete, id),
-    onChanged: (cb) => subscribe<unknown>(CHANNELS.scheduledTasksChanged)(() => cb()),
+      onChanged: subscribe(CHANNELS.scheduledTasksChanged),
   },
   agents: {
     list: () => ipcRenderer.invoke(CHANNELS.agentsList),

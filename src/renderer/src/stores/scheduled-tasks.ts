@@ -3,6 +3,16 @@ import { unwrap } from '@/api/uld'
 import { toastError } from './ui'
 import type { ScheduledTasksStoreState } from './contracts'
 
+function sortTasks(tasks: ScheduledTasksStoreState['tasks']): ScheduledTasksStoreState['tasks'] {
+  return [...tasks].sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+    if (a.nextRunAt === null && b.nextRunAt !== null) return 1
+    if (a.nextRunAt !== null && b.nextRunAt === null) return -1
+    if (a.nextRunAt !== b.nextRunAt) return (a.nextRunAt ?? 0) - (b.nextRunAt ?? 0)
+    return b.updatedAt - a.updatedAt
+  })
+}
+
 export const useScheduledTasksStore = create<ScheduledTasksStoreState>()((set, get) => ({
   tasks: [],
   loaded: false,
@@ -19,7 +29,9 @@ export const useScheduledTasksStore = create<ScheduledTasksStoreState>()((set, g
   async create(input) {
     try {
       const task = await unwrap(window.uld.scheduledTasks.create(input))
-      await get().load()
+      set((state) => ({
+        tasks: sortTasks([task, ...state.tasks.filter((t) => t.id !== task.id)]),
+      }))
       return task
     } catch (error) {
       toastError('Could not create scheduled task', error)
@@ -29,19 +41,31 @@ export const useScheduledTasksStore = create<ScheduledTasksStoreState>()((set, g
 
   async setEnabled(id, enabled) {
     try {
-      await unwrap(window.uld.scheduledTasks.setEnabled(id, enabled))
+      const task = await unwrap(window.uld.scheduledTasks.setEnabled(id, enabled))
+      set((state) => ({
+        tasks: sortTasks([task, ...state.tasks.filter((t) => t.id !== id)]),
+      }))
     } catch (error) {
       toastError(enabled ? 'Could not resume scheduled task' : 'Could not pause scheduled task', error)
     }
-    await get().load()
   },
 
   async remove(id) {
     try {
       await unwrap(window.uld.scheduledTasks.delete(id))
+      set((state) => ({ tasks: state.tasks.filter((task) => task.id !== id) }))
     } catch (error) {
       toastError('Could not remove scheduled task', error)
     }
-    await get().load()
+  },
+
+  handleChanged(event) {
+    if (event.type === 'delete') {
+      set((state) => ({ tasks: state.tasks.filter((task) => task.id !== event.id) }))
+      return
+    }
+    set((state) => ({
+      tasks: sortTasks([event.task, ...state.tasks.filter((task) => task.id !== event.task.id)]),
+    }))
   },
 }))

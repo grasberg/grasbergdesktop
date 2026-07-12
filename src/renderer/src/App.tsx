@@ -1,12 +1,5 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type { ConversationMode } from '@shared/types'
-import ChatView from '@/components/chat/ChatView'
-import WorkView from '@/components/work/WorkView'
-import WorkflowsView from '@/components/workflows/WorkflowsView'
-import SettingsPanel from '@/components/settings/SettingsPanel'
-import Onboarding from '@/components/onboarding/Onboarding'
-import CommandPalette from '@/components/CommandPalette'
-import ShortcutsHelp from '@/components/ShortcutsHelp'
 import HomeView from '@/components/home/HomeView'
 import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
@@ -23,6 +16,18 @@ import { useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
 import { useWorkflowsStore } from '@/stores/workflows'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
+
+const ChatView = lazy(() => import('@/components/chat/ChatView'))
+const WorkView = lazy(() => import('@/components/work/WorkView'))
+const WorkflowsView = lazy(() => import('@/components/workflows/WorkflowsView'))
+const SettingsPanel = lazy(() => import('@/components/settings/SettingsPanel'))
+const Onboarding = lazy(() => import('@/components/onboarding/Onboarding'))
+const CommandPalette = lazy(() => import('@/components/CommandPalette'))
+const ShortcutsHelp = lazy(() => import('@/components/ShortcutsHelp'))
+
+function ViewFallback(): React.JSX.Element {
+  return <div className="app-view-loading" role="status" aria-label="Loading view" />
+}
 
 /** The active conversation's mode picks which main view renders. */
 function ModeView({ mode }: { mode: ConversationMode }): React.JSX.Element {
@@ -44,6 +49,16 @@ export default function App(): React.JSX.Element {
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
   const view = useUiStore((s) => s.view)
+  const settingsOpen = useUiStore((s) => s.settingsOpen)
+  const paletteOpen = useUiStore((s) => s.paletteOpen)
+  const shortcutsOpen = useUiStore((s) => s.shortcutsOpen)
+  // Load overlays only on first use, then keep them mounted so their local
+  // selection/query state survives close + reopen exactly as before.
+  const [loadedOverlays, setLoadedOverlays] = useState({
+    settings: false,
+    palette: false,
+    shortcuts: false,
+  })
 
   useKeyboardShortcuts()
 
@@ -53,6 +68,14 @@ export default function App(): React.JSX.Element {
   // capture phase — the same phase Sidebar uses — before the global handler
   // (a window bubble listener) can run them. Escape stays free for local use.
   const onboardingActive = settingsLoaded && !!settings && !settings.onboardingCompleted
+  useEffect(() => {
+    if (!settingsOpen && !paletteOpen && !shortcutsOpen) return
+    setLoadedOverlays((current) => ({
+      settings: current.settings || settingsOpen,
+      palette: current.palette || paletteOpen,
+      shortcuts: current.shortcuts || shortcutsOpen,
+    }))
+  }, [settingsOpen, paletteOpen, shortcutsOpen])
   useEffect(() => {
     if (!onboardingActive) return
     const block = (e: KeyboardEvent): void => {
@@ -105,8 +128,8 @@ export default function App(): React.JSX.Element {
     const unsubscribeRuns = window.uld.workflows.onRunFinished((evt) => {
       useWorkflowsStore.getState().handleRunFinished(evt)
     })
-    const unsubscribeScheduledTasks = window.uld.scheduledTasks.onChanged(() => {
-      void useScheduledTasksStore.getState().load()
+    const unsubscribeScheduledTasks = window.uld.scheduledTasks.onChanged((event) => {
+      useScheduledTasksStore.getState().handleChanged(event)
     })
     return () => {
       unsubscribeStream()
@@ -147,7 +170,9 @@ export default function App(): React.JSX.Element {
   if (settingsLoaded && settings && !settings.onboardingCompleted) {
     return (
       <>
-        <Onboarding />
+        <Suspense fallback={<ViewFallback />}>
+          <Onboarding />
+        </Suspense>
         <Toasts />
       </>
     )
@@ -169,19 +194,23 @@ export default function App(): React.JSX.Element {
                 : 'Home overview'
           }
         >
-          {view === 'workflows' ? (
-            <WorkflowsView />
-          ) : view === 'conversation' && activeId ? (
-            <ModeView mode={mode} />
-          ) : (
-            // 'home', plus the fallback while 'conversation' has no selection.
-            <HomeView />
-          )}
+          <Suspense fallback={<ViewFallback />}>
+            {view === 'workflows' ? (
+              <WorkflowsView />
+            ) : view === 'conversation' && activeId ? (
+              <ModeView mode={mode} />
+            ) : (
+              // 'home', plus the fallback while 'conversation' has no selection.
+              <HomeView />
+            )}
+          </Suspense>
         </main>
       </div>
-      <SettingsPanel />
-      <CommandPalette />
-      <ShortcutsHelp />
+      <Suspense fallback={null}>
+        {loadedOverlays.settings ? <SettingsPanel /> : null}
+        {loadedOverlays.palette ? <CommandPalette /> : null}
+        {loadedOverlays.shortcuts ? <ShortcutsHelp /> : null}
+      </Suspense>
       <ToolApprovalDialog />
       <UserQuestionDialog />
       <ArtifactPanel />

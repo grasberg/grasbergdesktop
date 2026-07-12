@@ -60,6 +60,8 @@ function status(overrides: Partial<GitStatus> = {}): GitStatus {
     detached: false,
     ahead: 0,
     behind: 0,
+    hasOrigin: true,
+    upstream: 'origin/feature-x',
     staged: [
       { path: 'a.ts', status: 'M' },
       { path: 'b.ts', status: 'A' },
@@ -74,10 +76,25 @@ function makeSystem(currentStatus: GitStatus) {
   const stage = vi.fn(async () => 'Staged 2 files.')
   const commit = vi.fn(async () => ({ sha: 'abc1234', branch: currentStatus.branch }))
   const createBranch = vi.fn(async (_root: string, name: string) => `Created and switched to branch '${name}'.`)
+  const setOrigin = vi.fn(async () => currentStatus)
+  const fetch = vi.fn(async () => currentStatus)
+  const pull = vi.fn(async () => currentStatus)
+  const push = vi.fn(async () => currentStatus)
+  const createPullRequest = vi.fn(async () => ({ url: 'https://github.com/acme/repo/pull/1' }))
   const system = createToolSystem(db, null, {
-    gitWrite: { status: async () => currentStatus, stage, commit, createBranch },
+    gitWrite: {
+      status: async () => currentStatus,
+      stage,
+      commit,
+      createBranch,
+      setOrigin,
+      fetch,
+      pull,
+      push,
+      createPullRequest,
+    },
   })
-  return { ...system, stage, commit, createBranch }
+  return { ...system, stage, commit, createBranch, setOrigin, fetch, pull, push, createPullRequest }
 }
 
 const APPROVE = { approved: true, scope: 'once' as const }
@@ -181,7 +198,7 @@ describe('git_write — always-ask discipline', () => {
     const { executor } = makeSystem(status())
     const approval = vi.fn(async () => APPROVE)
     expect(
-      await executor.execute(call({ action: 'push' }), { conversation: conv(), approval })
+      await executor.execute(call({ action: 'merge' }), { conversation: conv(), approval })
     ).toContain("'action' must be one of")
     expect(
       await executor.execute(call({ action: 'stage', paths: [] }), {
@@ -192,6 +209,42 @@ describe('git_write — always-ask discipline', () => {
     expect(
       await executor.execute(call({ action: 'commit' }), { conversation: conv(), approval })
     ).toContain("'message' must be a non-empty string")
+  })
+
+  it('requires explicit default-branch confirmation before push', async () => {
+    const { executor, push } = makeSystem(status({ branch: 'main', upstream: 'origin/main' }))
+    const approval = vi.fn(async () => APPROVE)
+    const refused = await executor.execute(call({ action: 'push' }), {
+      conversation: conv(),
+      approval,
+    })
+    expect(refused).toMatch(/default branch/i)
+    expect(push).not.toHaveBeenCalled()
+
+    const result = await executor.execute(
+      call({ action: 'push', confirm_default_branch: true }),
+      { conversation: conv(), approval }
+    )
+    expect(result).toContain("Pushed 'main'")
+    expect(push).toHaveBeenCalledWith(expect.any(String), true)
+  })
+
+  it('creates a GitHub pull request through the approved git_write path', async () => {
+    const { executor, createPullRequest } = makeSystem(status())
+    const approval = vi.fn(async (req: Omit<ToolApprovalRequest, 'requestId'>) => {
+      expect(req.note).toContain('GitHub pull request')
+      return APPROVE
+    })
+    const result = await executor.execute(
+      call({ action: 'create_pull_request', title: 'Feature X', body: 'Ready', draft: true }),
+      { conversation: conv(), approval }
+    )
+    expect(result).toContain('https://github.com/acme/repo/pull/1')
+    expect(createPullRequest).toHaveBeenCalledWith(expect.any(String), {
+      title: 'Feature X',
+      body: 'Ready',
+      draft: true,
+    })
   })
 
   it('reports unavailable without a granted project or the dep', async () => {

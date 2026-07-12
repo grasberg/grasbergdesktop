@@ -19,6 +19,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   db.close()
   rmSync(dir, { recursive: true, force: true })
 })
@@ -79,6 +80,27 @@ describe('scheduled tasks repository', () => {
 })
 
 describe('standalone scheduled task scheduler', () => {
+  it('arms a one-shot timer for the exact next run instead of polling', async () => {
+    vi.useFakeTimers()
+    const now = new Date(2026, 6, 12, 10, 0).getTime()
+    vi.setSystemTime(now)
+    db.scheduledTasks.create({
+      title: 'Soon',
+      prompt: 'Run on time',
+      recurrence: 'once',
+      runAt: now + 1_000,
+    })
+    const run = vi.fn(async () => 'ok')
+    const scheduler = new ScheduledTaskScheduler({ db, run })
+    scheduler.start()
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(run).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(run).toHaveBeenCalledTimes(1)
+    scheduler.stop()
+  })
+
   it('runs a due one-time prompt and marks it completed', async () => {
     const task = db.scheduledTasks.create({
       title: 'One shot',
@@ -159,7 +181,7 @@ describe('standalone scheduled task scheduler', () => {
     expect(finished.nextRunAt).toBeNull()
   })
 
-  it('re-reads each task before running it, so one paused mid-tick is skipped', async () => {
+  it('re-reads queued tasks before running them, so one paused mid-tick is skipped', async () => {
     const runAt = Date.now() - 10
     const first = db.scheduledTasks.create({
       title: 'First',
@@ -167,24 +189,33 @@ describe('standalone scheduled task scheduler', () => {
       recurrence: 'daily',
       runAt,
     })
-    const second = db.scheduledTasks.create({
+    db.scheduledTasks.create({
       title: 'Second',
       prompt: 'Second',
       recurrence: 'daily',
       runAt,
     })
+    const queued = db.scheduledTasks.create({
+      title: 'Queued',
+      prompt: 'Queued',
+      recurrence: 'daily',
+      runAt,
+    })
     const run = vi.fn(async (task: ScheduledTask) => {
-      // The user pauses the still-queued task while this one is generating.
-      if (task.id === first.id) db.scheduledTasks.setEnabled(second.id, false)
+      // Two jobs may run concurrently; the third remains queued and must be
+      // re-read after either active task pauses it.
+      if (task.id === first.id || task.id !== queued.id) {
+        db.scheduledTasks.setEnabled(queued.id, false)
+      }
       return 'ok'
     })
     const scheduler = new ScheduledTaskScheduler({ db, run })
 
     await scheduler.tick()
 
-    expect(run).toHaveBeenCalledTimes(1)
-    expect(run.mock.calls[0][0].id).toBe(first.id)
-    expect(db.scheduledTasks.getById(second.id)?.lastStatus).toBe('idle')
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(run.mock.calls.map(([task]) => task.id)).not.toContain(queued.id)
+    expect(db.scheduledTasks.getById(queued.id)?.lastStatus).toBe('idle')
   })
 })
 

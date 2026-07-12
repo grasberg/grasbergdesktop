@@ -77,6 +77,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - **Telegram bridge** — bind a bot to a conversation and chat with your assistant from your phone (trust-on-first-use pairing, single authorized chat).
 - **Outbound webhook** — POST every completed reply to your own endpoint (opt-in).
 - **Agent control plane** — background delegates have persistent run history and can be stopped from Settings; Work tasks can be forked into isolated Git worktrees.
+- **Git & GitHub** — stage, commit and branch locally; connect origin, fetch, fast-forward pull, push without force, and create draft or ready pull requests through GitHub CLI.
 - **Checkpoints & forks** — every applied assistant change captures a persistent pre-edit checkpoint, and conversations can branch without losing their original history.
 - **Project hooks & agent packs** — allowlisted lifecycle quality gates plus portable JSON bundles of agents, skills, and hooks.
 - **IDE bridge** — open the current task or isolated worktree in VS Code, Cursor, or Zed from Work mode.
@@ -108,6 +109,9 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 
 Prerequisites: **Node.js 20+** and **npm**.
 
+Git features require `git` on PATH. Creating pull requests additionally requires an authenticated
+[GitHub CLI](https://cli.github.com/) installation (`gh auth login`).
+
 ```bash
 npm install
 npm run dev
@@ -119,6 +123,9 @@ npm run dev
 | `npm run build` | Typecheck both tsconfig projects, then build main/preload/renderer to `out/` |
 | `npm run typecheck` | `tsc --noEmit` against `tsconfig.node.json` and `tsconfig.web.json` |
 | `npm test` | Run the Vitest suite once (`npm run test:watch` for watch mode) |
+| `npm run test:unit` / `test:integration` | Run only the unit or integration suites |
+| `npm run verify:fast` | Typecheck and run unit tests for a quick local gate |
+| `npm run verify` | Full tests, production build, bundle budget and Electron smoke test |
 | `npm run package:win` / `package:mac` / `package:linux` | Build + package installers into `release/` |
 
 ## Building installers

@@ -1,23 +1,24 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
-import ProvidersTab from './ProvidersTab'
-import DefaultsTab from './DefaultsTab'
-import MoaTab from './MoaTab'
-import ToolsTab from './ToolsTab'
-import McpServersTab from './McpServersTab'
-import BridgesTab from './BridgesTab'
-import PromptsTab from './PromptsTab'
-import SkillsTab from './SkillsTab'
-import MemoryTab from './MemoryTab'
-import AppearanceTab from './AppearanceTab'
-import PrivacyTab from './PrivacyTab'
-import AboutTab from './AboutTab'
-import AgentsTab from './AgentsTab'
-import KnowledgeTab from './KnowledgeTab'
-import AgentPlatformTab from './AgentPlatformTab'
 import './settings.css'
+
+const ProvidersTab = lazy(() => import('./ProvidersTab'))
+const DefaultsTab = lazy(() => import('./DefaultsTab'))
+const MoaTab = lazy(() => import('./MoaTab'))
+const ToolsTab = lazy(() => import('./ToolsTab'))
+const McpServersTab = lazy(() => import('./McpServersTab'))
+const BridgesTab = lazy(() => import('./BridgesTab'))
+const PromptsTab = lazy(() => import('./PromptsTab'))
+const SkillsTab = lazy(() => import('./SkillsTab'))
+const MemoryTab = lazy(() => import('./MemoryTab'))
+const AppearanceTab = lazy(() => import('./AppearanceTab'))
+const PrivacyTab = lazy(() => import('./PrivacyTab'))
+const AboutTab = lazy(() => import('./AboutTab'))
+const AgentsTab = lazy(() => import('./AgentsTab'))
+const KnowledgeTab = lazy(() => import('./KnowledgeTab'))
+const AgentPlatformTab = lazy(() => import('./AgentPlatformTab'))
 
 const TABS = [
   { id: 'providers', label: 'Providers' },
@@ -120,21 +121,27 @@ export default function SettingsPanel() {
             role="tabpanel"
             aria-labelledby={`settings-tab-${tab}`}
           >
-            {tab === 'providers' ? <ProvidersTab /> : null}
-            {tab === 'defaults' ? <DefaultsTab /> : null}
-            {tab === 'moa' ? <MoaTab /> : null}
-            {tab === 'agents' ? <AgentsTab /> : null}
-            {tab === 'agent-platform' ? <AgentPlatformTab /> : null}
-            {tab === 'knowledge' ? <KnowledgeTab /> : null}
-            {tab === 'tools' ? <ToolsTab /> : null}
-            {tab === 'mcp' ? <McpServersTab /> : null}
-            {tab === 'bridges' ? <BridgesTab /> : null}
-            {tab === 'prompts' ? <PromptsTab /> : null}
-            {tab === 'skills' ? <SkillsTab /> : null}
-            {tab === 'memory' ? <MemoryTab /> : null}
-            {tab === 'appearance' ? <AppearanceTab /> : null}
-            {tab === 'privacy' ? <PrivacyTab /> : null}
-            {tab === 'about' ? <AboutTab /> : null}
+            <Suspense
+              fallback={
+                <div className="settings-tab-loading" role="status" aria-label="Loading settings" />
+              }
+            >
+              {tab === 'providers' ? <ProvidersTab /> : null}
+              {tab === 'defaults' ? <DefaultsTab /> : null}
+              {tab === 'moa' ? <MoaTab /> : null}
+              {tab === 'agents' ? <AgentsTab /> : null}
+              {tab === 'agent-platform' ? <AgentPlatformTab /> : null}
+              {tab === 'knowledge' ? <KnowledgeTab /> : null}
+              {tab === 'tools' ? <ToolsTab /> : null}
+              {tab === 'mcp' ? <McpServersTab /> : null}
+              {tab === 'bridges' ? <BridgesTab /> : null}
+              {tab === 'prompts' ? <PromptsTab /> : null}
+              {tab === 'skills' ? <SkillsTab /> : null}
+              {tab === 'memory' ? <MemoryTab /> : null}
+              {tab === 'appearance' ? <AppearanceTab /> : null}
+              {tab === 'privacy' ? <PrivacyTab /> : null}
+              {tab === 'about' ? <AboutTab /> : null}
+            </Suspense>
           </div>
         </div>
       </div>

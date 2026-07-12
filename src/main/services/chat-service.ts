@@ -77,6 +77,7 @@ import { runCompletionHooks } from './completion-hooks'
 import { findPricing } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
 import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
+import { StreamDeltaBuffer } from './stream-delta-buffer'
 
 const DEFAULT_TITLE = 'New chat'
 const TITLE_MAX_CHARS = 60
@@ -2469,13 +2470,22 @@ export class ChatService {
     }
   ): Promise<void> {
     const conversationId = conversation.id
-    const emit = (event: StreamEvent): void => {
+    const emitNow = (event: StreamEvent): void => {
       const envelope: StreamEventEnvelope = { streamId, conversationId, event }
       try {
         this.broadcast(CHANNELS.streamEvent, envelope)
       } catch {
         // A window can be torn down mid-broadcast; persistence still happens.
       }
+    }
+    const deltaBuffer = new StreamDeltaBuffer(emitNow)
+    const emit = (event: StreamEvent): void => {
+      if (event.type === 'text-delta' || event.type === 'reasoning-delta') {
+        deltaBuffer.push(event)
+        return
+      }
+      deltaBuffer.flush()
+      emitNow(event)
     }
 
     let text = ''
@@ -2734,6 +2744,7 @@ export class ChatService {
         if (finalMessage) emit({ type: 'error', error: normalized, message: finalMessage })
       }
     } finally {
+      deltaBuffer.flush()
       this.releaseStream(streamId, conversationId)
     }
   }

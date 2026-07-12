@@ -3,7 +3,7 @@
  * MUTATING git commands.
  *
  * SAFETY INVARIANTS (non-negotiable, mirrored in tests):
- * - Every spawn is execFile('git', argv) — no shell, ever. Model- or
+ * - Every spawn is execFile('git'|'gh', argv) — no shell, ever. Model- or
  *   user-supplied text (paths, messages, branch names) always travels as a
  *   single argv element behind a '--' separator where git accepts one, so it
  *   can never be parsed as a flag or a subcommand.
@@ -11,16 +11,25 @@
  * - Reached from exactly two consenting paths: the code:git:* IPC handlers
  *   (an explicit user click IS the consent) and the git_write tool (whose
  *   every call the user approves — it carries noStandingApproval).
- * - No remote operations in Stage 1: this module cannot push or pull.
+ * - Remote writes never force-push; pulls are fast-forward-only and require a
+ *   clean worktree. Default-branch pushes require an explicit confirmation.
  */
 
 import { execFile } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
-import type { GitFileChange, GitStatus, WorktreeInfo } from '@shared/types'
+import type {
+  GitFileChange,
+  GitHubPrInput,
+  GitHubPrResult,
+  GitStatus,
+  WorktreeInfo,
+} from '@shared/types'
 import { ProviderError } from '../providers/errors'
+import { redactSecrets } from '../providers/redact'
 
 const GIT_TIMEOUT_MS = 20_000
+const GITHUB_TIMEOUT_MS = 30_000
 const GIT_MAX_OUTPUT = 512 * 1024
 /** Diff fed to the commit-message model, capped. */
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 48_000
@@ -38,33 +47,62 @@ interface GitRunResult {
   stderr: string
 }
 
-/** Runs `git <argv>` in `root` (no shell, hidden window, capped output). */
-function runGit(argv: string[], root: string): Promise<GitRunResult> {
-  const finalArgv = process.platform === 'win32' ? ['-c', 'core.longpaths=true', ...argv] : argv
+function safeCommandError(text: string): string {
+  return redactSecrets(text).replace(/([a-z][\w+.-]*:\/\/)[^@\s/]+@/gi, '$1[redacted]@')
+}
+
+function runCommand(
+  command: 'git' | 'gh',
+  argv: string[],
+  root: string,
+  timeout: number
+): Promise<GitRunResult> {
   return new Promise((resolvePromise) => {
     execFile(
-      'git',
-      finalArgv,
+      command,
+      argv,
       {
         cwd: root,
-        timeout: GIT_TIMEOUT_MS,
+        timeout,
         maxBuffer: GIT_MAX_OUTPUT,
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: '0',
+          ...(command === 'gh' ? { GH_PROMPT_DISABLED: '1' } : {}),
+        },
       },
       (error, stdout, stderr) => {
         if (error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
-          resolvePromise({ ok: false, stdout: '', stderr: 'git is not installed or not on PATH.' })
+          resolvePromise({
+            ok: false,
+            stdout: '',
+            stderr: `${command} is not installed or not on PATH.`,
+          })
           return
         }
         if (error && error.killed) {
-          resolvePromise({ ok: false, stdout: '', stderr: 'git timed out.' })
+          resolvePromise({ ok: false, stdout: '', stderr: `${command} timed out.` })
           return
         }
-        resolvePromise({ ok: !error, stdout: stdout ?? '', stderr: (stderr ?? '').trim() })
+        resolvePromise({
+          ok: !error,
+          stdout: stdout ?? '',
+          stderr: safeCommandError((stderr ?? '').trim()),
+        })
       }
     )
   })
+}
+
+/** Runs `git <argv>` in `root` (no shell, hidden window, capped output). */
+function runGit(argv: string[], root: string): Promise<GitRunResult> {
+  const finalArgv = process.platform === 'win32' ? ['-c', 'core.longpaths=true', ...argv] : argv
+  return runCommand('git', finalArgv, root, GIT_TIMEOUT_MS)
+}
+
+function runGithub(argv: string[], root: string): Promise<GitRunResult> {
+  return runCommand('gh', argv, root, GITHUB_TIMEOUT_MS)
 }
 
 /**
@@ -81,6 +119,27 @@ function validateRelPath(relPath: string): string {
   }
   if (rel.split(/[\\/]+/).includes('..')) throw invalid('File paths must not contain "..".')
   return rel
+}
+
+function validateRemoteUrl(value: string): string {
+  const remote = value.trim()
+  if (remote.length === 0 || remote.length > 2_000 || /[\r\n\0]/.test(remote)) {
+    throw invalid('Remote URL is invalid.')
+  }
+  if (/^[\w.-]+@[\w.-]+:[^\s]+$/.test(remote)) return remote
+  let parsed: URL
+  try {
+    parsed = new URL(remote)
+  } catch {
+    throw invalid('Remote must be an HTTPS or SSH git URL.')
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'ssh:') {
+    throw invalid('Remote must use HTTPS or SSH.')
+  }
+  if (!parsed.hostname || parsed.password || (parsed.protocol === 'https:' && parsed.username)) {
+    throw invalid('Remote URL must not contain embedded credentials.')
+  }
+  return remote
 }
 
 /** Parses `git status --porcelain=v1 -z` output into staged/unstaged/untracked. */
@@ -144,6 +203,8 @@ export interface GitServiceOptions {
    */
   generateText?: (prompt: string) => Promise<string>
   beforeCommit?: (root: string) => Promise<void>
+  /** Test seam for GitHub CLI; production uses execFile('gh', argv). */
+  githubCommand?: (argv: string[], root: string) => Promise<GitRunResult>
 }
 
 export class GitService {
@@ -203,6 +264,8 @@ export class GitService {
         detached: false,
         ahead: 0,
         behind: 0,
+        hasOrigin: false,
+        upstream: null,
         staged: [],
         unstaged: [],
         untracked: [],
@@ -215,6 +278,14 @@ export class GitService {
     const branch = branchRaw && !detached ? branchRaw : null
 
     const defaultBranch = await this.defaultBranch(root)
+
+    const origin = await runGit(['remote', 'get-url', 'origin'], root)
+    const hasOrigin = origin.ok
+    const upstreamRes = await runGit(
+      ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      root
+    )
+    const upstream = upstreamRes.ok ? upstreamRes.stdout.trim() || null : null
 
     let ahead = 0
     let behind = 0
@@ -235,7 +306,101 @@ export class GitService {
       ? parsePorcelainStatus(statusRes.stdout)
       : { staged: [], unstaged: [], untracked: [] }
 
-    return { isRepo: true, branch, defaultBranch, detached, ahead, behind, ...files }
+    return {
+      isRepo: true,
+      branch,
+      defaultBranch,
+      detached,
+      ahead,
+      behind,
+      hasOrigin,
+      upstream,
+      ...files,
+    }
+  }
+
+  /** Updates origin's remote refs without modifying the worktree. */
+  async fetch(root: string): Promise<GitStatus> {
+    const status = await this.status(root)
+    if (!status.isRepo) throw invalid('The selected folder is not a git repository.')
+    if (!status.hasOrigin) throw invalid("This repository has no 'origin' remote.")
+    const result = await runGit(['fetch', '--prune', 'origin'], root)
+    if (!result.ok) throw invalid(`git fetch failed: ${result.stderr || 'unknown error'}`)
+    return this.status(root)
+  }
+
+  /** Adds origin, or replaces its URL, without contacting the remote. */
+  async setOrigin(root: string, url: string): Promise<GitStatus> {
+    const remote = validateRemoteUrl(url)
+    const status = await this.status(root)
+    if (!status.isRepo) throw invalid('The selected folder is not a git repository.')
+    const argv = status.hasOrigin
+      ? ['remote', 'set-url', 'origin', remote]
+      : ['remote', 'add', 'origin', remote]
+    const result = await runGit(argv, root)
+    if (!result.ok) throw invalid(`Setting origin failed: ${result.stderr || 'unknown error'}`)
+    return this.status(root)
+  }
+
+  /** Fast-forward-only pull; dirty worktrees are refused before contacting git. */
+  async pull(root: string): Promise<GitStatus> {
+    const status = await this.status(root)
+    if (!status.isRepo) throw invalid('The selected folder is not a git repository.')
+    if (!status.upstream) throw invalid('The current branch has no upstream. Push it first.')
+    if (status.staged.length || status.unstaged.length || status.untracked.length) {
+      throw invalid('Pull requires a clean working tree. Commit, stash or discard local changes first.')
+    }
+    const result = await runGit(['pull', '--ff-only'], root)
+    if (!result.ok) throw invalid(`git pull --ff-only failed: ${result.stderr || 'unknown error'}`)
+    return this.status(root)
+  }
+
+  /** Pushes the current branch, setting origin as upstream on its first push. */
+  async push(root: string, confirmDefaultBranch = false): Promise<GitStatus> {
+    const status = await this.status(root)
+    if (!status.isRepo) throw invalid('The selected folder is not a git repository.')
+    if (!status.hasOrigin) throw invalid("This repository has no 'origin' remote.")
+    if (!status.branch || status.detached) throw invalid('Cannot push a detached or unborn HEAD.')
+    if (status.branch === status.defaultBranch && !confirmDefaultBranch) {
+      throw invalid(`Pushing the default branch '${status.branch}' requires explicit confirmation.`)
+    }
+    const argv = status.upstream
+      ? ['push']
+      : ['push', '--set-upstream', 'origin', status.branch]
+    const result = await runGit(argv, root)
+    if (!result.ok) throw invalid(`git push failed: ${result.stderr || 'unknown error'}`)
+    return this.status(root)
+  }
+
+  /** Creates a GitHub pull request for the already-pushed current branch. */
+  async createPullRequest(root: string, input: GitHubPrInput): Promise<GitHubPrResult> {
+    const status = await this.status(root)
+    if (!status.isRepo || !status.hasOrigin) {
+      throw invalid("A git repository with an 'origin' remote is required.")
+    }
+    if (!status.branch || status.detached) throw invalid('A named branch is required for a pull request.')
+    if (!status.upstream || status.ahead > 0) {
+      throw invalid('Push the current branch before creating the pull request.')
+    }
+    const title = input.title.trim()
+    if (!title) throw invalid('Pull-request title must not be empty.')
+    if (title.length > 200) throw invalid('Pull-request title is too long (max 200 characters).')
+    if ((input.body?.length ?? 0) > 20_000) {
+      throw invalid('Pull-request body is too long (max 20000 characters).')
+    }
+    if (input.base && !BRANCH_NAME_RE.test(input.base)) {
+      throw invalid('The pull-request base branch name is invalid.')
+    }
+    const argv = ['pr', 'create', '--title', title, '--body', input.body?.trim() ?? '']
+    if (input.base) argv.push('--base', input.base)
+    if (input.draft) argv.push('--draft')
+    const result = await (this.options.githubCommand ?? runGithub)(argv, root)
+    if (!result.ok) {
+      throw invalid(`GitHub pull request failed: ${result.stderr || 'unknown error'}`)
+    }
+    const url = result.stdout.trim().split(/\r?\n/).findLast((line) => /^https:\/\//i.test(line))
+    if (!url) throw invalid('GitHub CLI completed without returning a pull-request URL.')
+    return { url }
   }
 
   /** Stages the given relative paths (`git add -- <paths>`). */

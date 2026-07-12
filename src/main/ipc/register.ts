@@ -26,6 +26,7 @@ import type {
   Attachment,
   ConversationMode,
   ScheduledTaskInput,
+  ScheduledTasksChangedEvent,
   ToolPermissionDecision,
   WorkflowGraph,
   WorkflowInput,
@@ -110,6 +111,9 @@ export interface RegisterIpcDeps {
   oauthManager: OpenAiOAuthManager
   /** Runs saved workflows and records their run history. */
   workflowRunner: WorkflowRunner
+  /** Re-arm one-shot schedulers after persisted schedule mutations. */
+  wakeWorkflowScheduler?: () => void
+  wakeScheduledTaskScheduler?: () => void
   /** Per-task workspace folders (auto-created working dirs for Work tasks). */
   workspaceRoots: WorkspaceRootService
   /** Memory consolidation ("dreaming") — the manual Consolidate-now action. */
@@ -1051,6 +1055,46 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return gitService.status(root)
   })
 
+  register(CHANNELS.codeGitFetch, (projectId) =>
+    gitService.fetch(projectRoot(requireString(projectId, 'Project id')))
+  )
+
+  register(CHANNELS.codeGitSetOrigin, (req) => {
+    const parsed = parseInput(
+      z.object({ projectId: z.string().min(1), url: z.string().trim().min(1).max(2_000) }),
+      req
+    )
+    return gitService.setOrigin(projectRoot(parsed.projectId), parsed.url)
+  })
+
+  register(CHANNELS.codeGitPull, (projectId) =>
+    gitService.pull(projectRoot(requireString(projectId, 'Project id')))
+  )
+
+  register(CHANNELS.codeGitPush, (req) => {
+    const parsed = parseInput(
+      z.object({ projectId: z.string().min(1), confirmDefaultBranch: z.boolean() }),
+      req
+    )
+    return gitService.push(projectRoot(parsed.projectId), parsed.confirmDefaultBranch)
+  })
+
+  register(CHANNELS.codeGithubPrCreate, (req) => {
+    const parsed = parseInput(
+      z.object({
+        projectId: z.string().min(1),
+        input: z.object({
+          title: z.string().trim().min(1).max(200),
+          body: z.string().max(20_000).optional(),
+          base: z.string().trim().min(1).max(200).optional(),
+          draft: z.boolean().optional(),
+        }),
+      }),
+      req
+    )
+    return gitService.createPullRequest(projectRoot(parsed.projectId), parsed.input)
+  })
+
   register(CHANNELS.codeGitGenerateCommitMessage, (projectId) =>
     gitService.generateCommitMessage(projectRoot(projectId))
   )
@@ -1372,12 +1416,22 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.workflowsList, () => db.workflows.list())
   register(CHANNELS.workflowsGet, (id) => db.workflows.getById(requireString(id, 'Workflow id')))
-  register(CHANNELS.workflowsCreate, (input) => db.workflows.create(asWorkflowInput(input)))
-  register(CHANNELS.workflowsUpdate, (id, input) =>
-    found(db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input)), 'Workflow')
-  )
+  register(CHANNELS.workflowsCreate, (input) => {
+    const workflow = db.workflows.create(asWorkflowInput(input))
+    deps.wakeWorkflowScheduler?.()
+    return workflow
+  })
+  register(CHANNELS.workflowsUpdate, (id, input) => {
+    const workflow = found(
+      db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input)),
+      'Workflow'
+    )
+    deps.wakeWorkflowScheduler?.()
+    return workflow
+  })
   register(CHANNELS.workflowsDelete, (id) => {
     db.workflows.remove(requireString(id, 'Workflow id'))
+    deps.wakeWorkflowScheduler?.()
     return undefined
   })
   register(CHANNELS.workflowsRun, (graph) =>
@@ -1445,10 +1499,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     }
   }
 
-  const signalScheduledTasksChanged = (): void => {
+  const signalScheduledTasksChanged = (event: ScheduledTasksChangedEvent): void => {
     for (const win of deps.getWindows()) {
       if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-        win.webContents.send(CHANNELS.scheduledTasksChanged, {})
+        win.webContents.send(CHANNELS.scheduledTasksChanged, event)
       }
     }
   }
@@ -1461,7 +1515,8 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     }
     validateScheduledTaskGrants(parsed)
     const task = db.scheduledTasks.create(parsed)
-    signalScheduledTasksChanged()
+    signalScheduledTasksChanged({ type: 'upsert', task })
+    deps.wakeScheduledTaskScheduler?.()
     return task
   })
   register(CHANNELS.scheduledTasksSetEnabled, (id, enabled) => {
@@ -1472,12 +1527,15 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       ),
       'Scheduled task'
     )
-    signalScheduledTasksChanged()
+    signalScheduledTasksChanged({ type: 'upsert', task })
+    deps.wakeScheduledTaskScheduler?.()
     return task
   })
   register(CHANNELS.scheduledTasksDelete, (id) => {
-    db.scheduledTasks.remove(requireString(id, 'Scheduled task id'))
-    signalScheduledTasksChanged()
+    const taskId = requireString(id, 'Scheduled task id')
+    db.scheduledTasks.remove(taskId)
+    signalScheduledTasksChanged({ type: 'delete', id: taskId })
+    deps.wakeScheduledTaskScheduler?.()
     return undefined
   })
 
