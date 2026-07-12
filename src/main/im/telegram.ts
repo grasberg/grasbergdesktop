@@ -14,9 +14,28 @@ export interface TelegramBridgeDeps {
 
 const POLL_TIMEOUT_SEC = 25
 const MAX_REPLY_CHARS = 4000
+const BACKOFF_MS = 3000
+/** Consecutive rejected-token polls before the bridge gives up entirely. */
+const MAX_AUTH_FAILURES = 5
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Telegram reports API failures (revoked token, 409 conflict) as a JSON body
+ * with ok:false, which returns immediately — so they must be raised as errors,
+ * or the poll loop re-issues getUpdates with no delay at all.
+ */
+class TelegramApiError extends Error {
+  constructor(readonly errorCode: number) {
+    super(`Telegram API error ${errorCode}`)
+  }
+
+  /** A rejected/unknown bot token: retrying can never succeed. */
+  get unauthorized(): boolean {
+    return this.errorCode === 401 || this.errorCode === 403 || this.errorCode === 404
+  }
 }
 
 export class TelegramBridge {
@@ -42,12 +61,24 @@ export class TelegramBridge {
   }
 
   private async loop(): Promise<void> {
+    let authFailures = 0
     while (this.running) {
       try {
         await this.pollOnce()
-      } catch {
+        authFailures = 0
+      } catch (e) {
         if (!this.running) break
-        await sleep(3000) // backoff on transient errors
+        if (e instanceof TelegramApiError && e.unauthorized) {
+          authFailures += 1
+          if (authFailures >= MAX_AUTH_FAILURES) {
+            this.running = false
+            this.deps.onError?.(
+              'Telegram rejected the bot token — the bridge stopped. Re-enter the token in Settings.'
+            )
+            break
+          }
+        }
+        await sleep(BACKOFF_MS) // backoff on transient errors and API errors
       }
     }
   }
@@ -60,9 +91,11 @@ export class TelegramBridge {
     const res = await fetchImpl(url, { signal: this.aborter.signal })
     const data = (await res.json()) as {
       ok?: boolean
+      error_code?: number
       result?: Array<{ update_id: number; message?: { text?: string; chat?: { id?: number } } }>
     }
-    if (!data.ok || !Array.isArray(data.result)) return
+    if (!data.ok) throw new TelegramApiError(data.error_code ?? res.status)
+    if (!Array.isArray(data.result)) return
     for (const update of data.result) {
       this.offset = update.update_id + 1
       const msg = update.message

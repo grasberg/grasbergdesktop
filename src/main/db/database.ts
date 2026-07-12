@@ -5,7 +5,7 @@
  */
 
 import { existsSync, rmSync } from 'node:fs'
-import { MIGRATIONS } from './migrations'
+import { MIGRATIONS, type Migration } from './migrations'
 import { open, type SqliteDriver } from './driver'
 import { createProvidersRepository, type ProvidersRepository } from './repositories/providers'
 import {
@@ -77,6 +77,41 @@ function readSchemaVersion(driver: SqliteDriver): number {
   return Number.isFinite(version) && version > 0 ? version : 0
 }
 
+const isPragma = (statement: string): boolean => /^\s*PRAGMA\b/i.test(statement)
+
+/**
+ * Apply an FK-safe rebuild (`noTransaction`) migration. `PRAGMA foreign_keys` is
+ * only a no-op INSIDE a transaction, so exactly the leading/trailing PRAGMAs run
+ * bare — this is SQLite's documented rebuild procedure (foreign_keys = OFF;
+ * BEGIN; rebuild; COMMIT; foreign_keys = ON). Everything between them, plus the
+ * version bump, is therefore atomic: a crash or a failing statement rolls the
+ * whole rebuild back instead of leaving a half-built schema behind.
+ *
+ * Constraint on such migrations: PRAGMAs belong at the edges of `statements`; one
+ * placed in the middle would silently be a no-op.
+ */
+function applyRebuildMigration(
+  driver: SqliteDriver,
+  migration: Migration,
+  recordVersion: (version: number) => void
+): void {
+  const statements = migration.statements
+  let first = 0
+  while (first < statements.length && isPragma(statements[first])) first++
+  let last = statements.length
+  while (last > first && isPragma(statements[last - 1])) last--
+
+  for (let i = 0; i < first; i++) driver.exec(statements[i])
+  try {
+    driver.transaction(() => {
+      for (let i = first; i < last; i++) driver.exec(statements[i])
+      recordVersion(migration.version)
+    })
+  } finally {
+    for (let i = last; i < statements.length; i++) driver.exec(statements[i])
+  }
+}
+
 function applyMigrations(driver: SqliteDriver, filePath: string): void {
   // The meta table must exist before we can read the version; this matches
   // the DDL in migration 1 and is idempotent.
@@ -92,14 +127,13 @@ function applyMigrations(driver: SqliteDriver, filePath: string): void {
     )
   }
 
-  // FK-safe table rebuilds (noTransaction migrations) toggle PRAGMA
-  // foreign_keys and DROP/RENAME tables outside a transaction, so a crash
-  // mid-rebuild cannot roll back and can leave the schema half-built. Before
-  // upgrading a NON-EMPTY database across any such migration, snapshot the file
-  // with VACUUM INTO so a corrupted rebuild is recoverable. A fresh DB
-  // (current === 0) has nothing to lose, so it is skipped (also keeps tests and
-  // in-memory DBs backup-free). The snapshot is removed once all migrations
-  // succeed.
+  // FK-safe table rebuilds (noTransaction migrations) DROP and recreate tables
+  // with foreign_keys disabled. The rebuild itself is atomic (see
+  // applyRebuildMigration), but before upgrading a NON-EMPTY database across any
+  // such migration we still snapshot the file with VACUUM INTO, as a last resort
+  // for a DB that ends up damaged anyway. A fresh DB (current === 0) has nothing
+  // to lose, so it is skipped (also keeps tests and in-memory DBs backup-free).
+  // The snapshot is removed once all migrations succeed.
   const needsSnapshot =
     current > 0 &&
     filePath !== ':memory:' &&
@@ -108,8 +142,12 @@ function applyMigrations(driver: SqliteDriver, filePath: string): void {
   if (needsSnapshot) {
     snapshotPath = `${filePath}.pre-v${current}.bak`
     try {
-      if (existsSync(snapshotPath)) rmSync(snapshotPath, { force: true })
-      driver.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`)
+      // An existing snapshot for this from-version was taken before an earlier,
+      // failed attempt at the same upgrade: it predates whatever went wrong, so
+      // it is never overwritten with the current (possibly damaged) file.
+      if (!existsSync(snapshotPath)) {
+        driver.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`)
+      }
     } catch {
       // If the snapshot cannot be written, proceed anyway — the migration is
       // still the same operation it always was; we just lack the safety copy.
@@ -120,10 +158,7 @@ function applyMigrations(driver: SqliteDriver, filePath: string): void {
   for (const migration of pending) {
     if (migration.version <= current) continue
     if (migration.noTransaction) {
-      // The statements manage foreign_keys / atomicity themselves (used for
-      // FK-safe table rebuilds). Not wrapped in a transaction.
-      for (const statement of migration.statements) driver.exec(statement)
-      recordVersion(migration.version)
+      applyRebuildMigration(driver, migration, recordVersion)
     } else {
       driver.transaction(() => {
         for (const statement of migration.statements) driver.exec(statement)

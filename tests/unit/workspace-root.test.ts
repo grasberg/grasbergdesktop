@@ -6,7 +6,7 @@
 
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openDatabase, type AppDatabase } from '../../src/main/db/database'
 import { WorkspaceRootService } from '../../src/main/code/workspace-root'
@@ -46,6 +46,20 @@ describe('ensure', () => {
     expect(db.code.projectsList()).toHaveLength(1)
   })
 
+  it('refuses a traversal conversation id (an imported backup can carry one)', () => {
+    // A backup-imported conversation id is attacker-controlled: joining it must
+    // never place the workspace outside the app-owned base.
+    const evil = db.conversations.create({
+      id: `..${sep}..${sep}escaped`,
+      mode: 'work',
+      title: 'Evil',
+    })
+    expect(() => service.ensure(evil.id)).toThrow(/invalid conversation id/i)
+    expect(existsSync(join(dir, 'escaped'))).toBe(false)
+    expect(db.code.projectsList()).toHaveLength(0)
+    expect(db.conversations.getById(evil.id)?.projectId).toBeNull()
+  })
+
   it('returns an already-linked (user-granted) folder untouched', () => {
     rmSync(grantedDir, { recursive: true, force: true })
     const granted = db.code.projectUpsertByPath(grantedDir, 'Granted')
@@ -71,7 +85,7 @@ describe('isAutoPath', () => {
 })
 
 describe('deleteIfAutoRegistered', () => {
-  it('removes the auto workspace dir and row (changes cascade)', () => {
+  it('removes the auto workspace dir and row (changes cascade)', async () => {
     const conv = db.conversations.create({ mode: 'work', title: 'Doomed' })
     const { projectId, root } = service.ensure(conv.id)
     db.code.changeCreate({
@@ -84,33 +98,43 @@ describe('deleteIfAutoRegistered', () => {
       oldContent: null,
     })
 
-    service.deleteIfAutoRegistered(db.conversations.getById(conv.id)!)
+    await service.deleteIfAutoRegistered(db.conversations.getById(conv.id)!)
 
     expect(existsSync(root)).toBe(false)
     expect(db.code.projectGetById(projectId)).toBeNull()
     expect(db.code.changesList(projectId)).toHaveLength(0)
   })
 
-  it('never touches a user-granted folder', () => {
+  it('never touches a user-granted folder', async () => {
     const granted = db.code.projectUpsertByPath(grantedDir, 'Granted')
     const conv = db.conversations.create({ mode: 'work', title: 'On my repo' })
     db.conversations.update(conv.id, { projectId: granted.id })
 
-    service.deleteIfAutoRegistered(db.conversations.getById(conv.id)!)
+    await service.deleteIfAutoRegistered(db.conversations.getById(conv.id)!)
 
     expect(db.code.projectGetById(granted.id)).not.toBeNull()
+  })
+
+  it('drops the rows synchronously, before the folder delete resolves', () => {
+    const conv = db.conversations.create({ mode: 'work', title: 'Doomed' })
+    const { projectId } = service.ensure(conv.id)
+
+    // Callers (conv:delete) do not await: the db must already be consistent.
+    const pending = service.deleteIfAutoRegistered(db.conversations.getById(conv.id)!)
+    expect(db.code.projectGetById(projectId)).toBeNull()
+    return pending
   })
 })
 
 describe('deleteAll', () => {
-  it('sweeps every auto workspace but keeps grants', () => {
+  it('sweeps every auto workspace but keeps grants', async () => {
     const a = db.conversations.create({ mode: 'work', title: 'A' })
     const b = db.conversations.create({ mode: 'work', title: 'B' })
     const rootA = service.ensure(a.id)
     const rootB = service.ensure(b.id)
     const granted = db.code.projectUpsertByPath(grantedDir, 'Granted')
 
-    service.deleteAll()
+    await service.deleteAll()
 
     expect(existsSync(rootA.root)).toBe(false)
     expect(existsSync(rootB.root)).toBe(false)

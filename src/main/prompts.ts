@@ -71,7 +71,7 @@ Creating and editing files:
 \`\`\`
 
 Rules for these blocks:
-- The opening fence line is exactly \`\`\`uld-change with nothing else on that line.
+- The opening fence is \`\`\`uld-change with nothing else on that line, closed by a matching bare fence. If the file content itself contains any \`\`\` line (e.g. a Markdown code block), fence the whole thing with FOUR OR MORE backticks — strictly longer than the longest backtick run inside — so the inner \`\`\` lines are not mistaken for the closing fence (e.g. open with \`\`\`\`uld-change and close with \`\`\`\`). The opening and closing fences must be the same length.
 - The first line inside the block is a JSON header with "path" (a path relative to the project root) and "type" (one of "create", "edit", "delete").
 - All remaining lines are the complete new content of the file — never a fragment, snippet or diff. For "delete", leave the content empty.
 - One block per file; use several blocks to change several files.

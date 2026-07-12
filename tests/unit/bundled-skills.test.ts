@@ -79,6 +79,23 @@ describe('seedBundledSkills', () => {
     expect(db.skills.list().map((s) => s.name)).toEqual(['mine', 'alpha'])
   })
 
+  it('never overwrites or adopts a same-named user-authored skill', async () => {
+    const mine = db.skills.create({ name: 'alpha', description: 'mine', content: 'user-authored' })
+
+    await seedBundledSkills(db, writePluginFolder(['alpha', 'beta']))
+    expect(db.skills.getById(mine.id)).toMatchObject({
+      content: 'user-authored',
+      description: 'mine',
+      pluginName: null,
+    })
+
+    // A later bundle that stops shipping 'alpha' must not delete it either.
+    db.driver.run("UPDATE meta SET value = '0' WHERE key = 'bundled_skills_version'")
+    rmSync(join(dir, 'bundle', 'skills', 'alpha'), { recursive: true, force: true })
+    await seedBundledSkills(db, join(dir, 'bundle'))
+    expect(db.skills.getById(mine.id)).toMatchObject({ content: 'user-authored' })
+  })
+
   it('does not record the version when the folder is missing, so seeding retries', async () => {
     await seedBundledSkills(db, join(dir, 'nope'))
     expect(db.skills.list()).toEqual([])

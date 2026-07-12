@@ -28,6 +28,23 @@ describe('encodeTaskList', () => {
   it('encodes an empty list as an empty string', () => {
     expect(encodeTaskList([])).toBe('')
   })
+
+  // One task is one line: a multi-line content would drop its remainder (and
+  // its in-progress marker) on the way back through parseTaskList.
+  it('collapses newlines in content so a task stays one line', () => {
+    const tasks = [
+      { content: 'Fix parser\nsee notes', status: 'in_progress' },
+      { content: 'Ship\r\n\r\n  it', status: 'pending' },
+    ] as const
+    const encoded = encodeTaskList(tasks)
+    expect(encoded).toBe(
+      `- [ ] Fix parser see notes ${TASK_IN_PROGRESS_MARKER}\n- [ ] Ship it`
+    )
+    expect(parseTaskList(encoded)).toEqual([
+      { text: 'Fix parser see notes', done: false, inProgress: true },
+      { text: 'Ship it', done: false, inProgress: false },
+    ])
+  })
 })
 
 describe('parseTaskList', () => {

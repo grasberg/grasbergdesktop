@@ -44,6 +44,19 @@ describe('redactSecrets', () => {
     expect(out).not.toContain(b64)
   })
 
+  it('leaves long digit-free runs (hyphen-free identifiers, prose) alone', () => {
+    const letters = 'g'.repeat(64)
+    expect(redactSecrets(`blob ${letters} end`)).toBe(`blob ${letters} end`)
+  })
+
+  it('redacts 200 KB of digit-free text in well under a second (no backtracking)', () => {
+    // Shell-tool stdout reaches ~128 KB; a quadratic scan here froze the main process.
+    const text = `out ${'g'.repeat(200_000)} done`
+    const started = Date.now()
+    expect(redactSecrets(text)).toBe(text)
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
   it('is idempotent and leaves clean text untouched', () => {
     const clean = 'Rate limited by the provider — too many requests. Retry in ~7s.'
     const once = redactSecrets(clean)
@@ -65,6 +78,16 @@ describe('maskKey', () => {
 
   it('shows just last 2 chars for short keys', () => {
     expect(maskKey('abc12')).toBe('…12')
+  })
+
+  it('never discloses more than a third of a short prefixed key', () => {
+    // Local gateways/proxies do issue 8-12 char bearer tokens.
+    expect(maskKey('sk-abcde')).toBe('…de')
+    expect(maskKey('sk-abcdefgh')).toBe('…fgh')
+    for (const key of ['sk-abcde', 'sk-abcdefgh', 'gw_1234567890']) {
+      const revealed = maskKey(key).replace('…', '').length
+      expect(revealed).toBeLessThanOrEqual(Math.floor(key.length / 3))
+    }
   })
 
   it('returns empty string for empty/whitespace input', () => {

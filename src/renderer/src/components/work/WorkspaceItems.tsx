@@ -254,13 +254,19 @@ function AddItemMenu(): ReactElement {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: globalThis.KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') {
+        // Consume it: closing the menu must not also reach the global handler
+        // (which would stop an in-flight generation).
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [open])
 

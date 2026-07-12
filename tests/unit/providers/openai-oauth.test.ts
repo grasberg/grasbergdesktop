@@ -146,4 +146,83 @@ describe('OpenAiOAuthManager.getAccessToken', () => {
     )
     await expect(mgr.getAccessToken('p')).rejects.toThrow(/expired/i)
   })
+
+  it('a logout during an in-flight refresh never resurrects the session', async () => {
+    let release!: () => void
+    const tokenCall = new Promise<void>((r) => {
+      release = r
+    })
+    const fetchImpl = (async () => {
+      await tokenCall // the refresh is still on the wire while the user signs out
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ access_token: makeJwt({}), refresh_token: 'REFRESH2', expires_in: 3600 }),
+      }
+    }) as unknown as typeof fetch
+    const repo = fakeRepo({
+      providerId: 'p',
+      encryptedAccess: 'enc(OLD)',
+      encryptedRefresh: 'enc(REFRESH1)',
+      accountId: 'acct',
+      accountLabel: null,
+      expiresAt: 1,
+    })
+    const mgr = deps(repo, { fetchImpl })
+    const settled = mgr.getAccessToken('p').then(
+      () => null,
+      (e: unknown) => e as Error
+    )
+    mgr.logout('p')
+    release()
+
+    const err = await settled
+    expect(err?.message).toMatch(/signed out/i)
+    expect(repo.getOAuthRow('p')).toBeNull()
+  })
+
+  it('forwards the caller AbortSignal to the token refresh fetch (cancels a hang)', async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const s = init.signal as AbortSignal | null
+          if (s?.aborted) return reject(new Error('aborted'))
+          s?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+        })
+    ) as unknown as typeof fetch
+    const repo = fakeRepo({
+      providerId: 'p',
+      encryptedAccess: 'enc(OLD)',
+      encryptedRefresh: 'enc(REFRESH1)',
+      accountId: 'acct',
+      accountLabel: null,
+      expiresAt: 1, // expired -> must refresh over the network
+    })
+    const mgr = deps(repo, { fetchImpl })
+    const settled = mgr.getAccessToken('p', controller.signal).then(
+      () => null,
+      (e: unknown) => e as Error
+    )
+    // A Stop in the pending phase aborts the caller signal; the fetch's signal
+    // fires, the hung request rejects, and the caller is unblocked.
+    controller.abort()
+    const err = await settled
+    expect(err?.message).toMatch(/could not reach/i)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('OpenAiOAuthManager.startLogin', () => {
+  it('fails fast when the system browser cannot be opened', async () => {
+    const mgr = new OpenAiOAuthManager({
+      repo: fakeRepo(),
+      encrypt: (p) => p,
+      decrypt: (s) => s,
+      openExternal: async () => {
+        throw new Error('no default browser')
+      },
+    })
+    await expect(mgr.startLogin('p')).rejects.toThrow(/system browser/i)
+  })
 })

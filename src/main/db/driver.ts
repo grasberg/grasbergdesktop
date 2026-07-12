@@ -22,13 +22,19 @@ export interface SqliteDriver {
   all<T>(sql: string, params?: SqlParams): T[]
   /** Execute one or more statements without params (DDL, PRAGMA, ...). */
   exec(sql: string): void
-  /** Run `fn` inside BEGIN/COMMIT, rolling back on any thrown error. */
+  /**
+   * Run `fn` inside BEGIN/COMMIT, rolling back on any thrown error. Re-entrant:
+   * a repository method that opens its own transaction may be called from inside
+   * a composed one (SQLite rejects a nested BEGIN).
+   */
   transaction<T>(fn: () => T): T
   close(): void
 }
 
 export function open(filePath: string): SqliteDriver {
   const db = new Database(filePath)
+  // Nesting level of driver-owned transactions; only used to name savepoints.
+  let depth = 0
 
   db.exec('PRAGMA foreign_keys = ON')
   try {
@@ -58,18 +64,28 @@ export function open(filePath: string): SqliteDriver {
     },
 
     transaction<T>(fn: () => T): T {
-      db.exec('BEGIN')
+      // The outermost level owns BEGIN/COMMIT; inner levels join it through a
+      // SAVEPOINT, so a caught inner failure undoes only its own work.
+      const savepoint = db.inTransaction ? `sp_${++depth}` : null
+      db.exec(savepoint ? `SAVEPOINT ${savepoint}` : 'BEGIN')
       try {
         const result = fn()
-        db.exec('COMMIT')
+        db.exec(savepoint ? `RELEASE ${savepoint}` : 'COMMIT')
         return result
       } catch (error) {
         try {
-          db.exec('ROLLBACK')
+          if (savepoint) {
+            db.exec(`ROLLBACK TO ${savepoint}`)
+            db.exec(`RELEASE ${savepoint}`)
+          } else {
+            db.exec('ROLLBACK')
+          }
         } catch {
           // e.g. the error already aborted the transaction — nothing to roll back
         }
         throw error
+      } finally {
+        if (savepoint) depth--
       }
     },
 

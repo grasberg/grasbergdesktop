@@ -168,11 +168,30 @@ export default function Composer(): ReactElement {
     enabledPresets[0] ??
     null
 
-  // The toggles are per-conversation intents; don't leak them across switches.
+  // Everything staged in the composer belongs to the open conversation, and the
+  // composer is one persistent instance for all of them: toggles, draft text,
+  // attachments and files still awaiting the send confirmation must never be
+  // carried into the next conversation (a file confirmed against this
+  // provider would otherwise be sent to another one's). Drafts are the one
+  // exception — they are kept per conversation and restored on the way back.
+  const drafts = useRef(new Map<string, string>())
+  const valueRef = useRef(value)
+  valueRef.current = value
+
   useEffect(() => {
+    const id = conversation?.id
     setCompareOn(false)
     setResearchOn(false)
     setResearchDepth('')
+    setValue(id ? (drafts.current.get(id) ?? '') : '')
+    setAttachments([])
+    setPendingFiles(null)
+    setMention(null)
+    setMentionItems([])
+    setSlashDismissed(false)
+    return () => {
+      if (id) drafts.current.set(id, valueRef.current)
+    }
   }, [conversation?.id])
 
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''

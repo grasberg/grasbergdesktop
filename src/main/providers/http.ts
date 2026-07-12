@@ -43,6 +43,47 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
   return out + decoder.decode()
 }
 
+/**
+ * Reads a response body as bytes, cancelling the stream the moment the running
+ * total exceeds `maxBytes` — an oversized (or endless) body is never buffered in
+ * full. Returns undefined when the cap is exceeded; callers raise their own
+ * 'too large' error.
+ */
+export async function readBytesCapped(
+  res: Response,
+  maxBytes: number
+): Promise<Uint8Array | undefined> {
+  if (!res.body) {
+    const whole = new Uint8Array(await res.arrayBuffer())
+    return whole.byteLength > maxBytes ? undefined : whole
+  }
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) return undefined
+      chunks.push(value)
+    }
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Body may already be closed/errored — nothing to do.
+    }
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
 /** Retry-After is either delta-seconds or an HTTP date. */
 function parseRetryAfterSeconds(headerValue: string | null): number | undefined {
   if (!headerValue) return undefined

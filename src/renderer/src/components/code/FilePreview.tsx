@@ -23,10 +23,16 @@ export default function FilePreview(): ReactElement | null {
   useEffect(() => {
     if (!openFile) return
     const onKey = (e: globalThis.KeyboardEvent): void => {
-      if (e.key === 'Escape') closePreview()
+      if (e.key === 'Escape') {
+        // Consume it: closing the preview must not also reach the global handler
+        // (which would stop an in-flight generation).
+        e.preventDefault()
+        e.stopPropagation()
+        closePreview()
+      }
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
   }, [openFile, closePreview])
 
   if (!openFile) return null

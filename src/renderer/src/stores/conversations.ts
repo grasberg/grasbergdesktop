@@ -20,6 +20,24 @@ function toSnippet(content: string | null): string | null {
   return trimmed.length > 140 ? `${trimmed.slice(0, 140)}…` : trimmed
 }
 
+/**
+ * One app-wide subscription to the conversation push channel: messages main
+ * writes outside a renderer stream (IM-bridge replies, mid-stream compaction)
+ * refresh the open conversation and its sidebar row. Installed on the first
+ * list load, which App runs at boot.
+ */
+let pushSubscribed = false
+function ensureConversationsSubscription(): void {
+  if (pushSubscribed) return
+  pushSubscribed = true
+  window.uld.conversations.onConversationsChanged(({ conversationId }) => {
+    useChatStore.getState().handleConversationsChanged(conversationId)
+    // Full reload: the new message also changes the row's snippet, which
+    // syncSummary can only carry when the caller already knows the text.
+    void useConversationsStore.getState().load()
+  })
+}
+
 export const useConversationsStore = create<ConversationsStoreState>()((set, get) => ({
   summaries: [],
   activeId: null,
@@ -28,6 +46,7 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   loaded: false,
 
   async load() {
+    ensureConversationsSubscription()
     const { search, modeFilter } = get()
     try {
       // Load the mode's most-recent tasks (bounded); the sidebar groups them

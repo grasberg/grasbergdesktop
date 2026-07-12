@@ -27,14 +27,20 @@ export interface ParsedTaskLine {
   inProgress: boolean
 }
 
-/** Encodes tasks into the persisted checklist markdown (lines joined by '\n'). */
+/**
+ * Encodes tasks into the persisted checklist markdown (lines joined by '\n').
+ * One task is one line, so newlines inside a task's content are collapsed to a
+ * single space — a task that spans lines would parse back as a lost marker plus
+ * a dropped remainder.
+ */
 export function encodeTaskList(tasks: readonly TaskListItem[]): string {
   const lines: string[] = []
   for (const task of tasks) {
-    if (task.status === 'completed') lines.push('- [x] ' + task.content)
+    const content = task.content.replace(/\s*\n+\s*/g, ' ')
+    if (task.status === 'completed') lines.push('- [x] ' + content)
     else if (task.status === 'in_progress') {
-      lines.push('- [ ] ' + task.content + ' ' + TASK_IN_PROGRESS_MARKER)
-    } else lines.push('- [ ] ' + task.content)
+      lines.push('- [ ] ' + content + ' ' + TASK_IN_PROGRESS_MARKER)
+    } else lines.push('- [ ] ' + content)
   }
   return lines.join('\n')
 }

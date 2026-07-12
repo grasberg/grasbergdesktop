@@ -21,25 +21,28 @@ export default function UserQuestionDialog(): ReactElement | null {
 
   // Esc = dismiss (answer null). Capture phase so the global Escape handler
   // (stop generation) never sees the event.
+  // Every response names the question this dialog rendered — main may settle the
+  // head request underneath us, and the answer must not land on the next one.
+  const requestId = pending?.requestId ?? null
   useEffect(() => {
-    if (!pending) return
+    if (!requestId) return
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        void useToolsStore.getState().respondQuestion(null)
+        void useToolsStore.getState().respondQuestion(requestId, null)
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [pending])
+  }, [requestId])
 
   if (!pending) return null
 
   const submitCustom = (): void => {
     const answer = custom.trim()
     if (answer.length === 0) return
-    void useToolsStore.getState().respondQuestion(answer)
+    void useToolsStore.getState().respondQuestion(pending.requestId, answer)
   }
 
   return (
@@ -66,7 +69,9 @@ export default function UserQuestionDialog(): ReactElement | null {
                 type="button"
                 ref={index === 0 ? firstOptionRef : undefined}
                 className="btn user-question-option"
-                onClick={() => void useToolsStore.getState().respondQuestion(option)}
+                onClick={() =>
+                  void useToolsStore.getState().respondQuestion(pending.requestId, option)
+                }
               >
                 {option}
               </button>
@@ -101,7 +106,7 @@ export default function UserQuestionDialog(): ReactElement | null {
           <button
             type="button"
             className="btn btn-ghost"
-            onClick={() => void useToolsStore.getState().respondQuestion(null)}
+            onClick={() => void useToolsStore.getState().respondQuestion(pending.requestId, null)}
           >
             Skip question
           </button>

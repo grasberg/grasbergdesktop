@@ -752,10 +752,12 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       required: ['action'],
     },
     // Creates standing autonomous runs => per-call approval is the consent
-    // gate. Not 'mutating': it writes app state, never project files.
+    // gate, so no standing grant may ever cover it. Not 'mutating': it writes
+    // app state, never project files.
     risk: 'sensitive',
     builtin: true,
     enabled: true,
+    noStandingApproval: true,
   },
   {
     id: 'run_shell_command',

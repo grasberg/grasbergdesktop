@@ -195,29 +195,44 @@ export class DreamingService {
   /** Validates ids against the snapshot and applies all ops in one transaction. */
   private apply(memories: Memory[], operations: DreamOperation[]): DreamResult {
     const { db } = this.deps
-    const ids = new Set(memories.map((m) => m.id))
-    const valid = operations.filter((op) => op.action === 'create' || ids.has(op.id))
+    const snapshot = new Map(memories.map((m) => [m.id, m]))
+    const valid = operations.filter((op) => op.action === 'create' || snapshot.has(op.id))
 
-    const removed = valid.filter((op) => op.action === 'delete').length
     const created = valid.filter((op) => op.action === 'create').length
-    const updated = valid.filter((op) => op.action === 'update').length
     // A response that empties the list wholesale is a model failure, not a
     // consolidation — refuse it entirely.
-    if (removed >= memories.length && created === 0) {
+    if (valid.filter((op) => op.action === 'delete').length >= memories.length && created === 0) {
       throw new ProviderError(
         'invalid_request',
         'The model tried to delete every memory — no memories were changed.'
       )
     }
 
+    let removed = 0
+    let updated = 0
     db.driver.transaction(() => {
+      // Rows this run already wrote are newer than the snapshot by construction.
+      const touched = new Set<string>()
       for (const op of valid) {
+        if (op.action === 'create') {
+          db.memories.create({ title: op.title, content: op.content })
+          continue
+        }
+        // The ops were derived from a snapshot taken before the (slow) model
+        // call; a memory the user or another conversation touched since is
+        // newer than the text the model judged, so that edit wins.
+        const current = db.memories.getById(op.id)
+        if (!current) continue
+        if (!touched.has(op.id) && current.updatedAt > (snapshot.get(op.id)?.updatedAt ?? 0)) {
+          continue
+        }
         if (op.action === 'update') {
           db.memories.update(op.id, { title: op.title, content: op.content })
-        } else if (op.action === 'delete') {
-          db.memories.remove(op.id)
+          touched.add(op.id)
+          updated += 1
         } else {
-          db.memories.create({ title: op.title, content: op.content })
+          db.memories.remove(op.id)
+          removed += 1
         }
       }
     })

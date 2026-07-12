@@ -65,6 +65,7 @@ const api: UldApi = {
     messages: (conversationId) => ipcRenderer.invoke(CHANNELS.convMessages, conversationId),
     export: (req) => ipcRenderer.invoke(CHANNELS.convExport, req),
     fork: (id, throughSeq) => ipcRenderer.invoke(CHANNELS.convFork, { id, throughSeq }),
+    onConversationsChanged: subscribe<{ conversationId: string }>(CHANNELS.conversationsChanged),
   },
   projects: {
     list: (req) => ipcRenderer.invoke(CHANNELS.projectsList, req),

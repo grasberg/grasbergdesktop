@@ -126,6 +126,66 @@ describe('standalone scheduled task scheduler', () => {
     expect(finished.nextRunAt).toBeGreaterThan(Date.now())
     expect(finished.enabled).toBe(true)
   })
+
+  it('never runs a task twice when an earlier due run outlasts the tick', async () => {
+    const runAt = Date.now() - 10
+    db.scheduledTasks.create({ title: 'Slow', prompt: 'Slow one', recurrence: 'daily', runAt })
+    const once = db.scheduledTasks.create({
+      title: 'Once',
+      prompt: 'Send the email',
+      recurrence: 'once',
+      runAt,
+    })
+    let release = (): void => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const run = vi.fn(async () => {
+      await gate
+      return 'ok'
+    })
+    const scheduler = new ScheduledTaskScheduler({ db, run })
+
+    // The first task's run outlasts the 30 s interval: the next tick still sees
+    // the 'once' task as due, and the first tick's due list is stale by then.
+    const tickA = scheduler.tick()
+    const tickB = scheduler.tick()
+    release()
+    await Promise.all([tickA, tickB])
+
+    expect(run).toHaveBeenCalledTimes(2)
+    const finished = db.scheduledTasks.getById(once.id)!
+    expect(finished.enabled).toBe(false)
+    expect(finished.nextRunAt).toBeNull()
+  })
+
+  it('re-reads each task before running it, so one paused mid-tick is skipped', async () => {
+    const runAt = Date.now() - 10
+    const first = db.scheduledTasks.create({
+      title: 'First',
+      prompt: 'First',
+      recurrence: 'daily',
+      runAt,
+    })
+    const second = db.scheduledTasks.create({
+      title: 'Second',
+      prompt: 'Second',
+      recurrence: 'daily',
+      runAt,
+    })
+    const run = vi.fn(async (task: ScheduledTask) => {
+      // The user pauses the still-queued task while this one is generating.
+      if (task.id === first.id) db.scheduledTasks.setEnabled(second.id, false)
+      return 'ok'
+    })
+    const scheduler = new ScheduledTaskScheduler({ db, run })
+
+    await scheduler.tick()
+
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run.mock.calls[0][0].id).toBe(first.id)
+    expect(db.scheduledTasks.getById(second.id)?.lastStatus).toBe('idle')
+  })
 })
 
 describe('nextOccurrence', () => {

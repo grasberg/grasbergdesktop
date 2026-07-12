@@ -7,6 +7,7 @@
 
 import { randomInt } from 'node:crypto'
 import type { Conversation, ImBridgeStatus, Message } from '@shared/types'
+import { isAllowedHttpUrl } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 import type { Keystore } from '../keys/keystore'
 import { redactSecrets } from '../providers/redact'
@@ -15,6 +16,9 @@ import { TelegramBridge } from './telegram'
 const TELEGRAM_OWNER = 'telegram'
 const TOKEN_NAME = 'token'
 const WEBHOOK_TIMEOUT_MS = 10_000
+/** A six-digit code is guessable, so it is short-lived and cheap to burn. */
+const PAIRING_TTL_MS = 15 * 60_000
+const PAIRING_MAX_ATTEMPTS = 5
 
 export interface ImBridgeManagerDeps {
   db: AppDatabase
@@ -33,6 +37,12 @@ export interface SetTelegramInput {
 
 export class ImBridgeManager {
   private bridge: TelegramBridge | null = null
+  /**
+   * Guard for the code currently in settings: a code is only ever valid for
+   * PAIRING_TTL_MS and PAIRING_MAX_ATTEMPTS wrong guesses. Kept in memory so it
+   * can never outlive the session that issued the code.
+   */
+  private pairing: { expiresAt: number; attempts: number } | null = null
 
   constructor(private readonly deps: ImBridgeManagerDeps) {}
 
@@ -77,6 +87,15 @@ export class ImBridgeManager {
     this.stopBridge()
     if (process.env.SMOKE_TEST === '1') return
     const settings = this.deps.db.settings.get()
+    // A code persisted by an earlier session has no guard yet — give it one
+    // (fresh TTL, no attempts spent) rather than treating it as expired.
+    if (
+      settings.telegramBridgePairingCode &&
+      settings.telegramBridgeAllowedChatId === null &&
+      !this.pairing
+    ) {
+      this.pairing = { expiresAt: Date.now() + PAIRING_TTL_MS, attempts: 0 }
+    }
     const token = this.getToken()
     if (!settings.telegramBridgeEnabled || !token || !settings.telegramBridgeConversationId) return
     const conversationId = settings.telegramBridgeConversationId
@@ -97,7 +116,8 @@ export class ImBridgeManager {
    * the one-time code the desktop app shows (telegramBridgePairingCode) before
    * their chat id is pinned as the sole authorized chat. Only the code itself is
    * ever processed pre-pairing — a stranger's message is never forwarded to the
-   * bound conversation or the model.
+   * bound conversation or the model. The code expires and burns after a few
+   * wrong guesses (see `pairing`), so it cannot be enumerated.
    */
   private async handleInbound(chatId: number, text: string, conversationId: string): Promise<string> {
     const settings = this.deps.db.settings.get()
@@ -108,11 +128,18 @@ export class ImBridgeManager {
         // No code provisioned (bridge misconfigured) — never auto-pair.
         return 'This assistant is not accepting new chats right now.'
       }
+      if (!this.pairing || Date.now() > this.pairing.expiresAt) {
+        this.rotatePairingCode()
+        return 'That pairing code expired — open the desktop app for the new one.'
+      }
       if (text.trim() !== code) {
+        this.pairing.attempts += 1
+        if (this.pairing.attempts >= PAIRING_MAX_ATTEMPTS) this.rotatePairingCode()
         return 'To link this chat, send the pairing code shown in the desktop app.'
       }
       // Correct code: pin this chat and consume the code. The pairing message
       // itself is an ack, not a prompt — it is not forwarded to the model.
+      this.pairing = null
       this.deps.db.settings.update({
         telegramBridgeAllowedChatId: chatId,
         telegramBridgePairingCode: null,
@@ -125,9 +152,15 @@ export class ImBridgeManager {
     return this.deps.generateReply(conversationId, text)
   }
 
-  /** Six-digit, zero-padded one-time pairing code. */
-  private static newPairingCode(): string {
+  /** Six-digit, zero-padded one-time pairing code, with a fresh guard. */
+  private issuePairingCode(): string {
+    this.pairing = { expiresAt: Date.now() + PAIRING_TTL_MS, attempts: 0 }
     return String(randomInt(0, 1_000_000)).padStart(6, '0')
+  }
+
+  /** Burns the current code and issues a new one for the app to display. */
+  private rotatePairingCode(): void {
+    this.deps.db.settings.update({ telegramBridgePairingCode: this.issuePairingCode() })
   }
 
   /** Store/replace config and (re)start or stop the bridge. */
@@ -146,11 +179,13 @@ export class ImBridgeManager {
     // a pinned chat, so the UI always has a code to show and stale codes never
     // linger. Clear it once a chat is pinned.
     const needsPairing = input.enabled && pinnedChat === null
+    const pairingCode = needsPairing ? this.issuePairingCode() : null
+    if (!needsPairing) this.pairing = null
     this.deps.db.settings.update({
       telegramBridgeEnabled: input.enabled,
       telegramBridgeConversationId: input.conversationId,
       ...(tokenChanged ? { telegramBridgeAllowedChatId: null } : {}),
-      telegramBridgePairingCode: needsPairing ? ImBridgeManager.newPairingCode() : null,
+      telegramBridgePairingCode: pairingCode,
     })
     this.startBridge()
     return this.status()
@@ -182,7 +217,11 @@ export class ImBridgeManager {
     } catch {
       return 'unconfigured'
     }
-    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+    // Same rule the URL was validated against at set time (isAllowedHttpUrl):
+    // https, or http only for a loopback host (localhost / 127.0.0.1 / [::1]).
+    // Keeping delivery in lockstep with set-time means a webhook accepted in
+    // Settings actually fires instead of being silently dropped here.
+    if (!isAllowedHttpUrl(url)) {
       return 'unconfigured'
     }
     const fetchImpl = this.deps.fetchImpl ?? fetch

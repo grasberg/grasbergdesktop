@@ -6,11 +6,12 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GitService, parsePorcelainStatus } from '../../../src/main/code/git-service'
+import { GitService, editorSpawn, parsePorcelainStatus } from '../../../src/main/code/git-service'
+import { ProviderError } from '../../../src/main/providers/errors'
 
 let gitAvailable = true
 try {
@@ -44,6 +45,53 @@ describe('parsePorcelainStatus (pure)', () => {
     const parsed = parsePorcelainStatus(raw)
     expect(parsed.staged).toEqual([{ path: 'new-name.ts', status: 'R' }])
     expect(parsed.untracked).toEqual(['other.txt'])
+  })
+
+  it('consumes the source record of a WORKTREE rename/copy too', () => {
+    const raw = ' R new-name.ts\0old-name.ts\0 C copy.ts\0origin.ts\0?? other.txt\0'
+    const parsed = parsePorcelainStatus(raw)
+    expect(parsed.unstaged).toEqual([
+      { path: 'new-name.ts', status: 'R' },
+      { path: 'copy.ts', status: 'C' },
+    ])
+    // The source paths must never leak in as records of their own.
+    expect(parsed.staged).toEqual([])
+    expect(parsed.untracked).toEqual(['other.txt'])
+  })
+})
+
+describe('editorSpawn (pure)', () => {
+  it('spawns the editor directly off Windows', () => {
+    expect(editorSpawn('code', '/home/me/proj', 'darwin')).toEqual({
+      file: 'code',
+      argv: ['-n', '/home/me/proj'],
+      verbatim: false,
+    })
+    expect(editorSpawn('zed', '/home/me/proj', 'linux')).toEqual({
+      file: 'zed',
+      argv: ['/home/me/proj'],
+      verbatim: false,
+    })
+  })
+
+  it('routes through cmd.exe on Windows (.cmd shims) with every argument quoted', () => {
+    // execFile cannot spawn code.cmd/cursor.cmd; cmd.exe can, and the quoting
+    // keeps a path with cmd metacharacters a single literal argument.
+    const spawn = editorSpawn('code', 'C:\\Users\\me\\a & b', 'win32')
+    expect(spawn.file).toBe('cmd.exe')
+    expect(spawn.verbatim).toBe(true)
+    expect(spawn.argv).toEqual(['/d', '/s', '/c', 'code "-n" "C:\\Users\\me\\a & b"'])
+  })
+
+  it('refuses a Windows path containing a quote (would break the quoting)', () => {
+    try {
+      editorSpawn('code', 'C:\\evil" & calc.exe & "', 'win32')
+    } catch (e) {
+      expect(e).toBeInstanceOf(ProviderError)
+      expect((e as ProviderError).code).toBe('invalid_request')
+      return
+    }
+    throw new Error('expected the call to throw invalid_request')
   })
 })
 
@@ -112,6 +160,20 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
     await expect(service.stage(dir, ['../outside.txt'])).rejects.toThrow(/must not contain/i)
     await expect(service.stage(dir, ['C:/abs.txt'])).rejects.toThrow(/relative/i)
     await expect(service.stage(dir, [])).rejects.toThrow(/at least one/i)
+  })
+
+  it('reports a worktree rename as a single unstaged entry', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'hello\n')
+    await service.stage(dir, ['a.txt'])
+    await service.commit(dir, 'init')
+
+    renameSync(join(dir, 'a.txt'), join(dir, 'b.txt'))
+    git(dir, 'add', '-N', 'b.txt') // intent-to-add: git then reports ' R b.txt\0a.txt'
+
+    const status = await service.status(dir)
+    expect(status.unstaged).toEqual([{ path: 'b.txt', status: 'R' }])
+    expect(status.staged).toEqual([])
+    expect(status.untracked).toEqual([])
   })
 
   it('unstage restores files to the working set', async () => {

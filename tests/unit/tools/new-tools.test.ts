@@ -150,13 +150,54 @@ describe('hasCatastrophicBacktracking', () => {
     expect(hasCatastrophicBacktracking('(a*)*')).toBe(true)
   })
 
+  it("flags the '{m,}' spelling of an unbounded quantifier", () => {
+    // '{1,}' is '+' by another name: exponential, but a '*'/'+'-only scan misses it.
+    expect(hasCatastrophicBacktracking('(\\w{1,}\\s?)*;$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(a{2,})+')).toBe(true)
+    expect(hasCatastrophicBacktracking('(a{2,4})+')).toBe(false) // bounded => fine
+  })
+
+  it('flags quantified groups whose branches can match the same input', () => {
+    expect(hasCatastrophicBacktracking('(a|a)+$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(\\w|\\d)+=$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(ab|a)+')).toBe(true)
+    expect(hasCatastrophicBacktracking('((a|a)x)+')).toBe(true) // ambiguity one level down
+    expect(hasCatastrophicBacktracking('(a|)+')).toBe(true) // an empty branch matches anywhere
+  })
+
+  it('flags quantified groups whose body can match the empty string', () => {
+    // No inner unbounded quantifier and no alternation, yet exponential: the
+    // all-optional body can split a run of input in many ways per repetition.
+    expect(hasCatastrophicBacktracking('(a?a?)+b$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(\\w?\\w?)+;$')).toBe(true)
+    expect(hasCatastrophicBacktracking('(?:a?a?)+')).toBe(true) // non-capturing, same shape
+    expect(hasCatastrophicBacktracking('([ab]?[cd]?)+x')).toBe(true) // optional char classes
+    expect(hasCatastrophicBacktracking('(a?|b?)+')).toBe(true) // every branch nullable
+  })
+
   it('allows ordinary patterns', () => {
     expect(hasCatastrophicBacktracking('needle\\s+is')).toBe(false)
     expect(hasCatastrophicBacktracking('function\\s+\\w+')).toBe(false)
     expect(hasCatastrophicBacktracking('(abc)+')).toBe(false) // quantified group, no inner quantifier
-    expect(hasCatastrophicBacktracking('(a|b)*')).toBe(false)
+    expect(hasCatastrophicBacktracking('(a|b)*')).toBe(false) // distinct first chars => one parse
+    expect(hasCatastrophicBacktracking('(?:foo|bar)+')).toBe(false)
+    expect(hasCatastrophicBacktracking('(a|b)')).toBe(false) // not quantified at all
     expect(hasCatastrophicBacktracking('\\w+')).toBe(false)
     expect(hasCatastrophicBacktracking('[a+]+')).toBe(false) // '+' inside a char class is literal
+    expect(hasCatastrophicBacktracking('(a?b)+')).toBe(false) // optional prefix but a required token
+    expect(hasCatastrophicBacktracking('(\\w?x)+')).toBe(false) // optional escape then required char
+    expect(hasCatastrophicBacktracking('(a?a?)?')).toBe(false) // nullable body but not +/*/{m,}
+  })
+
+  it('the flagged patterns really are the slow ones (and the allowed ones are not)', () => {
+    const evil = [/(\w{1,}\s?)*;$/, /(a|a)+$/, /(a?a?)+b$/, /(\w?\w?)+;$/]
+    for (const pattern of evil) {
+      // Each would take seconds-to-hours on the main thread at this length.
+      expect(hasCatastrophicBacktracking(pattern.source)).toBe(true)
+    }
+    const started = Date.now()
+    expect(/^(a|b)*$/.test('a'.repeat(40) + '!')).toBe(false)
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 })
 

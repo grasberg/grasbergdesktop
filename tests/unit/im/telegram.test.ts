@@ -60,4 +60,41 @@ describe('TelegramBridge.pollOnce', () => {
     const sendCall = fetchImpl.mock.calls.find((c) => String(c[0]).includes('sendMessage'))!
     expect(JSON.parse(String((sendCall[1] as RequestInit).body)).text).toMatch(/no provider/i)
   })
+
+  it('raises an API error (ok:false) so the loop backs off instead of spinning', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ ok: false, error_code: 409, description: 'Conflict' })
+    )
+    const bridge = new TelegramBridge({
+      token: 't',
+      onMessage: async () => 'x',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    await expect(bridge.pollOnce()).rejects.toThrow(/telegram api error/i)
+  })
+})
+
+describe('TelegramBridge.loop', () => {
+  it('backs off between polls and gives up after repeated token rejections', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(async () => jsonResponse({ ok: false, error_code: 401 }))
+      const onError = vi.fn()
+      const bridge = new TelegramBridge({
+        token: 'revoked',
+        onMessage: async () => 'x',
+        onError,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+
+      bridge.start()
+      // A minute of a hot loop would be hundreds of requests; five is the cap.
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(fetchImpl).toHaveBeenCalledTimes(5)
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/token/i))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

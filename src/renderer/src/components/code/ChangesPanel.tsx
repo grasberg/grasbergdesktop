@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react'
-import type { Checkpoint, CodeChange } from '@shared/types'
+import type { CheckpointLite, CodeChange } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useUiStore } from '@/stores/ui'
 import { useChatStore } from '@/stores/chat'
@@ -182,7 +182,7 @@ export default function ChangesPanel(): ReactElement {
   const loading = useCodeStore((s) => s.loadingChanges)
   const conversationId = useChatStore((s) => s.conversation?.id ?? null)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
+  const [checkpoints, setCheckpoints] = useState<CheckpointLite[]>([])
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
 
   useEffect(() => {
@@ -247,8 +247,12 @@ export default function ChangesPanel(): ReactElement {
             {checkpointsOpen ? checkpoints.map((checkpoint) => (
               <div className="code-change card code-change-past" key={checkpoint.id}>
                 <div className="code-change-head">
-                  <span className="code-change-path">{checkpoint.label}</span>
-                  <span className="badge">seq {checkpoint.messageSeq}</span>
+                  <span className="code-change-path" title={checkpoint.filePaths.join('\n')}>
+                    {checkpoint.label}
+                  </span>
+                  <span className="badge">
+                    {checkpoint.filePaths.length} file{checkpoint.filePaths.length === 1 ? '' : 's'}
+                  </span>
                 </div>
                 <div className="code-change-actions">
                   <button

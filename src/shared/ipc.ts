@@ -22,7 +22,7 @@ import type {
   AuthMode,
   ChatParams,
   CodeChange,
-  Checkpoint,
+  CheckpointLite,
   CodeProject,
   GitStatus,
   Conversation,
@@ -542,6 +542,11 @@ export interface UldApi {
     /** Serializes a conversation to a file via a native save dialog (main). */
     export(req: ConvExportRequest): Promise<IpcResult<ConvExportResult>>
     fork(id: string, throughSeq?: number): Promise<IpcResult<Conversation>>
+    /**
+     * Fires when main writes messages outside a stream (IM-bridge replies,
+     * compaction) — the renderer refreshes the list and the open conversation.
+     */
+    onConversationsChanged(cb: (payload: { conversationId: string }) => void): () => void
   }
   projects: {
     /** Organizational projects, newest first; scoped by mode when given. */
@@ -630,7 +635,8 @@ export interface UldApi {
     gitGenerateCommitMessage(projectId: string): Promise<IpcResult<{ message: string }>>
     worktreeCreate(projectId: string, name?: string): Promise<IpcResult<WorktreeInfo>>
     openInIde(projectId: string): Promise<IpcResult<{ command: string }>>
-    checkpointsList(conversationId: string): Promise<IpcResult<Checkpoint[]>>
+    /** Metadata only — the file snapshots stay in main until a restore. */
+    checkpointsList(conversationId: string): Promise<IpcResult<CheckpointLite[]>>
     checkpointRestore(checkpointId: string): Promise<IpcResult<CodeChange>>
   }
   tools: {

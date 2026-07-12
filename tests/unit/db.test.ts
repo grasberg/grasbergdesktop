@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -48,6 +48,43 @@ function msg(
   }
 }
 
+/**
+ * Hand-build a v24 database holding one chat conversation, its message and a
+ * project, then drop `projects.name` — the column the v25 FK-safe rebuild copies.
+ * v25 therefore fails mid-rebuild, AFTER `conversations` was dropped and renamed.
+ */
+function seedFailingV24Database(): string {
+  db?.close()
+  db = null
+  rmSync(dbFile, { force: true })
+
+  const v24 = open(dbFile)
+  for (const migration of MIGRATIONS.filter((m) => m.version <= 24)) {
+    for (const statement of migration.statements) v24.exec(statement)
+  }
+  const now = Date.now()
+  const conversationId = randomUUID()
+  v24.run(
+    `INSERT INTO conversations (id, mode, title, params_json, created_at, updated_at)
+     VALUES (?, 'chat', 'Kept', '{}', ?, ?)`,
+    [conversationId, now, now]
+  )
+  v24.run(
+    `INSERT INTO messages (id, conversation_id, role, content, seq, created_at)
+     VALUES (?, ?, 'user', 'hello', 1, ?)`,
+    [randomUUID(), conversationId, now]
+  )
+  v24.run(
+    `INSERT INTO projects (id, mode, name, created_at, updated_at)
+     VALUES ('proj-1', 'chat', 'Docs', ?, ?)`,
+    [now, now]
+  )
+  v24.run("INSERT INTO meta (key, value) VALUES ('schema_version', '24')")
+  v24.exec('ALTER TABLE projects DROP COLUMN name')
+  v24.close()
+  return conversationId
+}
+
 describe('openDatabase + migrations', () => {
   it('creates the file and records the schema version in meta', () => {
     expect(existsSync(dbFile)).toBe(true)
@@ -81,6 +118,108 @@ describe('openDatabase + migrations', () => {
       "SELECT key FROM meta WHERE key = 'schema_version'"
     )
     expect(metaRows).toHaveLength(1)
+  })
+
+  it('rolls a failing FK-safe rebuild back atomically and re-runs it cleanly', () => {
+    const conversationId = seedFailingV24Database()
+
+    expect(() => openDatabase(dbFile)).toThrow()
+
+    const broken = open(dbFile)
+    // Nothing of the half-run rebuild survives: no *_new leftovers (which would
+    // make every later launch fail with "table conversations_new already
+    // exists"), the version is untouched and the children were never wiped.
+    expect(
+      broken.all("SELECT name FROM sqlite_master WHERE name IN ('conversations_new','projects_new')")
+    ).toHaveLength(0)
+    expect(
+      broken.get<{ value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")!.value
+    ).toBe('24')
+    expect(broken.all('SELECT id FROM conversations')).toHaveLength(1)
+    expect(broken.all('SELECT id FROM messages')).toHaveLength(1)
+    // The pre-migration snapshot is there as a last resort.
+    expect(existsSync(`${dbFile}.pre-v24.bak`)).toBe(true)
+
+    broken.run(`ALTER TABLE projects ADD COLUMN name TEXT NOT NULL DEFAULT 'Docs'`)
+    broken.close()
+
+    db = openDatabase(dbFile)
+    const version = db.driver.get<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'schema_version'"
+    )!.value
+    expect(Number.parseInt(version, 10)).toBeGreaterThanOrEqual(25)
+    expect(db.messages.listByConversation(conversationId)).toHaveLength(1)
+    expect(db.projects.getById('proj-1')?.name).toBe('Docs')
+    // Snapshot removed once the upgrade completed.
+    expect(existsSync(`${dbFile}.pre-v24.bak`)).toBe(false)
+  })
+
+  it('never overwrites an existing pre-migration snapshot', () => {
+    seedFailingV24Database()
+    const snapshot = `${dbFile}.pre-v24.bak`
+    // Stands in for the snapshot taken before an earlier, failed attempt at the
+    // same upgrade — it must survive the retry untouched.
+    writeFileSync(snapshot, 'SENTINEL')
+
+    expect(() => openDatabase(dbFile)).toThrow()
+    expect(readFileSync(snapshot, 'utf8')).toBe('SENTINEL')
+  })
+})
+
+describe('driver transactions', () => {
+  const provider = {
+    id: 'prov-1',
+    type: 'deepseek' as const,
+    label: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    defaultModelId: 'deepseek-chat',
+  }
+
+  it('re-enters: a repository transaction runs inside a composed one', () => {
+    db!.providers.create(provider)
+    db!.settings.update({ defaultProviderId: 'prov-1', defaultModelId: 'deepseek-chat' })
+
+    // The providersDelete composition: settings.update() opens its own transaction.
+    db!.driver.transaction(() => {
+      db!.settings.update({ defaultProviderId: null, defaultModelId: null })
+      db!.conversations.clearProvider('prov-1')
+      db!.providers.remove('prov-1')
+    })
+
+    expect(db!.providers.getById('prov-1')).toBeNull()
+    expect(db!.settings.get().defaultProviderId).toBeNull()
+  })
+
+  it('rolls the whole composition back when it throws after a nested transaction', () => {
+    db!.settings.update({ theme: 'light' })
+
+    expect(() =>
+      db!.driver.transaction(() => {
+        db!.settings.update({ theme: 'dark' })
+        db!.providers.create(provider)
+        throw new Error('boom')
+      })
+    ).toThrow('boom')
+
+    expect(db!.settings.get().theme).toBe('light')
+    expect(db!.providers.getById('prov-1')).toBeNull()
+  })
+
+  it('undoes only the inner level when the outer catches a nested failure', () => {
+    db!.driver.transaction(() => {
+      db!.providers.create(provider)
+      try {
+        db!.driver.transaction(() => {
+          db!.providers.create({ ...provider, id: 'prov-2', label: 'Doomed' })
+          throw new Error('inner')
+        })
+      } catch {
+        // swallowed on purpose — the outer transaction must still commit
+      }
+    })
+
+    expect(db!.providers.getById('prov-1')?.label).toBe('DeepSeek')
+    expect(db!.providers.getById('prov-2')).toBeNull()
   })
 })
 
@@ -116,6 +255,55 @@ describe('agent platform repository', () => {
       messageSeq: 4,
       files: [{ relPath: 'src/app.ts', content: 'old' }],
     })
+  })
+
+  it('checkpointsListLite returns file paths without the snapshots', () => {
+    const conversation = db!.conversations.create({ mode: 'work', title: 'Agent task' })
+    db!.agentPlatform.checkpointCreate({
+      conversationId: conversation.id,
+      projectId: 'project-1',
+      changeId: null,
+      label: 'Before edit',
+      messageSeq: 2,
+      files: [
+        { relPath: 'src/app.ts', content: 'x'.repeat(5000) },
+        { relPath: 'README.md', content: null },
+      ],
+    })
+
+    const listed = db!.agentPlatform.checkpointsListLite(conversation.id)
+    expect(listed).toEqual([
+      expect.objectContaining({
+        conversationId: conversation.id,
+        label: 'Before edit',
+        filePaths: ['src/app.ts', 'README.md'],
+      }),
+    ])
+    expect(JSON.stringify(listed)).not.toContain('xxxx')
+  })
+
+  it("markDanglingRunsAsStopped finishes runs left 'running' by a crash", () => {
+    const conversation = db!.conversations.create({ mode: 'work', title: 'Agent task' })
+    const start = (task: string) =>
+      db!.agentPlatform.runStart({
+        conversationId: conversation.id,
+        projectId: null,
+        agentName: null,
+        task,
+        worktreePath: null,
+        providerId: null,
+        modelId: null,
+      })
+    const done = start('finished')
+    db!.agentPlatform.runFinish(done.id, 'done', 'ok')
+    start('interrupted')
+
+    expect(db!.agentPlatform.markDanglingRunsAsStopped()).toBe(1)
+    const runs = db!.agentPlatform.runsList(conversation.id)
+    expect(runs.find((r) => r.task === 'interrupted')).toMatchObject({ status: 'stopped' })
+    expect(runs.find((r) => r.task === 'interrupted')!.finishedAt).not.toBeNull()
+    expect(runs.find((r) => r.task === 'finished')).toMatchObject({ status: 'done', result: 'ok' })
+    expect(db!.agentPlatform.markDanglingRunsAsStopped()).toBe(0)
   })
 })
 
@@ -370,6 +558,62 @@ describe('conversations + messages', () => {
     expect(db!.conversations.list({ search: 'no such thing' })).toHaveLength(0)
   })
 
+  it('search folds non-ASCII case in both directions (titles and messages)', () => {
+    const a = db!.conversations.create({ mode: 'chat', title: 'Örebro plan' })
+    const b = db!.conversations.create({ mode: 'chat', title: 'Städa garaget' })
+    const c = db!.conversations.create({ mode: 'chat', title: 'Notes' })
+    db!.messages.insert(
+      msg(c.id, { role: 'user', content: 'Åka till Ängelholm för Éclair', seq: 1 })
+    )
+
+    expect(db!.conversations.list({ search: 'Örebro' }).map((s) => s.id)).toEqual([a.id])
+    expect(db!.conversations.list({ search: 'örebro' }).map((s) => s.id)).toEqual([a.id])
+    expect(db!.conversations.list({ search: 'STÄDA' }).map((s) => s.id)).toEqual([b.id])
+    expect(db!.conversations.list({ search: 'åka' }).map((s) => s.id)).toEqual([c.id])
+    expect(db!.conversations.list({ search: 'ängelholm' }).map((s) => s.id)).toEqual([c.id])
+    expect(db!.conversations.list({ search: 'éclair' }).map((s) => s.id)).toEqual([c.id])
+  })
+
+  it('search treats wildcard characters as literals', () => {
+    const a = db!.conversations.create({ mode: 'chat', title: '100% done' })
+    db!.conversations.create({ mode: 'chat', title: 'Nothing to see' })
+    const b = db!.conversations.create({ mode: 'chat', title: 'star*name [x]' })
+
+    expect(db!.conversations.list({ search: '100%' }).map((s) => s.id)).toEqual([a.id])
+    expect(db!.conversations.list({ search: '*' }).map((s) => s.id)).toEqual([b.id])
+    expect(db!.conversations.list({ search: '[x]' }).map((s) => s.id)).toEqual([b.id])
+    expect(db!.conversations.list({ search: 'a_b' })).toHaveLength(0)
+  })
+
+  it('snippets stay capped at 100 chars for very long messages', () => {
+    const conv = db!.conversations.create({ mode: 'chat', title: 'Long' })
+    db!.messages.insert(msg(conv.id, { role: 'assistant', content: 'r'.repeat(50_000), seq: 1 }))
+    const [summary] = db!.conversations.list()
+    expect(summary.snippet).toBe('r'.repeat(100))
+  })
+
+  it('lastSeq returns the highest seq, or null for an empty conversation', () => {
+    const conv = db!.conversations.create({ mode: 'chat' })
+    expect(db!.messages.lastSeq(conv.id)).toBeNull()
+    db!.messages.insert(msg(conv.id, { role: 'user', content: 'q', seq: 1 }))
+    db!.messages.insert(msg(conv.id, { role: 'assistant', content: 'a', seq: 2 }))
+    expect(db!.messages.lastSeq(conv.id)).toBe(2)
+  })
+
+  it('clearSummary drops the compaction summary', () => {
+    const conv = db!.conversations.create({ mode: 'chat' })
+    db!.conversations.setSummary(conv.id, 'so far...', 12)
+    expect(db!.conversations.getById(conv.id)).toMatchObject({
+      summaryText: 'so far...',
+      summaryThroughSeq: 12,
+    })
+    db!.conversations.clearSummary(conv.id)
+    expect(db!.conversations.getById(conv.id)).toMatchObject({
+      summaryText: null,
+      summaryThroughSeq: null,
+    })
+  })
+
   it('filters by mode and honors limit', () => {
     db!.conversations.create({ mode: 'chat', title: 'C1' })
     db!.conversations.create({ mode: 'chat', title: 'C2' })
@@ -449,5 +693,46 @@ describe('settings repository', () => {
     expect(persisted.theme).toBe('dark')
     expect(persisted.fontSize).toBe('large')
     expect(persisted.defaultParams).toEqual({ temperature: 0.5 })
+  })
+})
+
+describe('code repository', () => {
+  function change(projectId: string, filePath: string) {
+    return db!.code.changeCreate({
+      projectId,
+      conversationId: null,
+      filePath,
+      changeType: 'edit',
+      diff: `--- a/${filePath}`,
+      newContent: 'n'.repeat(1000),
+      oldContent: 'o'.repeat(1000),
+    })
+  }
+
+  it('changesList omits file bodies but changeGet still returns them', () => {
+    const project = db!.code.projectUpsertByPath('/tmp/proj', 'proj')
+    const created = change(project.id, 'src/app.ts')
+
+    const [listed] = db!.code.changesList(project.id)
+    expect(listed).toMatchObject({
+      id: created.id,
+      filePath: 'src/app.ts',
+      changeType: 'edit',
+      status: 'proposed',
+      diff: '--- a/src/app.ts',
+      newContent: null,
+      oldContent: null,
+    })
+
+    expect(db!.code.changeGet(created.id)).toMatchObject({
+      newContent: 'n'.repeat(1000),
+      oldContent: 'o'.repeat(1000),
+    })
+  })
+
+  it('changesList caps the history at the most recent 200 changes', () => {
+    const project = db!.code.projectUpsertByPath('/tmp/proj', 'proj')
+    for (let i = 0; i < 205; i++) change(project.id, `src/f${i}.ts`)
+    expect(db!.code.changesList(project.id)).toHaveLength(200)
   })
 })

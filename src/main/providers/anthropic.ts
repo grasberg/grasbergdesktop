@@ -7,7 +7,13 @@
  * Security: the api key is never logged and is passed to the error redactor.
  */
 
-import type { ModelInfo, ProviderType, TestConnectionResult, ToolCallRecord } from '@shared/types'
+import type {
+  ModelInfo,
+  ProviderErrorCode,
+  ProviderType,
+  TestConnectionResult,
+  ToolCallRecord,
+} from '@shared/types'
 import { PROVIDER_TYPES } from '@shared/catalog'
 import type {
   AdapterChatRequest,
@@ -22,6 +28,7 @@ import type {
 import { ProviderError } from './errors'
 import { checkedFetch, joinUrl, requireStreamBody } from './http'
 import { collectStream, parseDataUrl, parseToolArguments, probeConnection } from './native'
+import { redactSecrets } from './redact'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
@@ -254,6 +261,44 @@ export function parseAnthropicEvent(json: unknown, state: AnthropicStreamState):
   return out
 }
 
+/** Anthropic's documented error types → our normalized codes. */
+const STREAM_ERROR_CODES: Record<string, ProviderErrorCode> = {
+  invalid_request_error: 'invalid_request',
+  authentication_error: 'auth',
+  permission_error: 'auth',
+  not_found_error: 'invalid_request',
+  request_too_large: 'invalid_request',
+  rate_limit_error: 'rate_limit',
+  timeout_error: 'timeout',
+  api_error: 'server',
+  overloaded_error: 'server',
+  billing_error: 'invalid_request',
+}
+
+/** Transient failures worth another attempt — 'overloaded_error' is Anthropic's 529. */
+const STREAM_ERROR_RETRYABLE = new Set([
+  'overloaded_error',
+  'api_error',
+  'rate_limit_error',
+  'timeout_error',
+])
+
+/** Maps an in-stream `{type:'error', error:{type,message}}` event to a ProviderError. */
+export function anthropicStreamError(json: unknown, secrets: string[]): ProviderError {
+  const err = (json as { error?: { type?: unknown; message?: unknown } }).error ?? {}
+  const type = typeof err.type === 'string' ? err.type : undefined
+  const detail = typeof err.message === 'string' ? redactSecrets(err.message, secrets).trim() : ''
+  const label = type ? ` (${type})` : ''
+  return new ProviderError(
+    (type ? STREAM_ERROR_CODES[type] : undefined) ?? 'server',
+    `Anthropic reported a stream error${label}${detail ? `: ${detail}` : '.'}`,
+    {
+      retryable: type !== undefined && STREAM_ERROR_RETRYABLE.has(type),
+      providerType: 'anthropic',
+    }
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
@@ -296,10 +341,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         continue
       }
       if (json && typeof json === 'object' && (json as Record<string, unknown>).type === 'error') {
-        throw new ProviderError('server', 'Anthropic reported a stream error.', {
-          retryable: false,
-          providerType: this.type,
-        })
+        throw anthropicStreamError(json, [ctx.apiKey])
       }
       for (const e of parseAnthropicEvent(json, state)) {
         if (e.type === 'tool_call') sawToolCall = true

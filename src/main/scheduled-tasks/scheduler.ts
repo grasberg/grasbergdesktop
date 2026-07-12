@@ -37,6 +37,8 @@ export function nextOccurrence(task: ScheduledTask, now: number): number | null 
 export class ScheduledTaskScheduler {
   private timer: NodeJS.Timeout | null = null
   private readonly running = new Set<string>()
+  /** A run can outlast the tick interval; ticks must never overlap. */
+  private ticking = false
 
   constructor(private readonly deps: ScheduledTaskSchedulerDeps) {}
 
@@ -48,6 +50,16 @@ export class ScheduledTaskScheduler {
   }
 
   async tick(now = Date.now()): Promise<void> {
+    if (this.ticking) return
+    this.ticking = true
+    try {
+      await this.runDue(now)
+    } finally {
+      this.ticking = false
+    }
+  }
+
+  private async runDue(now: number): Promise<void> {
     let due: ScheduledTask[]
     try {
       due = this.deps.db.scheduledTasks.listDue(now)
@@ -55,8 +67,13 @@ export class ScheduledTaskScheduler {
       return
     }
 
-    for (const task of due) {
-      if (this.running.has(task.id)) continue
+    for (const listed of due) {
+      if (this.running.has(listed.id)) continue
+      // The due list is a snapshot: awaiting the task ahead of this one can take
+      // minutes, during which the row may have run, been paused or rescheduled.
+      // Re-read it and re-check due-ness so a task never fires twice.
+      const task = this.deps.db.scheduledTasks.getById(listed.id)
+      if (!task || !task.enabled || task.nextRunAt === null || task.nextRunAt > now) continue
       this.running.add(task.id)
       const startedAt = Date.now()
       this.deps.db.scheduledTasks.markRunning(task.id, startedAt)

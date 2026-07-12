@@ -113,7 +113,9 @@ function encodeModel(m: ModelsDevModel): PresetModelTuple {
     bit(m.reasoning),
     priceOr(m.cost?.input, hasCost),
     priceOr(m.cost?.output, hasCost),
-    priceOr(m.cost?.cache_read, hasCost),
+    // cache_read is its own unknown: a cost block that omits it means "no cache
+    // pricing published", not "cache hits are free".
+    typeof m.cost?.cache_read === 'number' ? m.cost.cache_read : -1,
   ]
 }
 
@@ -193,6 +195,9 @@ export function decodePricing(t: PresetModelTuple): ModelPricing | undefined {
   return {
     inputPerMTok: Math.max(0, input),
     outputPerMTok: Math.max(0, output),
-    ...(t[9] >= 0 ? { cachedInputPerMTok: t[9] } : {}),
+    // A zero cache price is treated as unknown too: older generated tuples
+    // encoded a missing cache_read as 0, and billing cached tokens as free
+    // understates the cost. estimateCost then falls back to the input rate.
+    ...(t[9] > 0 ? { cachedInputPerMTok: t[9] } : {}),
   }
 }

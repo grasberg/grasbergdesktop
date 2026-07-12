@@ -26,6 +26,13 @@ function shortHash(input: string): string {
   return h.toString(36).padStart(6, '0').slice(-6)
 }
 
+/** Appends `_<hash>`, keeping the id within the 64-char cap. */
+function withHash(id: string, hash: string): string {
+  const suffix = `_${hash}`
+  if (id.length + suffix.length <= MAX_TOOL_ID_LENGTH) return id + suffix
+  return id.slice(0, MAX_TOOL_ID_LENGTH - suffix.length) + suffix
+}
+
 /**
  * 'mcp__<key>__<sanitizedName>' capped at 64 chars. When the full id exceeds
  * the cap, a short hash of it is appended so two long tool names that share
@@ -36,6 +43,21 @@ export function namespaceMcpToolId(serverKey: string, toolName: string): string 
   const sanitized = toolName.replace(/[^A-Za-z0-9_-]/g, '_')
   const id = `${MCP_TOOL_ID_PREFIX}${serverKey}__${sanitized}`
   if (id.length <= MAX_TOOL_ID_LENGTH) return id
-  const suffix = `_${shortHash(id)}`
-  return id.slice(0, MAX_TOOL_ID_LENGTH - suffix.length) + suffix
+  return withHash(id, shortHash(id))
+}
+
+/**
+ * Ids for a server's whole discovered tool set, in input order. Sanitization is
+ * lossy, so two distinct names ('get.item' and 'get/item') can produce the same
+ * id — the SAME misdispatch/permission-conflation the length cap's hash guards
+ * against. Every name in a colliding group gets a hash of its ORIGINAL name
+ * appended, so the result never depends on discovery order.
+ */
+export function namespaceMcpToolIds(serverKey: string, toolNames: string[]): string[] {
+  const ids = toolNames.map((name) => namespaceMcpToolId(serverKey, name))
+  const counts = new Map<string, number>()
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1)
+  return ids.map((id, i) =>
+    (counts.get(id) ?? 0) > 1 ? withHash(id, shortHash(toolNames[i])) : id
+  )
 }

@@ -52,6 +52,8 @@ export interface ConversationsRepository {
   clearKnowledgeBase(knowledgeBaseId: string): void
   /** Persist the context-compaction summary (internal; not exposed via convUpdate). */
   setSummary(id: string, summaryText: string, throughSeq: number): void
+  /** Drop the compaction summary — the history it covered no longer exists. */
+  clearSummary(id: string): void
 }
 
 interface ConversationRow {
@@ -111,9 +113,25 @@ function toConversation(row: ConversationRow): Conversation {
   }
 }
 
-/** Escape LIKE wildcards so user input matches literally (used with ESCAPE '\'). */
-function escapeLike(text: string): string {
-  return text.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+/**
+ * Case-insensitive substring pattern for GLOB. SQLite's LIKE (and LOWER) only
+ * fold ASCII, so every cased character gets an explicit [lower UPPER] class;
+ * GLOB's own wildcards (* ? [) are wrapped so they match literally.
+ */
+function toSearchGlob(text: string): string {
+  let pattern = '*'
+  for (const ch of text) {
+    const lower = ch.toLowerCase()
+    const upper = ch.toUpperCase()
+    if (lower !== upper && [...lower].length === 1 && [...upper].length === 1) {
+      pattern += `[${lower}${upper}]`
+    } else if (ch === '*' || ch === '?' || ch === '[') {
+      pattern += `[${ch}]`
+    } else {
+      pattern += ch
+    }
+  }
+  return `${pattern}*`
 }
 
 function toSnippet(content: string | null): string | null {
@@ -141,14 +159,13 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
       }
       const search = req.search?.trim()
       if (search) {
-        // Lowercase both the needle (in JS, so non-ASCII folds too) and the
-        // columns (via LOWER) so search is case-insensitive beyond ASCII, which
-        // SQLite's default LIKE does not handle. Wildcard escaping is preserved.
-        const pattern = `%${escapeLike(search.toLowerCase())}%`
+        // GLOB with per-character case classes, because neither LIKE nor LOWER
+        // folds beyond ASCII in the bundled SQLite build ('Ö' would never match).
+        const pattern = toSearchGlob(search)
         where.push(
-          `(LOWER(c.title) LIKE ? ESCAPE '\\' OR EXISTS (
+          `(c.title GLOB ? OR EXISTS (
              SELECT 1 FROM messages m
-             WHERE m.conversation_id = c.id AND LOWER(m.content) LIKE ? ESCAPE '\\'))`
+             WHERE m.conversation_id = c.id AND m.content GLOB ?))`
         )
         params.push(pattern, pattern)
       }
@@ -159,7 +176,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
       }
       const rows = driver.all<SummaryRow>(
         `SELECT c.id, c.mode, c.title, c.updated_at, c.project_ref,
-           (SELECT m2.content FROM messages m2
+           (SELECT substr(m2.content, 1, 400) FROM messages m2
             WHERE m2.conversation_id = c.id
               AND m2.status <> 'streaming'
               AND TRIM(m2.content) <> ''
@@ -277,6 +294,13 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
       driver.run(
         'UPDATE conversations SET summary_text = ?, summary_through_seq = ? WHERE id = ?',
         [summaryText, throughSeq, id]
+      )
+    },
+
+    clearSummary(id) {
+      driver.run(
+        'UPDATE conversations SET summary_text = NULL, summary_through_seq = NULL WHERE id = ?',
+        [id]
       )
     },
   }

@@ -81,6 +81,14 @@ describe('KnowledgeService over the real db', () => {
     expect(hits[0].score).toBeGreaterThan(hits[1]?.score ?? 0)
   })
 
+  it('search throws instead of returning zero-score chunks when the query has no vector', async () => {
+    const kb = db.knowledge.create({ name: 'Pets', providerId: 'p1', modelId: 'embed-1' })
+    await new KnowledgeService({ db, embed }).addDocument(kb.id, 'cats.md', 'Cats purr.')
+
+    const degraded = new KnowledgeService({ db, embed: async () => [] })
+    await expect(degraded.search(kb.id, 'tell me about the cat')).rejects.toThrow(/no vector/i)
+  })
+
   it('re-importing the same source replaces its chunks (no duplicates)', async () => {
     const kb = db.knowledge.create({ name: 'K', providerId: 'p1', modelId: 'e' })
     const service = new KnowledgeService({ db, embed })

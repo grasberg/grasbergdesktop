@@ -80,6 +80,35 @@ describe('ImBridgeManager', () => {
     })
   })
 
+  it('delivers to an IPv6 loopback ([::1]) webhook accepted at set time', async () => {
+    // isAllowedHttpUrl accepts http://[::1]:… at set time; delivery must use the
+    // same rule so the webhook actually fires instead of being silently dropped.
+    const fetchImpl = vi.fn(async () => new Response('ok'))
+    const manager = new ImBridgeManager({
+      db,
+      keystore,
+      generateReply: async () => 'ok',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    manager.setWebhook('http://[::1]:9000/hook')
+
+    const conversation = conv()
+    const message: Message = {
+      id: randomUUID(),
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: 'ping',
+      status: 'complete',
+      seq: 1,
+      createdAt: 0,
+    }
+    await manager.onCompletion(conversation, message)
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    const [url] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('http://[::1]:9000/hook')
+  })
+
   it('pairs the first sender only with the one-time code and refuses everyone else', async () => {
     const generateReply = vi.fn(async () => 'reply')
     const manager = new ImBridgeManager({ db, keystore, generateReply })
@@ -123,6 +152,62 @@ describe('ImBridgeManager', () => {
     const refusal = await inbound(200, 'hi')
     expect(refusal).toMatch(/private/i)
     expect(generateReply).toHaveBeenCalledTimes(1)
+  })
+
+  it('burns the pairing code after a few wrong guesses and when it expires', async () => {
+    vi.useFakeTimers()
+    try {
+      const generateReply = vi.fn(async () => 'reply')
+      const manager = new ImBridgeManager({ db, keystore, generateReply })
+      const conversation = conv()
+      const code = manager.setTelegram({
+        token: 'bot-token',
+        conversationId: conversation.id,
+        enabled: false,
+      })
+      // enabled:false issues no code; enable to get one (no poll loop is needed
+      // here — handleInbound is called directly).
+      const status = manager.setTelegram({
+        token: 'bot-token',
+        conversationId: conversation.id,
+        enabled: true,
+      })
+      expect(code.telegramPairingCode).toBeNull()
+      const issued = status.telegramPairingCode!
+
+      const inbound = (chatId: number, text: string): Promise<string> =>
+        (
+          manager as unknown as {
+            handleInbound(chatId: number, text: string, conversationId: string): Promise<string>
+          }
+        ).handleInbound(chatId, text, conversation.id)
+
+      // Five wrong guesses invalidate the code: the attacker's next attempt with
+      // the (correct) old code no longer pairs, and a fresh code is issued.
+      for (let i = 0; i < 5; i++) {
+        expect(await inbound(999, String(i).padStart(6, '0'))).toMatch(/pairing code/i)
+      }
+      const rotated = db.settings.get().telegramBridgePairingCode
+      expect(rotated).toMatch(/^\d{6}$/)
+      expect(rotated).not.toBe(issued)
+      expect(await inbound(999, issued)).toMatch(/pairing code/i)
+      expect(db.settings.get().telegramBridgeAllowedChatId).toBeNull()
+
+      // The rotated code also expires: past the TTL it pairs nobody and rotates.
+      const live = db.settings.get().telegramBridgePairingCode!
+      vi.advanceTimersByTime(16 * 60_000)
+      expect(await inbound(999, live)).toMatch(/expired/i)
+      expect(db.settings.get().telegramBridgeAllowedChatId).toBeNull()
+      expect(db.settings.get().telegramBridgePairingCode).not.toBe(live)
+
+      // The owner reads the fresh code from the app and pairs normally.
+      const current = db.settings.get().telegramBridgePairingCode!
+      expect(await inbound(100, current)).toMatch(/linked/i)
+      expect(db.settings.get().telegramBridgeAllowedChatId).toBe(100)
+      expect(generateReply).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('drops the pinned chat and issues a new pairing code when a new bot token is set', () => {

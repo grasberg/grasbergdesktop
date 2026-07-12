@@ -13,8 +13,10 @@ export interface Migration {
   name: string
   statements: string[]
   /**
-   * Run the statements OUTSIDE a transaction. Needed for table rebuilds that
-   * toggle `PRAGMA foreign_keys` (which is a no-op inside a transaction).
+   * Run the leading/trailing PRAGMA statements OUTSIDE a transaction. Needed for
+   * table rebuilds that toggle `PRAGMA foreign_keys` (a no-op inside one). The
+   * statements between them still run in a transaction (see database.ts), so the
+   * PRAGMAs must sit at the edges of `statements`.
    */
   noTransaction?: boolean
 }

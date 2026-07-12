@@ -104,6 +104,29 @@ describe('dreamNow: applying operations', () => {
     expect(db.memories.list()).toHaveLength(2)
   })
 
+  it('drops ops for memories edited while the model was thinking', async () => {
+    const [a, b, c] = seedMemories(3)
+    // Age the snapshot so the edits made during the call are unambiguously newer.
+    db.driver.run('UPDATE memories SET updated_at = ?', [Date.now() - 60_000])
+    const generate = vi.fn(async () => {
+      db.memories.update(a.id, { content: 'edited by the user mid-call' })
+      db.memories.update(b.id, { content: 'also edited mid-call' })
+      return JSON.stringify({
+        operations: [
+          { action: 'update', id: a.id, title: 'fact-0', content: 'stale rewrite' },
+          { action: 'delete', id: b.id },
+          { action: 'update', id: c.id, title: 'fact-2', content: 'fresh rewrite' },
+        ],
+      })
+    })
+
+    const result = await new DreamingService({ db, generate }).dreamNow(true)
+    expect(result).toMatchObject({ ran: true, updated: 1, removed: 0, created: 0 })
+    expect(db.memories.getById(a.id)?.content).toBe('edited by the user mid-call')
+    expect(db.memories.getById(b.id)?.content).toBe('also edited mid-call')
+    expect(db.memories.getById(c.id)?.content).toBe('fresh rewrite')
+  })
+
   it('rejects an unusable response without touching memories (but stamps the run)', async () => {
     seedMemories(3)
     const { dreaming } = service(['I could not produce JSON, sorry.'])

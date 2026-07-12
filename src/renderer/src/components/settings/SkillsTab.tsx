@@ -149,7 +149,9 @@ export default function SkillsTab(): ReactElement {
         </div>
       </header>
 
-      {formOpen ? <SkillForm editing={editing} onDone={closeForm} /> : null}
+      {formOpen ? (
+        <SkillForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />
+      ) : null}
 
       {!loaded ? (
         <p className="field-hint">Loading…</p>

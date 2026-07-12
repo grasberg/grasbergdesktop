@@ -25,6 +25,34 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+/** A connector that hangs (as a real stdio spawn does) until `release()` is called. */
+function slowConnector(): {
+  connector: McpConnector
+  close: ReturnType<typeof vi.fn>
+  started: Promise<void>
+  release: () => void
+} {
+  const close = vi.fn(async () => undefined)
+  let release = (): void => undefined
+  let markStarted = (): void => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve
+  })
+  const connector: McpConnector = async () => {
+    markStarted()
+    await gate
+    return {
+      listTools: async () => [{ name: 'echo', description: '', inputSchema: {} }],
+      callTool: async () => ({ content: 'ok', isError: false }),
+      close,
+    }
+  }
+  return { connector, close, started, release }
+}
+
 function makeManager(connector: McpConnector): McpManager {
   return new McpManager({
     db,
@@ -115,6 +143,38 @@ describe('McpManager', () => {
     const runtime = manager.getRuntime()
     expect(runtime[0].status).toBe('error')
     expect(runtime[0].error).toContain('spawn failed')
+    expect(manager.listToolDefinitions(() => true)).toHaveLength(0)
+  })
+
+  it('closes a connection whose server was removed while it was coming up', async () => {
+    // remove() lands while the connector is still spawning the child: the
+    // resulting connection belongs to no tracked state, so connect() must close
+    // it — otherwise the stdio child outlives the app as a zombie.
+    const { connector, close, started, release } = slowConnector()
+    const manager = makeManager(connector)
+
+    const created = manager.create({ name: 'Slow', transport: 'stdio', command: 'x', enabled: true })
+    await started
+    const removed = manager.remove(db.mcpServers.list()[0].id)
+    release()
+    await Promise.all([created, removed])
+
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(manager.listToolDefinitions(() => true)).toHaveLength(0)
+  })
+
+  it('closes a connection whose server was disabled while it was coming up', async () => {
+    const { connector, close, started, release } = slowConnector()
+    const manager = makeManager(connector)
+
+    const created = manager.create({ name: 'Slow', transport: 'stdio', command: 'x', enabled: true })
+    await started
+    const disabled = manager.setEnabled(db.mcpServers.list()[0].id, false)
+    release()
+    await Promise.all([created, disabled])
+
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(manager.getRuntime()[0].status).toBe('disconnected')
     expect(manager.listToolDefinitions(() => true)).toHaveLength(0)
   })
 

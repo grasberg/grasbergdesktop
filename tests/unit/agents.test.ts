@@ -250,6 +250,110 @@ it('runDelegate offers AND executes a profile custom tool whose id differs from 
   expect(toolMsg?.content).not.toContain('not available')
 })
 
+// A scheduled task grants tools by DEFINITION id; the headless approval callback
+// sees the WIRE name, which differs for custom tools.
+it('generateForWorkflow honours a pre-approved custom tool granted by its definition id', async () => {
+  const provider = db.providers.create({
+    id: randomUUID(),
+    type: 'openai-compatible',
+    label: 'P',
+    baseUrl: 'https://x.example/v1',
+    defaultModelId: 'm',
+    enabled: true,
+  })
+  db.providers.setKeyRow(
+    provider.id,
+    'insecure:' + Buffer.from('sk-w', 'utf8').toString('base64'),
+    'sk-…w'
+  )
+
+  const adapter = new CallNamedToolAdapter('my_api')
+  const customTool: ToolDefinition = {
+    id: 'custom:abc',
+    name: 'my_api',
+    description: 'my api',
+    parameters: { type: 'object', properties: {} },
+    risk: 'safe',
+    builtin: false,
+    enabled: true,
+  }
+  // Mirrors the real executor's 'ask' path: the answer decides whether it runs.
+  const execute = vi.fn(async (toolCall, ctx: ToolExecuteContext) => {
+    const answer = await ctx.approval({
+      streamId: ctx.streamId ?? '',
+      conversationId: ctx.conversation.id,
+      toolCall,
+      risk: 'safe',
+    })
+    return answer.approved ? 'API OK' : 'User declined this tool call.'
+  })
+  const tools: ChatToolSystem = {
+    registry: { listEnabledDefinitions: () => [customTool] },
+    executor: { execute },
+    broker: { request: vi.fn(async () => ({ approved: false, scope: 'once' as const })) },
+  }
+  const service = new ChatService(db, () => undefined, { tools, resolveAdapter: () => adapter })
+
+  const result = await service.generateForWorkflow('do it', provider.id, 'm', {
+    useTools: true,
+    approvedToolIds: ['custom:abc'],
+  })
+
+  expect(result).toBe('Done.')
+  const toolMsg = adapter.chatRequests[1].messages.find((m) => m.role === 'tool')
+  expect(toolMsg?.content).toBe('API OK')
+})
+
+it('generateForWorkflow declines a tool the task did not pre-approve', async () => {
+  const provider = db.providers.create({
+    id: randomUUID(),
+    type: 'openai-compatible',
+    label: 'P',
+    baseUrl: 'https://x.example/v1',
+    defaultModelId: 'm',
+    enabled: true,
+  })
+  db.providers.setKeyRow(
+    provider.id,
+    'insecure:' + Buffer.from('sk-w2', 'utf8').toString('base64'),
+    'sk-…w2'
+  )
+
+  const adapter = new CallNamedToolAdapter('my_api')
+  const customTool: ToolDefinition = {
+    id: 'custom:abc',
+    name: 'my_api',
+    description: 'my api',
+    parameters: { type: 'object', properties: {} },
+    risk: 'safe',
+    builtin: false,
+    enabled: true,
+  }
+  const execute = vi.fn(async (toolCall, ctx: ToolExecuteContext) => {
+    const answer = await ctx.approval({
+      streamId: ctx.streamId ?? '',
+      conversationId: ctx.conversation.id,
+      toolCall,
+      risk: 'safe',
+    })
+    return answer.approved ? 'API OK' : 'User declined this tool call.'
+  })
+  const tools: ChatToolSystem = {
+    registry: { listEnabledDefinitions: () => [customTool] },
+    executor: { execute },
+    broker: { request: vi.fn(async () => ({ approved: false, scope: 'once' as const })) },
+  }
+  const service = new ChatService(db, () => undefined, { tools, resolveAdapter: () => adapter })
+
+  await service.generateForWorkflow('do it', provider.id, 'm', {
+    useTools: true,
+    approvedToolIds: ['web_search'],
+  })
+
+  const toolMsg = adapter.chatRequests[1].messages.find((m) => m.role === 'tool')
+  expect(toolMsg?.content).toContain('declined')
+})
+
 it('runDelegate with an unknown agent name lists the available agents', async () => {
   const provider = db.providers.create({
     id: randomUUID(),

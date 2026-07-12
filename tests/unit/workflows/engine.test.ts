@@ -74,6 +74,31 @@ describe('runWorkflow', () => {
     expect(res.nodeOutputs.h).toContain('pong')
   })
 
+  it('caps a huge http_request body instead of buffering it whole', async () => {
+    const CHUNK = 64 * 1024
+    let pulled = 0
+    // An endless body: reading it in full would never finish.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1
+        controller.enqueue(new Uint8Array(CHUNK).fill(0x61))
+      },
+    })
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 200 }))
+    const graph: WorkflowGraph = {
+      nodes: [node('h', 'http_request', { method: 'GET', url: 'https://api.example.com/big' })],
+      edges: [],
+    }
+    const res = await runWorkflow(graph, {
+      runAgent: async () => '',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    expect(res.ok).toBe(true)
+    expect(res.nodeOutputs.h.slice('HTTP 200\n'.length)).toHaveLength(256 * 1024)
+    // Stopped at the cap (256 KB = 4 chunks) rather than draining the stream.
+    expect(pulled).toBeLessThanOrEqual(6)
+  })
+
   it('reports a cycle as a failed run', async () => {
     const graph: WorkflowGraph = {
       nodes: [node('a', 'template', {}), node('b', 'template', {})],

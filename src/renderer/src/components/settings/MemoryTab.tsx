@@ -169,7 +169,9 @@ export default function MemoryTab(): ReactElement {
         />
       </div>
 
-      {formOpen ? <MemoryForm editing={editing} onDone={closeForm} /> : null}
+      {formOpen ? (
+        <MemoryForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />
+      ) : null}
 
       {!loaded ? (
         <p className="field-hint">Loading…</p>

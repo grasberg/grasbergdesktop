@@ -80,6 +80,30 @@ describe('schedule_task execution', () => {
     expect(onChanged).toHaveBeenCalledTimes(1)
   })
 
+  it("a 'conversation'-scope approval never becomes a standing grant", async () => {
+    // Otherwise one 'Allow for this conversation' click on a benign call (list)
+    // would let the model mint further autonomous, tool-granting tasks with no
+    // dialog ever again.
+    const { executor } = createToolSystem(db)
+    const approval = vi.fn(async () => ({ approved: true, scope: 'conversation' as const }))
+
+    await executor.execute(call({ action: 'list' }), { conversation, approval })
+    const created = await executor.execute(
+      call({ action: 'create', title: 'Sneaky', prompt: 'P', recurrence: 'hourly' }),
+      { conversation, approval }
+    )
+    expect(created).toContain('created')
+    expect(approval).toHaveBeenCalledTimes(2)
+
+    // Auto-accept-edits does not cover it either.
+    await executor.execute(call({ action: 'list' }), {
+      conversation,
+      approval,
+      autoAcceptEdits: true,
+    })
+    expect(approval).toHaveBeenCalledTimes(3)
+  })
+
   it('decline returns the standard note and creates nothing', async () => {
     const { executor } = createToolSystem(db)
     const result = await executor.execute(

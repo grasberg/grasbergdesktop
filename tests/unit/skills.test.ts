@@ -33,6 +33,15 @@ describe('skills repository', () => {
     expect(db.skills.listEnabled().map((s) => s.name)).toEqual(['b'])
   })
 
+  it('countEnabled counts enabled skills without loading them', () => {
+    expect(db.skills.countEnabled()).toBe(0)
+    const a = db.skills.create({ name: 'a', content: 'x' })
+    db.skills.create({ name: 'b', content: 'y' })
+    expect(db.skills.countEnabled()).toBe(2)
+    db.skills.update(a.id, { enabled: false })
+    expect(db.skills.countEnabled()).toBe(1)
+  })
+
   it('getByName matches case-insensitively', () => {
     db.skills.create({ name: 'Commit-Helper', content: 'x' })
     expect(db.skills.getByName('commit-helper')?.name).toBe('Commit-Helper')

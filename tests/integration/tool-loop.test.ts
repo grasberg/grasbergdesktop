@@ -377,4 +377,171 @@ describe('ChatService tool loop (real db, scripted adapter)', () => {
       content: 'where exactly?',
     })
   })
+
+  it('persists an already-executed tool call when Stop lands mid-round', async () => {
+    const conversation = seedProviderAndConversation()
+
+    // One round proposing two calls; the user stops while the first is settling.
+    class TwoCallAdapter implements ProviderAdapter {
+      readonly type = 'openai-compatible' as const
+      async *chatStream(): AsyncGenerator<AdapterStreamEvent> {
+        for (const id of ['call-1', 'call-2']) {
+          yield {
+            type: 'tool_call',
+            toolCall: {
+              id,
+              name: 'file_search',
+              arguments: '{"query":"needle"}',
+              status: 'proposed',
+            },
+          }
+        }
+        yield { type: 'finish', reason: 'tool_calls' }
+      }
+      async chat(): Promise<AdapterChatResult> {
+        throw new Error('not used in this test')
+      }
+      async listModels(): Promise<ModelInfo[]> {
+        return []
+      }
+      async testConnection(): Promise<TestConnectionResult> {
+        return { ok: true, message: 'ok' }
+      }
+    }
+
+    let service!: ChatService
+    let resolveDone: (env: StreamEventEnvelope) => void = () => undefined
+    const done = new Promise<StreamEventEnvelope>((resolve) => {
+      resolveDone = resolve
+    })
+    // The first call's side effect happens, then Stop arrives before the second.
+    const execute = vi.fn(async (toolCall: ToolCallRecord) => {
+      if (toolCall.id === 'call-1') service.stopConversation(conversation.id)
+      return TOOL_RESULT
+    })
+    service = new ChatService(
+      db,
+      (channel, payload) => {
+        if (channel !== CHANNELS.streamEvent) return
+        const envelope = payload as StreamEventEnvelope
+        if (envelope.event.type === 'done' || envelope.event.type === 'error') {
+          resolveDone(envelope)
+        }
+      },
+      {
+        tools: {
+          registry: { listEnabledDefinitions: () => [fileSearchDefinition] },
+          executor: { execute },
+          broker: { request: async () => ({ approved: true, scope: 'once' as const }) },
+        },
+        resolveAdapter: () => new TwoCallAdapter(),
+      }
+    )
+
+    const start = await service.send({ conversationId: conversation.id, content: 'find it' })
+    const doneEnvelope = await done
+    if (doneEnvelope.event.type !== 'done') throw new Error('expected done event')
+
+    // Only the first call ran…
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(doneEnvelope.event.finishReason).toBe('aborted')
+
+    // …and it survives on the persisted message, so the next turn's history
+    // tells the model the side effect already happened.
+    const stored = db.messages
+      .listByConversation(conversation.id)
+      .find((m) => m.id === start.assistantMessage.id) as Message
+    expect(stored.status).toBe('stopped')
+    expect(stored.toolCalls).toHaveLength(1)
+    expect(stored.toolCalls![0]).toMatchObject({
+      id: 'call-1',
+      result: TOOL_RESULT,
+      status: 'done',
+    })
+  })
+})
+
+describe('ChatService.generateHeadless (IM bridge)', () => {
+  it('does not advertise tools that the headless request never sends', async () => {
+    const conversation = seedProviderAndConversation()
+
+    class HeadlessAdapter implements ProviderAdapter {
+      readonly type = 'openai-compatible' as const
+      readonly chatRequests: AdapterChatRequest[] = []
+      // eslint-disable-next-line require-yield
+      async *chatStream(): AsyncGenerator<AdapterStreamEvent> {
+        throw new Error('not used in this test')
+      }
+      async chat(req: AdapterChatRequest): Promise<AdapterChatResult> {
+        this.chatRequests.push({ ...req, messages: req.messages.map((m) => ({ ...m })) })
+        return { text: 'Bridge reply.', toolCalls: [], finishReason: 'stop' }
+      }
+      async listModels(): Promise<ModelInfo[]> {
+        return []
+      }
+      async testConnection(): Promise<TestConnectionResult> {
+        return { ok: true, message: 'ok' }
+      }
+    }
+
+    const adapter = new HeadlessAdapter()
+    const service = new ChatService(db, () => undefined, {
+      tools: {
+        registry: { listEnabledDefinitions: () => [fileSearchDefinition] },
+        executor: { execute: async () => 'unused' },
+        broker: { request: async () => ({ approved: false, scope: 'once' as const }) },
+      },
+      resolveAdapter: () => adapter,
+    })
+
+    const reply = await service.generateHeadless(conversation.id, 'hello from telegram')
+    expect(reply).toBe('Bridge reply.')
+
+    const request = adapter.chatRequests[0]
+    expect(request.tools).toBeUndefined()
+    // The prompt must match the wire: neither the tool list nor the
+    // manual-instructions fallback, since the model gets no tools at all.
+    const system = request.messages
+      .filter((m) => m.role === 'system' && typeof m.content === 'string')
+      .map((m) => m.content as string)
+      .join('\n')
+    expect(system).not.toContain('You can call tools')
+    expect(system).not.toContain('file_search')
+  })
+
+  it('broadcasts conversationsChanged with the conversation id so an open chat refreshes', async () => {
+    const conversation = seedProviderAndConversation()
+
+    class HeadlessAdapter implements ProviderAdapter {
+      readonly type = 'openai-compatible' as const
+      // eslint-disable-next-line require-yield
+      async *chatStream(): AsyncGenerator<AdapterStreamEvent> {
+        throw new Error('not used in this test')
+      }
+      async chat(): Promise<AdapterChatResult> {
+        return { text: 'Bridge reply.', toolCalls: [], finishReason: 'stop' }
+      }
+      async listModels(): Promise<ModelInfo[]> {
+        return []
+      }
+      async testConnection(): Promise<TestConnectionResult> {
+        return { ok: true, message: 'ok' }
+      }
+    }
+
+    const changed: unknown[] = []
+    const service = new ChatService(
+      db,
+      (channel, payload) => {
+        if (channel === CHANNELS.conversationsChanged) changed.push(payload)
+      },
+      { resolveAdapter: () => new HeadlessAdapter() }
+    )
+
+    await service.generateHeadless(conversation.id, 'hello from telegram')
+
+    // The renderer's open-conversation refresh is gated on this id matching the
+    // open conversation; an empty payload leaves the open chat stale.
+    expect(changed).toContainEqual({ conversationId: conversation.id })
+  })
 })

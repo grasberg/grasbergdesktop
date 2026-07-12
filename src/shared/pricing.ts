@@ -44,6 +44,7 @@ export const MODEL_PRICING: Record<ProviderType, Record<string, ModelPricing>> =
     'glm-4-plus': { inputPerMTok: 0.7, outputPerMTok: 0.7 },
   },
   minimax: {
+    'MiniMax-M3': { inputPerMTok: 0.3, outputPerMTok: 1.2 },
     'MiniMax-M2': { inputPerMTok: 0.3, outputPerMTok: 1.2 },
     'MiniMax-M1': { inputPerMTok: 0.4, outputPerMTok: 2.2 },
     'MiniMax-Text-01': { inputPerMTok: 0.2, outputPerMTok: 1.1 },
@@ -55,6 +56,7 @@ export const MODEL_PRICING: Record<ProviderType, Record<string, ModelPricing>> =
     'gpt-4.1': { inputPerMTok: 2.0, outputPerMTok: 8.0, cachedInputPerMTok: 0.5 },
     'gpt-4.1-mini': { inputPerMTok: 0.4, outputPerMTok: 1.6, cachedInputPerMTok: 0.1 },
     'o4-mini': { inputPerMTok: 1.1, outputPerMTok: 4.4, cachedInputPerMTok: 0.275 },
+    'gpt-5.5': { inputPerMTok: 5.0, outputPerMTok: 25.0, cachedInputPerMTok: 0.5 },
     'gpt-5': { inputPerMTok: 5.0, outputPerMTok: 25.0 },
   },
   // Z.ai Coding Plan is a flat subscription — per-token cost isn't meaningful.

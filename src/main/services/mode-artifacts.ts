@@ -37,30 +37,62 @@ const WORKSPACE_ITEM_KINDS: ReadonlySet<string> = new Set([
 
 const WORKSPACE_ITEM_STATUSES: ReadonlySet<string> = new Set(['todo', 'doing', 'done'])
 
-/**
- * Matches a fenced block whose opening fence is ```<tag> alone on its line and
- * whose closing ``` starts a line. Group 1 = everything between the fences
- * (header line + body, including the body's trailing newline).
- */
-function blockRegex(tag: string): RegExp {
-  return new RegExp('^```' + tag + '[ \\t]*\\r?\\n([\\s\\S]*?)^```[ \\t]*$', 'gm')
-}
+/** Any line that opens or closes a fence: group 1 = backticks, group 2 = info string. */
+const FENCE_LINE = /^(`{3,})(.*)$/
 
 interface RawBlock {
   header: Record<string, unknown>
   body: string
 }
 
-/** Splits a block into its JSON header line and raw body; null when malformed. */
+/**
+ * Splits `content` into the fenced blocks tagged `tag`, each as its JSON header
+ * line + raw body. Fences follow CommonMark: the opening fence is ```<tag>
+ * alone on its line (four or more backticks are allowed) and only a fence at
+ * least as long closes it, so a body containing its own ```lang code block —
+ * an artifact's file content very often does — is passed through whole instead
+ * of being cut at the nested block's bare closing fence. Unterminated and
+ * malformed-header blocks are skipped.
+ */
 function parseRawBlocks(content: string, tag: string): RawBlock[] {
   const blocks: RawBlock[] = []
-  const re = blockRegex(tag)
-  let match: RegExpExecArray | null
-  while ((match = re.exec(content)) !== null) {
-    const inner = match[1]
-    const newlineIdx = inner.indexOf('\n')
-    const headerLine = (newlineIdx === -1 ? inner : inner.slice(0, newlineIdx)).trim()
-    const body = newlineIdx === -1 ? '' : inner.slice(newlineIdx + 1)
+  const openRe = new RegExp('^(`{3,})' + tag + '[ \\t]*$')
+  // Line starts, so a body can be sliced out of `content` byte-for-byte.
+  const lines = content.split('\n')
+  const starts: number[] = []
+  let offset = 0
+  for (const line of lines) {
+    starts.push(offset)
+    offset += line.length + 1
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const open = openRe.exec(lines[i].replace(/\r$/, ''))
+    if (!open) continue
+    const fence = open[1].length
+
+    // Scan for this block's closing fence, stepping over nested fenced blocks.
+    let nested = 0
+    let close = -1
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = FENCE_LINE.exec(lines[j].replace(/\r$/, ''))
+      if (!line) continue
+      const ticks = line[1].length
+      const info = line[2].trim()
+      if (nested > 0) {
+        if (info === '' && ticks >= nested) nested = 0
+      } else if (info === '' && ticks >= fence) {
+        close = j
+        break
+      } else if (info !== '' && !info.includes('`')) {
+        nested = ticks
+      }
+    }
+    if (close === -1) continue // unterminated — skip the block
+
+    const headerLine = close > i + 1 ? lines[i + 1].trim() : ''
+    const body = close > i + 1 ? content.slice(starts[i + 2], starts[close]) : ''
+    i = close
     let header: unknown
     try {
       header = JSON.parse(headerLine)

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { PROVIDER_TYPES } from '../../src/shared/catalog'
 import { estimateCost, findPricing, formatCost, MODEL_PRICING } from '../../src/shared/pricing'
 
 describe('findPricing', () => {
@@ -7,6 +8,19 @@ describe('findPricing', () => {
     expect(findPricing('deepseek', 'no-such-model')).toBeUndefined()
     // Custom providers never have a price.
     expect(findPricing('openai-compatible', 'anything')).toBeUndefined()
+  })
+
+  // A new provider starts on its family default, and an unpriced model is
+  // silently excluded from auto-routing — so a catalog default bump must never
+  // outrun this table. Families with an empty table (flat-rate, custom) exempt.
+  it('prices every family default model', () => {
+    for (const meta of Object.values(PROVIDER_TYPES)) {
+      if (Object.keys(MODEL_PRICING[meta.type]).length === 0) continue
+      expect(
+        findPricing(meta.type, meta.defaultModelId),
+        `${meta.type} default '${meta.defaultModelId}' has no pricing entry`
+      ).toBeDefined()
+    }
   })
 
   it('covers every model with sane, non-negative numbers', () => {

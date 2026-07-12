@@ -486,7 +486,9 @@ export default function ToolsTab(): ReactElement {
         approval before every call.
       </p>
 
-      {formOpen ? <CustomToolForm editing={editing} onDone={closeForm} /> : null}
+      {formOpen ? (
+        <CustomToolForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />
+      ) : null}
 
       {customInfos.length > 0 ? (
         <table className="tools-table">

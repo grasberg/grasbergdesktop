@@ -11,6 +11,7 @@
 
 import { safeStorage } from 'electron'
 import type { AppDatabase } from '../db/database'
+import type { ToolSecretScope } from '../db/repositories/secrets'
 import { ProviderError } from '../providers/errors'
 import { maskKey } from '../providers/redact'
 
@@ -62,10 +63,21 @@ export function decryptKey(stored: string): string {
   }
 }
 
+/** One insecure secret row of `tool_secrets` (see the secrets repository). */
+interface InsecureSecretRow {
+  scope: ToolSecretScope
+  owner_id: string
+  name: string
+  encrypted_value: string
+}
+
 /**
- * Upgrades any keys previously stored with the insecure fallback prefix to
- * proper safeStorage encryption, now that OS encryption may be available.
- * Called once at startup. Returns the number of keys upgraded.
+ * Upgrades any secrets previously stored with the insecure fallback prefix to
+ * proper safeStorage encryption, now that OS encryption may be available. This
+ * covers EVERY store that holds keystore ciphertext — provider keys, OAuth
+ * tokens, and the tool_secrets rows behind MCP headers, IM bot tokens and
+ * custom-tool secret headers — so nothing is left behind in the weaker form.
+ * Called once at startup. Returns the number of secrets upgraded.
  *
  * If OS encryption is still unavailable (or a row cannot be upgraded), the
  * in-session insecure flag is set so encryptionAvailable() reports honestly
@@ -76,31 +88,68 @@ export function reencryptInsecureKeys(db: AppDatabase): number {
   let upgraded = 0
   let remainingInsecure = 0
 
-  for (const provider of db.providers.list()) {
-    const stored = db.providers.getEncryptedKey(provider.id)
-    if (!stored || !stored.startsWith(INSECURE_PREFIX)) continue
-
-    if (!available) {
-      remainingInsecure += 1
-      continue
-    }
-
+  /** Re-encrypts one insecure value; null when it has to stay as it is. */
+  const upgrade = (stored: string): { encryptedBase64: string; plain: string } | null => {
+    if (!available) return null
     let plain: string
     try {
       plain = Buffer.from(stored.slice(INSECURE_PREFIX.length), 'base64').toString('utf8')
     } catch {
+      return null
+    }
+    try {
+      return { encryptedBase64: safeStorage.encryptString(plain).toString('base64'), plain }
+    } catch {
+      // Encryption backend failed at runtime — leave the insecure row in place.
+      return null
+    }
+  }
+
+  for (const provider of db.providers.list()) {
+    const stored = db.providers.getEncryptedKey(provider.id)
+    if (stored?.startsWith(INSECURE_PREFIX)) {
+      const next = upgrade(stored)
+      if (next) {
+        db.providers.setKeyRow(provider.id, next.encryptedBase64, maskKey(next.plain))
+        upgraded += 1
+      } else {
+        remainingInsecure += 1
+      }
+    }
+
+    const oauth = db.providers.getOAuthRow(provider.id)
+    if (oauth) {
+      const access = oauth.encryptedAccess.startsWith(INSECURE_PREFIX)
+        ? upgrade(oauth.encryptedAccess)
+        : null
+      const refresh = oauth.encryptedRefresh?.startsWith(INSECURE_PREFIX)
+        ? upgrade(oauth.encryptedRefresh)
+        : null
+      if (access || refresh) {
+        db.providers.setOAuthRow({
+          ...oauth,
+          encryptedAccess: access?.encryptedBase64 ?? oauth.encryptedAccess,
+          encryptedRefresh: refresh?.encryptedBase64 ?? oauth.encryptedRefresh,
+        })
+        upgraded += (access ? 1 : 0) + (refresh ? 1 : 0)
+      }
+      if (oauth.encryptedAccess.startsWith(INSECURE_PREFIX) && !access) remainingInsecure += 1
+      if (oauth.encryptedRefresh?.startsWith(INSECURE_PREFIX) && !refresh) remainingInsecure += 1
+    }
+  }
+
+  const insecureSecrets = db.driver.all<InsecureSecretRow>(
+    `SELECT scope, owner_id, name, encrypted_value FROM tool_secrets WHERE encrypted_value LIKE ?`,
+    [`${INSECURE_PREFIX}%`]
+  )
+  for (const row of insecureSecrets) {
+    const next = upgrade(row.encrypted_value)
+    if (!next) {
       remainingInsecure += 1
       continue
     }
-
-    try {
-      const encryptedBase64 = safeStorage.encryptString(plain).toString('base64')
-      db.providers.setKeyRow(provider.id, encryptedBase64, maskKey(plain))
-      upgraded += 1
-    } catch {
-      // Encryption backend failed at runtime — leave the insecure row in place.
-      remainingInsecure += 1
-    }
+    db.secrets.set(row.scope, row.owner_id, row.name, next.encryptedBase64, maskKey(next.plain))
+    upgraded += 1
   }
 
   if (remainingInsecure > 0) insecureFallbackUsed = true

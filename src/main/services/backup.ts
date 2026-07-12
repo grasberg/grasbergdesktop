@@ -23,7 +23,7 @@ import {
   type Message,
   type WorkflowGraph,
 } from '@shared/types'
-import { chatParamsSchema, settingsPatchSchema } from '@shared/schemas'
+import { chatParamsSchema, settingsPatchSchema, workflowGraphSchema } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 
 export const BACKUP_FORMAT = 'grasberg-backup'
@@ -67,11 +67,17 @@ export function buildBackup(db: AppDatabase): BackupFile {
       messages: db.messages.listByConversation(conversation.id),
     })
   }
+  // The security-sensitive keys hold bearer secrets (webhook URL, Telegram
+  // pairing code) and capability switches; import never applies them anyway, so
+  // a plaintext backup must not carry them out of the app in the first place.
+  const settings = Object.fromEntries(
+    Object.entries(db.settings.get()).filter(([key]) => !SECURITY_SENSITIVE_SETTING_KEYS.has(key))
+  )
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     exportedAt: Date.now(),
-    settings: { ...db.settings.get() },
+    settings,
     memories: db.memories.list().map((m) => ({ title: m.title, content: m.content })),
     skills: db.skills.list().map((s) => ({
       name: s.name,
@@ -135,10 +141,15 @@ const backupMessageSchema = z
   })
   .passthrough()
 
+// Ids are kept verbatim on import and a Work conversation's id becomes a
+// directory name under the workspaces base — so only the charset app-generated
+// ids actually use is accepted, never a path traversal segment.
+const BACKUP_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
 // Accepts pre-v3 backups' legacy modes; anything non-chat imports as 'work'.
 const conversationItemSchema = z
   .object({
-    id: z.string().min(1).max(100),
+    id: z.string().min(1).max(100).regex(BACKUP_ID_PATTERN),
     mode: z.enum(['chat', 'work', 'cowork', 'code', 'write', 'design']),
     title: z.string().max(500),
     providerId: z.string().max(100).nullable().optional(),
@@ -157,7 +168,9 @@ const promptItemSchema = z.object({
 
 const workflowItemSchema = z.object({
   name: z.string().trim().min(1).max(200),
-  graph: z.object({ nodes: z.array(z.unknown()), edges: z.array(z.unknown()) }).passthrough(),
+  // Same strict graph schema the IPC save path enforces: an imported graph goes
+  // straight into the editor and the engine.
+  graph: workflowGraphSchema,
 })
 
 // JSON-column payloads travel from the backup straight into the renderer and
@@ -309,62 +322,63 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
       continue
     }
     try {
-      db.conversations.create({
-        id: c.id,
-        mode: c.mode === 'chat' ? 'chat' : 'work',
-        title: c.title || 'Imported chat',
-        providerId: c.providerId ?? null,
-        modelId: c.modelId ?? null,
-        systemPrompt: c.systemPrompt ?? null,
-        moaPresetId: c.moaPresetId ?? null,
-      })
-      const params = parseObjectOf(chatParamsSchema, c.params)
-      if (params && Object.keys(params).length > 0) {
-        db.conversations.update(c.id, { params })
-      }
-      for (const rawMessage of c.messages ?? []) {
-        const msg = backupMessageSchema.safeParse(rawMessage)
-        if (!msg.success) {
-          summary.skippedItems += 1
-          continue
-        }
-        const extras = rawMessage as Record<string, unknown>
-        const m = msg.data
-        db.messages.insert({
-          id: m.id,
-          conversationId: c.id,
-          role: m.role,
-          content: m.content,
-          reasoning: m.reasoning,
-          // A row exported mid-generation can never resume here.
-          status: m.status === 'streaming' ? 'stopped' : (m.status ?? 'complete'),
-          providerId: m.providerId,
-          modelId: m.modelId,
-          attachments: parseArrayOf(attachmentItemSchema, extras.attachments) as
-            | Message['attachments']
-            | undefined,
-          toolCalls: parseArrayOf(toolCallItemSchema, extras.toolCalls) as
-            | Message['toolCalls']
-            | undefined,
-          usage: parseObjectOf(usageItemSchema, extras.usage),
-          moaReferences: parseArrayOf(moaReferenceItemSchema, extras.moaReferences) as
-            | Message['moaReferences']
-            | undefined,
-          compare: parseObjectOf(compareItemSchema, extras.compare),
-          error: parseObjectOf(errorItemSchema, extras.error) as Message['error'] | undefined,
-          seq: m.seq,
-          createdAt: m.createdAt ?? Date.now(),
+      // One transaction per conversation: a failure (or a crash mid-import)
+      // leaves no half-imported row behind, so a re-import retries it cleanly
+      // instead of skipping it — with its transcript truncated — forever.
+      let skippedMessages = 0
+      db.driver.transaction(() => {
+        skippedMessages = 0
+        db.conversations.create({
+          id: c.id,
+          mode: c.mode === 'chat' ? 'chat' : 'work',
+          title: c.title || 'Imported chat',
+          providerId: c.providerId ?? null,
+          modelId: c.modelId ?? null,
+          systemPrompt: c.systemPrompt ?? null,
+          moaPresetId: c.moaPresetId ?? null,
         })
-      }
+        const params = parseObjectOf(chatParamsSchema, c.params)
+        if (params && Object.keys(params).length > 0) {
+          db.conversations.update(c.id, { params })
+        }
+        for (const rawMessage of c.messages ?? []) {
+          const msg = backupMessageSchema.safeParse(rawMessage)
+          if (!msg.success) {
+            skippedMessages += 1
+            continue
+          }
+          const extras = rawMessage as Record<string, unknown>
+          const m = msg.data
+          db.messages.insert({
+            id: m.id,
+            conversationId: c.id,
+            role: m.role,
+            content: m.content,
+            reasoning: m.reasoning,
+            // A row exported mid-generation can never resume here.
+            status: m.status === 'streaming' ? 'stopped' : (m.status ?? 'complete'),
+            providerId: m.providerId,
+            modelId: m.modelId,
+            attachments: parseArrayOf(attachmentItemSchema, extras.attachments) as
+              | Message['attachments']
+              | undefined,
+            toolCalls: parseArrayOf(toolCallItemSchema, extras.toolCalls) as
+              | Message['toolCalls']
+              | undefined,
+            usage: parseObjectOf(usageItemSchema, extras.usage),
+            moaReferences: parseArrayOf(moaReferenceItemSchema, extras.moaReferences) as
+              | Message['moaReferences']
+              | undefined,
+            compare: parseObjectOf(compareItemSchema, extras.compare),
+            error: parseObjectOf(errorItemSchema, extras.error) as Message['error'] | undefined,
+            seq: m.seq,
+            createdAt: m.createdAt ?? Date.now(),
+          })
+        }
+      })
+      summary.skippedItems += skippedMessages
       summary.conversationsImported += 1
     } catch {
-      // Roll the half-imported conversation back (messages cascade) so a
-      // re-import can retry it cleanly instead of being skipped forever.
-      try {
-        db.conversations.remove(c.id)
-      } catch {
-        // Best-effort rollback; the import continues either way.
-      }
       summary.skippedItems += 1
     }
   }

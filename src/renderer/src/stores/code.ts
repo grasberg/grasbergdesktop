@@ -166,8 +166,12 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
         tree: samePath ? get().tree : null,
         selectedPaths: samePath ? get().selectedPaths : [],
         openFile: null,
+        // Another project's review queue must never stay on screen: the panel
+        // would apply/reject changes belonging to a project that isn't open.
+        ...(samePath ? {} : { changes: [], allChanges: [], gitStatus: null }),
       })
       await Promise.all([get().loadTree(), get().loadChanges(), get().loadGitStatus()])
+      if (get().changesScope === 'all') void get().loadAllChanges()
     } catch (e) {
       if (token !== loadToken) return
       toastError(e, 'Loading the project')

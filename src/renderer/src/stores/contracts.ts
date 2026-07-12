@@ -143,6 +143,11 @@ export interface ChatStoreState {
   }): Promise<void>
   /** Wired once at app start to window.uld.chat.onStreamEvent. */
   handleStreamEvent(envelope: StreamEventEnvelope): void
+  /**
+   * Re-pulls a conversation main wrote to outside a stream (IM-bridge reply,
+   * compaction). No-ops unless it is the open, non-streaming conversation.
+   */
+  handleConversationsChanged(conversationId: string): void
   clearError(): void
 }
 

@@ -120,6 +120,31 @@ describe('OpenAICompatibleAdapter.chat (non-streaming)', () => {
     expect(result.finishReason).toBe('stop')
     expect(result.toolCalls).toEqual([])
   })
+
+  it("prefers 'tool_calls' when a quirky server returns tool calls with finish_reason 'stop'", async () => {
+    const mock = makeFetchSequence(
+      makeJsonResponse(200, {
+        id: 'cmpl-1',
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                { id: 'call_1', type: 'function', function: { name: 'f', arguments: '{}' } },
+              ],
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      })
+    )
+    const result = await adapter.chat(req(), ctx(mock))
+    expect(result.toolCalls).toHaveLength(1)
+    expect(result.finishReason).toBe('tool_calls')
+  })
 })
 
 describe('OpenAICompatibleAdapter.chatStream', () => {
@@ -218,6 +243,28 @@ describe('OpenAICompatibleAdapter.chatStream', () => {
     ])
   })
 
+  it("finishes as 'tool_calls' when tool calls stream in but finish_reason is 'stop'", async () => {
+    const mock = makeFetchSequence(
+      makeSSEResponse([
+        sse({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: 'call_x', type: 'function', function: { name: 'f', arguments: '{}' } },
+                ],
+              },
+            },
+          ],
+        }),
+        sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+        'data: [DONE]\n\n',
+      ])
+    )
+    const events = await collect(adapter.chatStream(req({ stream: true }), ctx(mock)))
+    expect(events.at(-1)).toEqual({ type: 'finish', reason: 'tool_calls' })
+  })
+
   it("maps finish_reason 'length'", async () => {
     const mock = makeFetchSequence(
       makeSSEResponse([
@@ -306,6 +353,20 @@ describe('error normalization', () => {
     expect(err.code).toBe('server')
     expect(err.retryable).toBe(true)
     expect(err.status).toBe(500)
+  })
+
+  it('keeps Retry-After on retryable 5xx/408 so the backoff honors it', async () => {
+    const unavailable = (): Response =>
+      makeJsonResponse(503, { error: { message: 'overloaded' } }, { 'retry-after': '10' })
+    const err = await chatFailure(makeFetchSequence(unavailable, unavailable, unavailable))
+    expect(err.code).toBe('server')
+    expect(err.retryAfterSec).toBe(10)
+
+    const timedOut = (): Response =>
+      makeJsonResponse(408, { error: { message: 'too slow' } }, { 'retry-after': '3' })
+    const err408 = await chatFailure(makeFetchSequence(timedOut, timedOut, timedOut))
+    expect(err408.code).toBe('timeout')
+    expect(err408.retryAfterSec).toBe(3)
   })
 
   it("network TypeError -> 'network'", async () => {

@@ -27,7 +27,11 @@ export interface CodeRepository {
    */
   projectUpsertByPath(path: string, name: string): CodeProject
   projectForget(id: string): void
-  /** Ordered by created_at DESC (newest proposals first). */
+  /**
+   * Ordered by created_at DESC (newest proposals first), capped at the most
+   * recent 200. Listing never marshals the file bodies: newContent/oldContent
+   * are always null here — apply/revert re-read the full row via changeGet.
+   */
   changesList(projectId: string): CodeChange[]
   /** Generates the id; status starts as 'proposed'. */
   changeCreate(input: CodeChangeCreateInput): CodeChange
@@ -60,6 +64,11 @@ interface CodeChangeRow {
   created_at: number
   applied_at: number | null
 }
+
+type CodeChangeListRow = Omit<CodeChangeRow, 'new_content' | 'old_content'>
+
+/** Review-queue window — an old project accumulates changes without bound. */
+const CHANGES_LIST_LIMIT = 200
 
 function toCodeProject(row: CodeProjectRow): CodeProject {
   return {
@@ -143,11 +152,14 @@ export function createCodeRepository(driver: SqliteDriver): CodeRepository {
     },
 
     changesList(projectId) {
-      const rows = driver.all<CodeChangeRow>(
-        'SELECT * FROM code_changes WHERE project_id = ? ORDER BY created_at DESC',
-        [projectId]
+      const rows = driver.all<CodeChangeListRow>(
+        `SELECT id, project_id, conversation_id, file_path, change_type, diff,
+                status, created_at, applied_at
+           FROM code_changes WHERE project_id = ?
+          ORDER BY created_at DESC LIMIT ?`,
+        [projectId, CHANGES_LIST_LIMIT]
       )
-      return rows.map(toCodeChange)
+      return rows.map((row) => toCodeChange({ ...row, new_content: null, old_content: null }))
     },
 
     changeCreate(input) {

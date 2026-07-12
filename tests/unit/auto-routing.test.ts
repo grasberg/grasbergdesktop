@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderConfig } from '@shared/types'
+import { presetPricing } from '@shared/presets'
 import { pickAutoRouteProvider } from '../../src/main/services/chat-service'
 
 function provider(patch: Partial<ProviderConfig> & Pick<ProviderConfig, 'id' | 'type' | 'defaultModelId'>): ProviderConfig {
@@ -37,5 +38,41 @@ describe('pickAutoRouteProvider', () => {
       autoRoutingPolicy: 'highest_quality',
       autoRoutingMaxCostUsd: 0.001,
     })).toBeNull()
+  })
+
+  // A preset-backed provider is type 'openai-compatible' (empty pricing table);
+  // its price lives in the preset catalog and must still drive routing.
+  it('prices preset-backed providers from the preset catalog', () => {
+    const PRESET_ID = '302ai'
+    const PRESET_MODEL = 'claude-3-5-haiku-20241022' // 0.8 in / 4 out per MTok
+    expect(presetPricing(PRESET_ID, PRESET_MODEL)).toBeDefined()
+
+    const preset = provider({
+      id: 'preset',
+      type: 'openai-compatible',
+      defaultModelId: PRESET_MODEL,
+      presetId: PRESET_ID,
+    })
+    const withPreset = [providers[0], preset]
+
+    expect(
+      pickAutoRouteProvider(withPreset, {
+        autoRoutingPolicy: 'lowest_cost',
+        autoRoutingMaxCostUsd: null,
+      })
+    ).toBe('preset')
+    expect(
+      pickAutoRouteProvider(withPreset, {
+        autoRoutingPolicy: 'highest_quality',
+        autoRoutingMaxCostUsd: null,
+      })
+    ).toBe('expensive')
+    // Priced, so a budget it fits no longer excludes it as "unknown cost".
+    expect(
+      pickAutoRouteProvider(withPreset, {
+        autoRoutingPolicy: 'lowest_cost',
+        autoRoutingMaxCostUsd: 0.02,
+      })
+    ).toBe('preset')
   })
 })

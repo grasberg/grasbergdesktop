@@ -15,6 +15,8 @@ export interface SkillsRepository {
   list(): Skill[]
   /** Enabled skills only — what reaches the system prompt / use_skill. */
   listEnabled(): Skill[]
+  /** How many skills are enabled, without loading their content. */
+  countEnabled(): number
   getById(id: string): Skill | null
   /** Case-insensitive name lookup (models type names loosely). */
   getByName(name: string): Skill | null
@@ -103,6 +105,13 @@ export function createSkillsRepository(driver: SqliteDriver): SkillsRepository {
     listEnabled() {
       const rows = driver.all<SkillRow>(`SELECT * FROM skills WHERE enabled = 1 ${LIST_ORDER}`)
       return rows.map(toSkill)
+    },
+
+    countEnabled() {
+      const row = driver.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM skills WHERE enabled = 1'
+      )
+      return row ? row.count : 0
     },
 
     getById,

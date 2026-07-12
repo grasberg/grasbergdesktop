@@ -112,7 +112,12 @@ export class KnowledgeService {
     const trimmed = query.trim()
     if (trimmed.length === 0) return []
     const [queryVector] = await this.deps.embed(kb.providerId, kb.modelId, [trimmed])
-    const q = Float32Array.from(queryVector ?? [])
+    // Without a query vector every chunk scores 0 and the top-K would be
+    // storage order — arbitrary context presented as relevant hits.
+    if (!queryVector || queryVector.length === 0) {
+      throw new Error('The embeddings provider returned no vector for the query.')
+    }
+    const q = Float32Array.from(queryVector)
     return this.deps.db.knowledge
       .listChunks(kbId)
       .map((chunk) => ({

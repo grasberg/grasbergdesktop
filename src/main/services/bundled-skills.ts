@@ -45,6 +45,12 @@ export async function seedBundledSkills(db: AppDatabase, folder: string): Promis
       }
     }
     for (const skill of skills) {
+      // upsertByName matches on the name alone, so a name collision with a
+      // user-authored (or foreign-plugin) skill would overwrite it and adopt it
+      // into the bundle — where the reconciliation above could later delete it.
+      // Only rows this bundle already owns, or names nobody uses, are written.
+      const existing = db.skills.getByName(skill.name)
+      if (existing && existing.pluginName !== pluginName) continue
       db.skills.upsertByName({ ...skill, pluginName, sourcePath: null })
     }
     db.driver.run(

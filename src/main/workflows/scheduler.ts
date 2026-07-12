@@ -26,6 +26,8 @@ export function isDue(workflow: Workflow, now: number): boolean {
 
 export class WorkflowScheduler {
   private timer: NodeJS.Timeout | null = null
+  /** A run lasts up to WORKFLOW_RUN_TIMEOUT_MS; ticks must never overlap. */
+  private ticking = false
 
   constructor(private readonly deps: WorkflowSchedulerDeps) {}
 
@@ -38,6 +40,16 @@ export class WorkflowScheduler {
   }
 
   async tick(now = Date.now()): Promise<void> {
+    if (this.ticking) return
+    this.ticking = true
+    try {
+      await this.runDue(now)
+    } finally {
+      this.ticking = false
+    }
+  }
+
+  private async runDue(now: number): Promise<void> {
     let due: Workflow[]
     try {
       due = this.deps.db.workflows.listScheduled().filter((w) => isDue(w, now))
@@ -45,8 +57,13 @@ export class WorkflowScheduler {
       return
     }
     for (const workflow of due) {
+      // The due list is a snapshot: while an earlier workflow in it is awaited
+      // this one may already have run (lastRunAt is stamped when a run starts),
+      // so re-read the row and re-check due-ness instead of trusting the list.
+      const fresh = this.deps.db.workflows.getById(workflow.id)
+      if (!fresh || !isDue(fresh, now)) continue
       try {
-        await this.deps.runner.runById(workflow.id, 'schedule')
+        await this.deps.runner.runById(fresh.id, 'schedule')
       } catch (e) {
         this.deps.onError?.(workflow.id, e)
       }

@@ -102,6 +102,34 @@ function interpolate(
   })
 }
 
+/**
+ * Reads at most `maxBytes` of a response body, then cancels the rest — a
+ * workflow URL can point at an arbitrarily large payload, and buffering it in
+ * full would only be truncated afterwards (at main-process memory's expense).
+ */
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return (await res.text()).slice(0, maxBytes)
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let out = ''
+  let total = 0
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      out += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // The body may already be closed/errored — nothing to do.
+    }
+  }
+  return (out + decoder.decode()).slice(0, maxBytes)
+}
+
 async function runHttp(
   node: WorkflowNode,
   input: string,
@@ -124,7 +152,7 @@ async function runHttp(
       init.headers = { 'content-type': 'application/json' }
     }
     const res = await fetchImpl(parsed.toString(), init)
-    const text = (await res.text()).slice(0, HTTP_MAX_BYTES)
+    const text = await readCapped(res, HTTP_MAX_BYTES)
     return `HTTP ${res.status}\n${text}`
   } finally {
     clearTimeout(timer)

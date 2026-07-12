@@ -104,11 +104,36 @@ export function parsePorcelainStatus(raw: string): {
       untracked.push(path)
       continue
     }
-    if (x === 'R' || x === 'C') i += 1 // consume the rename/copy source record
+    // A rename/copy in EITHER column carries the source path as the next
+    // record; leaving it in the stream would parse it as a status record.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i += 1
     if (x !== ' ' && x !== '?') staged.push({ path, status: x })
     if (y !== ' ' && y !== '?') unstaged.push({ path, status: y })
   }
   return { staged, unstaged, untracked }
+}
+
+/**
+ * How an editor is launched. Windows ships VS Code/Cursor as .cmd shims, which
+ * execFile cannot spawn at all (ENOENT) — they need cmd.exe.
+ *
+ * SECURITY: the command name is one of three allowlisted literals and every
+ * argument is quoted, with the command line handed to cmd.exe verbatim — so a
+ * folder path holding cmd metacharacters ('&', '|', …) stays one literal
+ * argument. shell:true would splice the arguments in unquoted; never use it.
+ * (The command name itself must stay UNQUOTED: a quoted one makes the .cmd
+ * shim resolve its own directory against the cwd and fail.)
+ */
+export function editorSpawn(
+  command: string,
+  root: string,
+  platform: NodeJS.Platform = process.platform
+): { file: string; argv: string[]; verbatim: boolean } {
+  const args = command === 'zed' ? [root] : ['-n', root]
+  if (platform !== 'win32') return { file: command, argv: args, verbatim: false }
+  if (root.includes('"')) throw invalid('This folder path cannot be opened in an editor.')
+  const line = [command, ...args.map((arg) => `"${arg}"`)].join(' ')
+  return { file: 'cmd.exe', argv: ['/d', '/s', '/c', line], verbatim: true }
 }
 
 export interface GitServiceOptions {
@@ -153,9 +178,14 @@ export class GitService {
   ): Promise<{ command: string }> {
     const commands = preferred === 'auto' ? ['code', 'cursor', 'zed'] : [preferred]
     for (const command of commands) {
+      const { file, argv, verbatim } = editorSpawn(command, root)
       const ok = await new Promise<boolean>((resolvePromise) => {
-        const argv = command === 'zed' ? [root] : ['-n', root]
-        execFile(command, argv, { windowsHide: true }, (error) => resolvePromise(!error))
+        execFile(
+          file,
+          argv,
+          { windowsHide: true, windowsVerbatimArguments: verbatim },
+          (error) => resolvePromise(!error)
+        )
       })
       if (ok) return { command }
     }

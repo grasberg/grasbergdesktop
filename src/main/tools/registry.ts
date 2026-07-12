@@ -65,7 +65,7 @@ export class ToolRegistry {
       hidden.add('computer')
     }
     // use_skill is pointless (and prompt noise) without any enabled skills.
-    if (this.db.skills.listEnabled().length === 0) hidden.add('use_skill')
+    if (this.db.skills.countEnabled() === 0) hidden.add('use_skill')
     // generate_image is prompt noise when nothing can generate images: no
     // explicit default set AND no enabled, keyed provider of an image-capable
     // family (e.g. an Anthropic-only setup).

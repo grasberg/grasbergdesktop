@@ -54,6 +54,38 @@ const SNAPSHOT_JS = `(() => {
   return { title: document.title, url: location.href, text: (document.body ? document.body.innerText : '').slice(0, ${MAX_TEXT_CHARS}), elements };
 })()`
 
+const MODIFIER_KEYS: Record<string, string> = {
+  ctrl: 'control',
+  control: 'control',
+  shift: 'shift',
+  alt: 'alt',
+  option: 'alt',
+  cmd: 'meta',
+  command: 'meta',
+  meta: 'meta',
+  super: 'meta',
+  win: 'meta',
+}
+
+/**
+ * Splits a combo like 'ctrl+shift+a' into its final key plus the modifiers that
+ * must ride ALONG WITH it: Chromium tracks no modifier state across synthetic
+ * input events, so a modifier sent as its own keyDown does nothing.
+ */
+export function parseKeyCombo(combo: string): { keyCode: string; modifiers: string[] } {
+  const tokens = combo
+    .split('+')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+  const keyCode = tokens.pop() ?? ''
+  const modifiers: string[] = []
+  for (const token of tokens) {
+    const modifier = MODIFIER_KEYS[token.toLowerCase()]
+    if (modifier && !modifiers.includes(modifier)) modifiers.push(modifier)
+  }
+  return { keyCode, modifiers }
+}
+
 function isAllowedUrl(raw: string): boolean {
   try {
     const u = new URL(raw)
@@ -266,14 +298,17 @@ export class BrowserSession {
             wc.sendInputEvent({ type: 'char', keyCode: ch } as Electron.KeyboardInputEvent)
           }
           break
-        case 'key':
-          for (const k of (text ?? '').split('+')) {
-            wc.sendInputEvent({ type: 'keyDown', keyCode: k.trim() } as Electron.KeyboardInputEvent)
+        case 'key': {
+          const { keyCode, modifiers } = parseKeyCombo(text ?? '')
+          if (keyCode.length === 0) break
+          wc.sendInputEvent({ type: 'keyDown', keyCode, modifiers } as Electron.KeyboardInputEvent)
+          // Only a plain (or shifted) printable key produces text.
+          if (keyCode.length === 1 && modifiers.every((m) => m === 'shift')) {
+            wc.sendInputEvent({ type: 'char', keyCode, modifiers } as Electron.KeyboardInputEvent)
           }
-          for (const k of (text ?? '').split('+').reverse()) {
-            wc.sendInputEvent({ type: 'keyUp', keyCode: k.trim() } as Electron.KeyboardInputEvent)
-          }
+          wc.sendInputEvent({ type: 'keyUp', keyCode, modifiers } as Electron.KeyboardInputEvent)
           break
+        }
       }
       // Let the page settle, then snapshot.
       await new Promise((r) => setTimeout(r, action === 'wait' ? 1500 : 400))

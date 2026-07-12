@@ -227,6 +227,7 @@ export function normalizeHttpError(
   if (status === 408) {
     return new ProviderError('timeout', `The provider timed out handling the request.${suffix}`, {
       status,
+      retryAfterSec,
       retryable: true,
       providerType,
     })
@@ -235,7 +236,7 @@ export function normalizeHttpError(
     return new ProviderError(
       'server',
       `The provider had a server error (HTTP ${status}) — try again in a moment.${suffix}`,
-      { status, retryable: true, providerType }
+      { status, retryAfterSec, retryable: true, providerType }
     )
   }
   if (status >= 400) {

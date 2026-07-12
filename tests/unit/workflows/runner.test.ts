@@ -209,4 +209,44 @@ describe('scheduler due check + tick', () => {
     expect(onRunRecorded).toHaveBeenCalledTimes(1)
     expect(onRunRecorded.mock.calls[0][0]).toMatchObject({ trigger: 'schedule', status: 'ok' })
   })
+
+  it('never runs a workflow twice when an earlier due run outlasts the tick', async () => {
+    const AGENT_GRAPH: WorkflowGraph = {
+      nodes: [node('m', 'manual', { text: 'go' }), node('a', 'ai_agent', { prompt: '{{input}}' })],
+      edges: [{ id: 'e', source: 'm', target: 'a' }],
+    }
+    const first = db.workflows.create({
+      name: 'Slow',
+      graph: AGENT_GRAPH,
+      schedule: { everyMinutes: 60 },
+      scheduleEnabled: true,
+    })
+    const second = db.workflows.create({
+      name: 'Second',
+      graph: AGENT_GRAPH,
+      schedule: { everyMinutes: 60 },
+      scheduleEnabled: true,
+    })
+    let release = (): void => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const runAgent = vi.fn(async () => {
+      await gate
+      return 'done'
+    })
+    const runner = createWorkflowRunner(db, { runAgent })
+    const scheduler = new WorkflowScheduler({ db, runner })
+
+    // The first workflow's run outlasts the tick interval; the next tick sees
+    // the second workflow still due and must not run it from a stale snapshot.
+    const tickA = scheduler.tick()
+    const tickB = scheduler.tick()
+    release()
+    await Promise.all([tickA, tickB])
+
+    expect(db.workflows.listRuns(first.id)).toHaveLength(1)
+    expect(db.workflows.listRuns(second.id)).toHaveLength(1)
+    expect(runAgent).toHaveBeenCalledTimes(2)
+  })
 })

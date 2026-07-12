@@ -210,6 +210,12 @@ export interface ToolExecuteContext {
   approval: (req: Omit<ToolApprovalRequest, 'requestId'>) => Promise<ToolApprovalAnswer>
   /** Shows an ask_user_question dialog; null = dismissed/unanswered. */
   askUser?: (question: string, options: string[]) => Promise<string | null>
+  /**
+   * The active stream's abort signal (Stop / app quit). Long-running tools
+   * honour it: run_shell_command kill-trees its child instead of blocking the
+   * stream loop until the command's own timeout.
+   */
+  signal?: AbortSignal
   /** Plan mode (code conversations): mutating tools are refused. */
   planMode?: boolean
   /** Auto-accept edits: edit_file/write_file skip the approval dialog. */
@@ -244,6 +250,8 @@ const SHELL_TIMEOUT_MS = 60_000
 const SHELL_MAX_TIMEOUT_SEC = 600
 const GREP_DEFAULT_RESULTS = 40
 const GREP_MAX_RESULTS = 100
+/** Wall-clock budget for one grep scan (the match runs on the main thread). */
+const GREP_TIME_BUDGET_MS = 5_000
 const GLOB_DEFAULT_RESULTS = 50
 const GLOB_MAX_RESULTS = 200
 const WEB_SEARCH_DEFAULT_RESULTS = 5
@@ -353,22 +361,108 @@ async function assertRealContained(
 
 const MAX_FETCH_REDIRECTS = 5
 
-/** Parses a dotted-quad IPv4 literal, or null if `host` is not one. */
-function parseIpv4(host: string): [number, number, number, number] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  if (!m) return null
-  const parts = m.slice(1, 5).map(Number) as [number, number, number, number]
-  if (parts.some((n) => n > 255)) return null
-  return parts
+type Ipv4 = [number, number, number, number]
+
+/** One IPv4 part: decimal, 0-prefixed octal or 0x-prefixed hex (as URL parsers read them). */
+function parseIpv4Part(part: string): number | null {
+  let digits = part
+  let radix = 10
+  if (/^0[xX]/.test(part)) {
+    radix = 16
+    digits = part.slice(2) || '0'
+  } else if (part.length > 1 && part[0] === '0') {
+    radix = 8
+    digits = part.slice(1)
+  }
+  const allowed = radix === 16 ? /^[0-9a-fA-F]+$/ : radix === 8 ? /^[0-7]+$/ : /^[0-9]+$/
+  if (!allowed.test(digits)) return null
+  const value = parseInt(digits, radix)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+/**
+ * Parses an IPv4 literal in any form a URL parser accepts — dotted quad plus
+ * the shorthand/octal/hex/decimal spellings ('127.1', '0177.0.0.1',
+ * '2130706433', '0x7f000001') — or null if `host` is not one.
+ */
+function parseIpv4(host: string): Ipv4 | null {
+  const parts = host.split('.')
+  if (parts.length === 0 || parts.length > 4) return null
+  const numbers: number[] = []
+  for (const part of parts) {
+    const value = parseIpv4Part(part)
+    if (value === null) return null
+    numbers.push(value)
+  }
+  // With fewer than 4 parts the LAST one spans the remaining octets.
+  const last = numbers.pop() as number
+  if (numbers.some((n) => n > 255)) return null
+  if (last >= 256 ** (4 - numbers.length)) return null
+  const octets: Ipv4 = [0, 0, 0, 0]
+  numbers.forEach((n, i) => {
+    octets[i] = n
+  })
+  let rest = last
+  for (let i = 3; i >= numbers.length; i--) {
+    octets[i] = rest % 256
+    rest = Math.floor(rest / 256)
+  }
+  return octets
 }
 
 /** True for RFC1918 / loopback / link-local / CGNAT / unspecified IPv4. */
-function isPrivateIpv4([a, b]: [number, number, number, number]): boolean {
+function isPrivateIpv4([a, b]: Ipv4): boolean {
   if (a === 0 || a === 10 || a === 127) return true
   if (a === 169 && b === 254) return true
   if (a === 172 && b >= 16 && b <= 31) return true
   if (a === 192 && b === 168) return true
   if (a === 100 && b >= 64 && b <= 127) return true
+  return false
+}
+
+/**
+ * Expands an IPv6 literal to its 8 groups, or null if `host` is not one. The
+ * WHATWG URL parser canonicalises IPv6 hosts to compressed HEX groups (e.g.
+ * '[::ffff:127.0.0.1]' becomes '[::ffff:7f00:1]'), so the guard must classify
+ * the numeric address, not any single spelling of it.
+ */
+function parseIpv6(host: string): number[] | null {
+  if (!host.includes(':')) return null
+  let text = host
+  // A trailing dotted quad ('::ffff:127.0.0.1') folds into two hex groups.
+  const dotted = /^(.*:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(text)
+  if (dotted) {
+    const v4 = parseIpv4(dotted[2])
+    if (!v4) return null
+    const high = ((v4[0] << 8) | v4[1]).toString(16)
+    const low = ((v4[2] << 8) | v4[3]).toString(16)
+    text = `${dotted[1]}${high}:${low}`
+  }
+  const halves = text.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] === '' ? [] : halves[0].split(':')
+  const tail = halves.length === 2 ? (halves[1] === '' ? [] : halves[1].split(':')) : []
+  if (halves.length === 1 ? head.length !== 8 : head.length + tail.length > 7) return null
+  const groups: number[] = []
+  for (const group of [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail]) {
+    if (!/^[0-9a-f]{1,4}$/i.test(group)) return null
+    groups.push(parseInt(group, 16))
+  }
+  return groups.length === 8 ? groups : null
+}
+
+/** True for loopback / unspecified / link-local / unique-local / IPv4-mapped-private IPv6. */
+function isPrivateIpv6(groups: number[]): boolean {
+  if (groups.every((g) => g === 0)) return true // ::
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true // ::1
+  // ::ffff:a.b.c.d (IPv4-mapped) and the deprecated ::a.b.c.d (IPv4-compatible).
+  const embedsIpv4 =
+    groups.slice(0, 5).every((g) => g === 0) && (groups[5] === 0xffff || groups[5] === 0)
+  if (embedsIpv4) {
+    return isPrivateIpv4([groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff])
+  }
+  if ((groups[0] & 0xffc0) === 0xfe80) return true // fe80::/10 link-local
+  if ((groups[0] & 0xfe00) === 0xfc00) return true // fc00::/7 unique-local
   return false
 }
 
@@ -381,23 +475,24 @@ function isPrivateIpv4([a, b]: [number, number, number, number]): boolean {
  * GET-only surface.
  */
 function isBlockedHostname(hostnameRaw: string): boolean {
-  const host = hostnameRaw.replace(/^\[/, '').replace(/\]$/, '').toLowerCase()
+  // Drop the IPv6 brackets and a single trailing FQDN dot ('localhost.' and
+  // '127.0.0.1.' resolve exactly like their bare forms) before classifying.
+  const host = hostnameRaw
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .toLowerCase()
+    .replace(/\.$/, '')
   if (!host) return true
   if (host === 'localhost' || host.endsWith('.localhost')) return true
   if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.home.arpa'))
     return true
+  if (host.includes(':')) {
+    const v6 = parseIpv6(host)
+    // An IPv6 literal we cannot parse is refused rather than trusted.
+    return v6 === null ? true : isPrivateIpv6(v6)
+  }
   const v4 = parseIpv4(host)
   if (v4) return isPrivateIpv4(v4)
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(host)
-  if (mapped) {
-    const m4 = parseIpv4(mapped[1])
-    if (m4) return isPrivateIpv4(m4)
-  }
-  if (host.includes(':')) {
-    if (host === '::1' || host === '::') return true
-    if (/^fe[89ab]/.test(host)) return true // fe80::/10 link-local
-    if (/^f[cd]/.test(host)) return true // fc00::/7 unique-local
-  }
   return false
 }
 
@@ -448,6 +543,60 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp('^' + out + '$')
 }
 
+/** A '{m,}' (no upper bound) quantifier starting at `source[open]` ('{'). */
+function isOpenEndedBrace(source: string, open: number): boolean {
+  const close = source.indexOf('}', open + 1)
+  if (close === -1) return false
+  return /^\d+,$/.test(source.slice(open + 1, close))
+}
+
+/** True when the token at `i` is made optional by the quantifier that follows it. */
+function isOptionalToken(source: string, i: number): boolean {
+  const next = source[i + 1]
+  if (next === '?' || next === '*') return true
+  if (next === '{') {
+    const close = source.indexOf('}', i + 2)
+    return close !== -1 && /^0(,\d*)?$/.test(source.slice(i + 2, close))
+  }
+  return false
+}
+
+/** Chars to skip after a '(' so a group prefix ('?:', '?=', '?<name>') isn't read as content. */
+function groupPrefixLength(source: string, open: number): number {
+  if (source[open + 1] !== '?') return 0
+  const third = source[open + 2]
+  if (third === ':' || third === '=' || third === '!') return 2
+  if (third === '<') {
+    if (source[open + 3] === '=' || source[open + 3] === '!') return 3
+    const close = source.indexOf('>', open + 3)
+    return close === -1 ? 2 : close - open
+  }
+  return 1
+}
+
+/** Per open group: what its body contains, and the first token of each branch. */
+interface RegexGroupScan {
+  /** '*', '+' or '{m,}' anywhere in the body (directly or in a nested group). */
+  unbounded: boolean
+  /** A nested group whose branches can overlap. */
+  ambiguous: boolean
+  /**
+   * First token of each top-level branch: the literal character it must start
+   * with, or null when that cannot be determined (a class, an escape, a nested
+   * group, an anchor, a dot, or an optional first token).
+   */
+  branchFirsts: Array<string | null>
+  awaitingFirst: boolean
+  /**
+   * True while every consuming token seen in the CURRENT branch is optional, so
+   * the branch can still match the empty string. Reset at each '|' and at the
+   * group close.
+   */
+  branchNullable: boolean
+  /** True once any completed branch of this group can match the empty string. */
+  nullable: boolean
+}
+
 /**
  * Conservative catastrophic-backtracking guard for model-supplied regexes.
  *
@@ -455,52 +604,143 @@ export function globToRegExp(pattern: string): RegExp {
  * scanned file; a pattern like `(\w+\s?)*;$` takes exponential time on a long
  * non-matching line and freezes the whole app (Stop can't even be delivered).
  * This build has no worker/RE2 to run the match with a timeout, so instead we
- * refuse the classic ReDoS shape: an unbounded quantifier ('*' or '+') applied
- * to a group whose body itself contains an unbounded quantifier (directly or
- * nested). Rejecting a few exotic-but-safe patterns is an acceptable price for
- * never freezing; the model is told to simplify.
+ * refuse the three exponential shapes, all of which need a QUANTIFIED group:
+ * - its body contains an unbounded quantifier ('*', '+' or the '{m,}' spelling
+ *   of the same thing), directly or nested — the classic '(\w+\s?)*';
+ * - its branches can match the same input, so a repetition has many parses —
+ *   '(a|a)+', '(\w|\d)+'. Branches starting with DISTINCT literal characters
+ *   ('(a|b)*') are unambiguous and stay allowed;
+ * - its body can match the EMPTY string (every consuming token is optional, e.g.
+ *   '(\w?\w?)+', '(a?a?)+'), so a repetition can split the same run of input in
+ *   exponentially many ways even without an inner unbounded quantifier.
+ * Rejecting a few exotic-but-safe patterns is an acceptable price for never
+ * freezing; the model is told to simplify.
  */
 export function hasCatastrophicBacktracking(source: string): boolean {
-  // One entry per open group: does its body contain an unbounded quantifier?
-  const stack: boolean[] = []
-  let escaped = false
+  const stack: RegexGroupScan[] = []
+  const top = (): RegexGroupScan | null => (stack.length > 0 ? stack[stack.length - 1] : null)
+  const noteFirst = (literal: string | null): void => {
+    const group = top()
+    if (!group || !group.awaitingFirst) return
+    group.branchFirsts.push(literal)
+    group.awaitingFirst = false
+  }
+  const endBranch = (group: RegexGroupScan): void => {
+    // An empty branch ('(a|)+') matches everywhere — treat it as unknown.
+    if (group.awaitingFirst) group.branchFirsts.push(null)
+    group.awaitingFirst = false
+    // A branch with no required consuming token can match the empty string.
+    if (group.branchNullable) group.nullable = true
+    group.branchNullable = true
+  }
+  const markUnbounded = (): void => {
+    const group = top()
+    if (group) group.unbounded = true
+  }
+  // A consuming token the following quantifier does NOT make optional means the
+  // current branch must match at least one character (it is not nullable).
+  const markConsumingRequired = (): void => {
+    const group = top()
+    if (group) group.branchNullable = false
+  }
+
   let inClass = false
   for (let i = 0; i < source.length; i++) {
     const ch = source[i]
-    if (escaped) {
-      escaped = false
+    if (inClass) {
+      if (ch === '\\') i += 1
+      else if (ch === ']') {
+        inClass = false
+        // A char class matches one char; required unless a quantifier follows.
+        if (!isOptionalToken(source, i)) markConsumingRequired()
+      }
       continue
     }
     if (ch === '\\') {
-      escaped = true
-      continue
-    }
-    if (inClass) {
-      if (ch === ']') inClass = false
+      noteFirst(null)
+      // The escaped char is the token; its quantifier (if any) follows it.
+      if (!isOptionalToken(source, i + 1)) markConsumingRequired()
+      i += 1 // the escaped char is part of this token
       continue
     }
     if (ch === '[') {
+      noteFirst(null)
       inClass = true
       continue
     }
     if (ch === '(') {
-      stack.push(false)
+      noteFirst(null)
+      i += groupPrefixLength(source, i)
+      stack.push({
+        unbounded: false,
+        ambiguous: false,
+        branchFirsts: [],
+        awaitingFirst: true,
+        branchNullable: true,
+        nullable: false,
+      })
       continue
     }
     if (ch === '*' || ch === '+') {
-      if (stack.length > 0) stack[stack.length - 1] = true
+      markUnbounded()
+      continue
+    }
+    if (ch === '{') {
+      if (isOpenEndedBrace(source, i)) markUnbounded()
+      continue
+    }
+    if (ch === '?' || ch === '}') continue
+    if (ch === '|') {
+      const group = top()
+      if (group) {
+        endBranch(group)
+        group.awaitingFirst = true
+      }
       continue
     }
     if (ch === ')') {
-      const bodyQuantified = stack.pop() ?? false
+      const group = stack.pop()
+      if (!group) continue
+      endBranch(group)
+      const overlapping = group.branchFirsts.length > 1 && branchesCanOverlap(group.branchFirsts)
       const next = source[i + 1]
       const groupIsQuantified = next === '*' || next === '+' || next === '{'
-      if (bodyQuantified && groupIsQuantified) return true
-      // Propagate "contains an unbounded quantifier" to the parent group so a
-      // quantifier nested any number of levels deep is still caught.
-      if (bodyQuantified && stack.length > 0) stack[stack.length - 1] = true
+      if (
+        (group.unbounded || group.ambiguous || overlapping || group.nullable) &&
+        groupIsQuantified
+      ) {
+        return true
+      }
+      // Propagate to the parent so a risk nested any number of levels deep is
+      // still caught by the parent's own quantifier.
+      const parent = top()
+      if (parent) {
+        if (group.unbounded) parent.unbounded = true
+        if (group.ambiguous || overlapping) parent.ambiguous = true
+        // The group is a consuming token in the parent branch only if it can't
+        // be skipped (not optional) and must match at least one char (not
+        // nullable); otherwise the parent branch stays nullable.
+        if (!isOptionalToken(source, i) && !group.nullable) parent.branchNullable = false
+      }
       continue
     }
+    // An anchor or '.' can start anywhere/anything — never a distinct literal.
+    noteFirst(ch === '.' || ch === '^' || ch === '$' || isOptionalToken(source, i) ? null : ch)
+    // A literal or '.' consumes a char; anchors ('^','$') are zero-width and
+    // leave the branch nullable. A required consuming token makes it non-empty.
+    if (ch !== '^' && ch !== '$' && !isOptionalToken(source, i)) markConsumingRequired()
+  }
+  return false
+}
+
+/** True unless every branch must start with a different literal character. */
+function branchesCanOverlap(firsts: Array<string | null>): boolean {
+  const seen = new Set<string>()
+  for (const first of firsts) {
+    if (first === null) return true
+    const key = first.toLowerCase() // grep may run case-insensitively
+    if (seen.has(key)) return true
+    seen.add(key)
   }
   return false
 }
@@ -1132,7 +1372,7 @@ export class ToolExecutor {
     const [patternSource, patternError] = requireStringArg(args, 'pattern')
     if (patternError) return patternError
     if (hasCatastrophicBacktracking(patternSource)) {
-      return "Error: that pattern risks catastrophic backtracking (a repeated group that itself repeats, e.g. '(\\w+\\s?)*'). Simplify it — avoid nesting one unbounded quantifier inside another."
+      return "Error: that pattern risks catastrophic backtracking (a repeated group that itself repeats, alternates, or can match empty, e.g. '(\\w+\\s?)*', '(a|a)+' or '(\\w?\\w?)+'). Simplify it — avoid a quantifier, an alternation, or all-optional tokens inside a repeated group."
     }
     let pattern: RegExp
     try {
@@ -1151,9 +1391,13 @@ export class ToolExecutor {
     }
     const maxResults = clampIntArg(args, 'maxResults', GREP_DEFAULT_RESULTS, GREP_MAX_RESULTS)
 
+    // Belt for whatever hasCatastrophicBacktracking misses: the scan is
+    // abandoned once it has spent this long matching (checked between lines).
+    const deadline = Date.now() + GREP_TIME_BUDGET_MS
+    let ranOut = false
     const lines: string[] = []
     for (const file of await walkProjectFiles(root)) {
-      if (lines.length >= maxResults) break
+      if (lines.length >= maxResults || ranOut) break
       if (globFilter && !globFilter.test(file.relPath)) continue
       if (file.sizeBytes >= SEARCH_CONTENT_MAX_BYTES) continue
       let buffer: Buffer
@@ -1165,10 +1409,23 @@ export class ToolExecutor {
       if (looksBinary(buffer)) continue
       const contentLines = buffer.toString('utf8').split(/\r?\n/)
       for (let i = 0; i < contentLines.length && lines.length < maxResults; i++) {
+        if (Date.now() > deadline) {
+          ranOut = true
+          break
+        }
         if (!pattern.test(contentLines[i])) continue
         const text = contentLines[i].trim().slice(0, SEARCH_LINE_MAX_CHARS)
         lines.push(file.relPath + ':' + (i + 1) + ': ' + text)
       }
+    }
+    if (ranOut) {
+      const found = lines.length > 0 ? lines.join('\n') + '\n' : ''
+      return (
+        found +
+        'Error: the search took too long and was stopped after ' +
+        GREP_TIME_BUDGET_MS / 1000 +
+        's. Use a simpler pattern (and a glob filter) — some results may be missing.'
+      )
     }
     if (lines.length === 0) return 'No matches found for /' + patternSource + '/.'
     return lines.join('\n')
@@ -1929,7 +2186,7 @@ export class ToolExecutor {
       clampIntArg(args, 'timeoutSeconds', SHELL_TIMEOUT_MS / 1000, SHELL_MAX_TIMEOUT_SEC) * 1000
     const onToolOutput = ctx.onToolOutput
     const onChunk = onToolOutput ? (chunk: string) => onToolOutput(toolCall.id, chunk) : undefined
-    const result = await runShell(command, root, timeoutMs, undefined, onChunk)
+    const result = await runShell(command, root, timeoutMs, ctx.signal, onChunk)
     const parts: string[] = []
     if (result.timedOut) {
       parts.push(`Command timed out after ${timeoutMs / 1000}s and was killed.`)

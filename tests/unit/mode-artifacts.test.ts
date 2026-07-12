@@ -93,6 +93,69 @@ describe('extractCodeChanges', () => {
     expect(extractCodeChanges(content)).toEqual([])
   })
 
+  it('keeps a nested code fence inside the file content', () => {
+    const content = [
+      '```uld-change',
+      '{"path":"README.md","type":"create"}',
+      '# Title',
+      '',
+      '```js',
+      'const x = 1',
+      '```',
+      '',
+      'Trailing prose.',
+      '```',
+      'after the block',
+    ].join('\n')
+
+    const changes = extractCodeChanges(content)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].path).toBe('README.md')
+    expect(changes[0].newContent).toBe(
+      '# Title\n\n```js\nconst x = 1\n```\n\nTrailing prose.\n'
+    )
+  })
+
+  it('lets a longer opening fence wrap bare triple-backtick lines', () => {
+    const content = [
+      '````uld-change',
+      '{"path":"doc.md","type":"edit"}',
+      '```',
+      'plain fenced text',
+      '```',
+      '````',
+    ].join('\n')
+
+    const changes = extractCodeChanges(content)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].newContent).toBe('```\nplain fenced text\n```\n')
+  })
+
+  it('keeps content after a bare nested fence when the outer fence is longer', () => {
+    // A README whose body has a bare (language-less) ``` code block AND trailing
+    // prose: with a 4-backtick outer fence (per the prompt) nothing is cut.
+    const content = [
+      '````uld-change',
+      '{"path":"README.md","type":"create"}',
+      '# Project',
+      '',
+      'Install:',
+      '```',
+      'npm install',
+      '```',
+      '',
+      'Done.',
+      '````',
+    ].join('\n')
+
+    const changes = extractCodeChanges(content)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].path).toBe('README.md')
+    expect(changes[0].newContent).toBe(
+      '# Project\n\nInstall:\n```\nnpm install\n```\n\nDone.\n'
+    )
+  })
+
   it('handles CRLF content', () => {
     const content =
       '```uld-change\r\n{"path":"win.txt","type":"create"}\r\nline one\r\n```\r\n'

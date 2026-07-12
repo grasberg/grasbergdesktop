@@ -13,7 +13,7 @@
 
 import {
   closeSync,
-  existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -23,8 +23,9 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, resolve, sep } from 'node:path'
 import type { CodeChange, CodeProject, FileTreeNode } from '@shared/types'
 import type { CodeChangeWithContext, CodeReadFileResult } from '@shared/ipc'
 import type { AppDatabase } from '../db/database'
@@ -262,13 +263,12 @@ export class CodeService {
     // persistent, conversation-aware checkpoint (the existing old_content is
     // still retained on the change row for the fast single-change revert).
     if (change.conversationId) {
-      const messages = this.db.messages.listByConversation(change.conversationId)
       this.db.agentPlatform.checkpointCreate({
         conversationId: change.conversationId,
         projectId: change.projectId,
         changeId: change.id,
         label: `Before ${change.changeType} ${change.filePath}`,
-        messageSeq: messages.at(-1)?.seq ?? 0,
+        messageSeq: this.db.messages.lastSeq(change.conversationId) ?? 0,
         files: [{ relPath: change.filePath, content: change.oldContent ?? null }],
       })
     }
@@ -276,21 +276,20 @@ export class CodeService {
     switch (change.changeType) {
       case 'create': {
         if (change.newContent === null) throw invalid('This change has no content to write.')
-        mkdirSync(dirname(abs), { recursive: true })
-        // SECURITY: after mkdir, canonicalize the parent dir and re-assert
-        // containment so a symlinked directory cannot redirect the write out
-        // of the project root.
-        const realDir = this.realInsideRoot(project.path, dirname(abs))
+        const realDir = this.prepareParentInsideRoot(project.path, change.filePath)
         const target = join(realDir, basename(abs))
-        if (existsSync(target)) {
-          // A file already exists where we meant to create — canonicalize it
+        // SECURITY: lstat, never existsSync — existsSync follows symlinks and
+        // reports a DANGLING one as absent, and the plain write would then
+        // follow it out of the project root.
+        if (this.lstatOrNull(target)) {
+          // Something already sits where we meant to create — canonicalize it
           // (rejects a symlink escape) and require it match the proposal
           // baseline, otherwise the assistant's create is stale.
           const realTarget = this.realInsideRoot(project.path, target)
           this.assertNotStale(change, realTarget)
           writeFileSync(realTarget, change.newContent, 'utf8')
         } else {
-          writeFileSync(target, change.newContent, 'utf8')
+          writeFileSync(target, change.newContent, { encoding: 'utf8', flag: 'wx' })
         }
         break
       }
@@ -368,12 +367,14 @@ export class CodeService {
         if (change.oldContent === null || change.oldContent === undefined) {
           throw invalid('No pre-change content was captured for this change.')
         }
-        if (existsSync(abs)) {
+        const realDir = this.prepareParentInsideRoot(project.path, change.filePath)
+        const target = join(realDir, basename(abs))
+        // SECURITY: lstat, never existsSync — a dangling symlink reads as
+        // absent and the restore would write through it, outside the root.
+        if (this.lstatOrNull(target)) {
           throw invalid('A file already exists at this path; revert it manually.')
         }
-        mkdirSync(dirname(abs), { recursive: true })
-        const realDir = this.realInsideRoot(project.path, dirname(abs))
-        writeFileSync(join(realDir, basename(abs)), change.oldContent, 'utf8')
+        writeFileSync(target, change.oldContent, { encoding: 'utf8', flag: 'wx' })
         break
       }
     }
@@ -518,6 +519,43 @@ export class CodeService {
       throw invalid('File path escapes the project root.')
     }
     return real
+  }
+
+  /**
+   * SECURITY: prepares the parent directory of a write. Walks `relPath` segment
+   * by segment down from the canonical root, creating ONLY missing segments
+   * (never mkdir -p through an unchecked path) and canonicalizing every
+   * existing one with realInsideRoot — so a symlinked parent can neither
+   * redirect the write nor have directories created outside the root. Returns
+   * the real, root-contained parent directory.
+   */
+  private prepareParentInsideRoot(rootPath: string, relPath: string): string {
+    let dir = this.realInsideRoot(rootPath, resolve(rootPath))
+    const segments = normalizeRel(relPath).split('/')
+    segments.pop() // the leaf is the file itself
+    for (const segment of segments) {
+      const next = join(dir, segment)
+      const stat = this.lstatOrNull(next)
+      if (!stat) {
+        mkdirSync(next)
+        dir = next
+        continue
+      }
+      dir = stat.isSymbolicLink() ? this.realInsideRoot(rootPath, next) : next
+      if (!statSync(dir).isDirectory()) {
+        throw invalid('A file already exists where a folder is needed.')
+      }
+    }
+    return dir
+  }
+
+  /** Stats `abs` WITHOUT following symlinks; null when nothing is there. */
+  private lstatOrNull(abs: string): Stats | null {
+    try {
+      return lstatSync(abs)
+    } catch {
+      return null
+    }
   }
 
   /** Reads a file's current text, or null when missing/binary/oversized. */

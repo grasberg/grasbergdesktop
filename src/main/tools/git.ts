@@ -11,13 +11,15 @@ import { execFile } from 'node:child_process'
 
 const GIT_TIMEOUT_MS = 15_000
 const GIT_MAX_OUTPUT = 64 * 1024
+/** child_process's error code when a stream exceeded maxBuffer. */
+const MAXBUFFER_CODE = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
 
 export interface GitQueryResult {
   ok: boolean
   output: string
 }
 
-/** Runs `git <argv>` in `cwd` (no shell). Returns combined, capped output. */
+/** Runs `git <argv>` in `cwd` (no shell). Output past the cap is truncated. */
 export function runGitQuery(argv: string[], cwd: string): Promise<GitQueryResult> {
   return new Promise((resolvePromise) => {
     execFile(
@@ -27,6 +29,16 @@ export function runGitQuery(argv: string[], cwd: string): Promise<GitQueryResult
       (error, stdout, stderr) => {
         if (error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
           resolvePromise({ ok: false, output: 'git is not installed or not on PATH.' })
+          return
+        }
+        // Exceeding maxBuffer kills the child and reports an error, but the
+        // output captured up to the cap is still handed back: a big diff/log is
+        // a truncation, not a failure.
+        if (error && (error as NodeJS.ErrnoException).code === MAXBUFFER_CODE) {
+          resolvePromise({
+            ok: true,
+            output: `${stdout}\n…[truncated at ${GIT_MAX_OUTPUT / 1024}KB]`,
+          })
           return
         }
         if (error && error.killed) {

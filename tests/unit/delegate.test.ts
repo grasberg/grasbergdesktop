@@ -146,3 +146,43 @@ describe('ChatService.runDelegate', () => {
     expect(result).toMatch(/delegation failed/i)
   })
 })
+
+/** chat() that never resolves until the caller's signal aborts. */
+class HangingAdapter implements ProviderAdapter {
+  readonly type = 'openai-compatible' as const
+  async *chatStream(): AsyncGenerator<AdapterStreamEvent> {
+    // not used
+  }
+  chat(_req: AdapterChatRequest, ctx: { signal?: AbortSignal }): Promise<AdapterChatResult> {
+    return new Promise((_resolve, reject) => {
+      ctx.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  }
+  async listModels(): Promise<ModelInfo[]> {
+    return []
+  }
+  async testConnection(): Promise<TestConnectionResult> {
+    return { ok: true, message: 'ok' }
+  }
+}
+
+describe('ChatService background delegate runs', () => {
+  it('stopAll finishes the persistent agent_runs row (no phantom running agent)', async () => {
+    const conversation = seed()
+    const service = new ChatService(db, () => undefined, {
+      resolveAdapter: () => new HangingAdapter(),
+    })
+
+    const note = service.startDelegateBackground('long task', ctx(conversation))
+    expect(note).toContain('Started background task')
+    const started = db.agentPlatform.runsList(conversation.id)
+    expect(started).toHaveLength(1)
+    expect(started[0].status).toBe('running')
+
+    await service.stopAll()
+
+    const stopped = db.agentPlatform.runsList(conversation.id)[0]
+    expect(stopped.status).toBe('stopped')
+    expect(stopped.finishedAt).not.toBeNull()
+  })
+})

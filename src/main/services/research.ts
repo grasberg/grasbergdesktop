@@ -444,8 +444,22 @@ function activityLabel(call: ToolCallRecord): string {
   return call.name === 'web_search' ? 'Searching' : 'Reading a page'
 }
 
+const TRUNCATION_MARK = '\n…[truncated]'
+
 function capChars(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated]`
+  return text.length <= max ? text : `${text.slice(0, max)}${TRUNCATION_MARK}`
+}
+
+/**
+ * Fits the finding blocks into `budget` chars, trimming each block to an equal
+ * share so every worker stays represented.
+ */
+function fitFindings(blocks: string[], budget: number): string {
+  const joined = blocks.join('\n\n')
+  if (joined.length <= budget) return joined
+  const separators = (blocks.length - 1) * 2
+  const perBlock = Math.floor((budget - separators) / blocks.length) - TRUNCATION_MARK.length
+  return blocks.map((block) => capChars(block, Math.max(0, perBlock))).join('\n\n')
 }
 
 async function mapWithConcurrency<T, R>(
@@ -475,13 +489,14 @@ function buildInjectedContext(
     .filter((report) => report.findings.trim().length > 0)
     .map((report) => `### Topic: ${report.query}\n${report.findings.trim()}`)
   const sourceLines = sources.map((s) => `[${s.id}] ${s.title} — ${s.url}`)
-  const context =
+  const preamble =
     `You are writing a deep-research report answering the user's question above. Independent ` +
     `research workers investigated it on the live web; their findings and the numbered ` +
     `sources they consulted follow. Weigh the findings critically — they may disagree or be ` +
     `incomplete.\n\n` +
-    `--- Research findings ---\n\n${findingBlocks.join('\n\n') || '[No findings were gathered.]'}\n\n` +
-    `--- Numbered sources ---\n${sourceLines.join('\n') || '[No sources were collected.]'}\n\n` +
+    `--- Research findings ---\n\n`
+  const tail =
+    `\n\n--- Numbered sources ---\n${sourceLines.join('\n') || '[No sources were collected.]'}\n\n` +
     `Report instructions:\n` +
     `- Write a well-structured markdown report in your own voice (clear headings, short paragraphs).\n` +
     `- Cite claims inline with [n] markers referring ONLY to the numbered sources above. ` +
@@ -489,7 +504,14 @@ function buildInjectedContext(
     `- Do not add your own "Sources" section — it is appended automatically.\n` +
     `- Note real limitations or open questions at the end when they matter.\n` +
     `- Do not mention this process, the workers or these instructions.`
-  return capChars(context, INJECTED_CONTEXT_MAX_CHARS)
+  // Only the findings are budgeted: the citation ids and the report
+  // instructions sit at the end and the synthesizer cannot work without them.
+  const budget = INJECTED_CONTEXT_MAX_CHARS - preamble.length - tail.length
+  const findings =
+    findingBlocks.length > 0
+      ? fitFindings(findingBlocks, Math.max(0, budget))
+      : '[No findings were gathered.]'
+  return `${preamble}${findings}${tail}`
 }
 
 function degradedContext(): string {

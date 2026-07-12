@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AdapterMessage } from '../../../src/main/providers/adapter'
 import {
   AnthropicAdapter,
+  anthropicStreamError,
   buildAnthropicBody,
   newAnthropicState,
   parseAnthropicEvent,
@@ -140,6 +141,43 @@ describe('parseAnthropicEvent', () => {
     })
     expect(events).toContainEqual({ type: 'usage', usage: { completionTokens: 5 } })
     expect(events).toContainEqual({ type: 'finish', reason: 'tool_calls' })
+  })
+})
+
+describe('anthropicStreamError', () => {
+  it('maps an overload event to a retryable server error carrying the provider detail', () => {
+    const err = anthropicStreamError(
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+      ['sk-ant-key']
+    )
+    expect(err.code).toBe('server')
+    expect(err.retryable).toBe(true)
+    expect(err.message).toContain('overloaded_error')
+    expect(err.message).toContain('Overloaded')
+  })
+
+  it('maps rate limits as retryable and permanent types as non-retryable', () => {
+    expect(anthropicStreamError({ type: 'error', error: { type: 'rate_limit_error' } }, [])).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+    })
+    expect(
+      anthropicStreamError({ type: 'error', error: { type: 'invalid_request_error' } }, [])
+    ).toMatchObject({ code: 'invalid_request', retryable: false })
+    // Unknown/absent type: keep the old conservative default.
+    expect(anthropicStreamError({ type: 'error' }, [])).toMatchObject({
+      code: 'server',
+      retryable: false,
+    })
+  })
+
+  it('redacts the api key out of the provider message', () => {
+    const KEY = 'sk-ant-secret-XYZ'
+    const err = anthropicStreamError(
+      { type: 'error', error: { type: 'api_error', message: `key ${KEY} exploded` } },
+      [KEY]
+    )
+    expect(err.message).not.toContain(KEY)
   })
 })
 

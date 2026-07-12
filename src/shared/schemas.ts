@@ -76,7 +76,7 @@ export const providerConfigInputSchema = z.object({
   defaultModelId: z.string().trim().max(200).optional(),
   enabled: z.boolean().optional(),
   authMode: authModeSchema.optional(),
-  presetId: z.string().trim().max(100).optional(),
+  presetId: z.string().trim().min(1).max(100).nullable().optional(),
 })
 
 export const providerConfigPatchSchema = z.object({
@@ -226,6 +226,21 @@ export function isAllowedHttpUrl(value: string): boolean {
 }
 
 /**
+ * Outbound completion webhook. Delivery drops anything that isn't https (or
+ * http on a loopback host), so the same rule is enforced here — a webhook that
+ * can never fire must fail at set time, not silently at send time. '' and null
+ * both mean "no webhook".
+ */
+export const outboundWebhookUrlSchema = z
+  .string()
+  .trim()
+  .max(2000)
+  .refine((value) => value.length === 0 || isAllowedHttpUrl(value), {
+    message: 'Webhook URL must use https:// (http is only allowed for localhost)',
+  })
+  .nullable()
+
+/**
  * True for an app-generated attachment storage key ('<uuid>.<ext>'). Anything
  * with path separators, '..', drive letters or other characters is rejected so
  * a stored key can never be used to read outside the attachments dir. Enforced
@@ -357,7 +372,7 @@ export const settingsPatchSchema = z
     // trust-on-first-use pairing pin, owned by main (ImBridgeManager writes it
     // via the settings repo). Accepting it here would let the renderer — or a
     // tampered backup — pre-authorize an arbitrary Telegram sender.
-    outboundWebhookUrl: z.string().max(2000).nullable(),
+    outboundWebhookUrl: outboundWebhookUrlSchema,
     researchWorkerProviderId: z.string().nullable(),
     researchWorkerModelId: z.string().max(200).nullable(),
     researchDefaultDepth: researchDepthSchema,

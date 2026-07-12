@@ -48,6 +48,8 @@ export interface MessagesRepository {
   deleteAfterSeq(conversationId: string, seq: number): number
   /** Next monotonic seq for the conversation (1-based). */
   nextSeq(conversationId: string): number
+  /** Highest seq in the conversation, or null when it has no messages. */
+  lastSeq(conversationId: string): number | null
   /**
    * Marks any message still in status 'streaming' as 'stopped' — recovery for
    * generations interrupted by a crash/quit. Called at app boot. Returns the
@@ -185,6 +187,14 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         [conversationId]
       )
       return row ? row.next : 1
+    },
+
+    lastSeq(conversationId) {
+      const row = driver.get<{ seq: number | null }>(
+        'SELECT MAX(seq) AS seq FROM messages WHERE conversation_id = ?',
+        [conversationId]
+      )
+      return row?.seq ?? null
     },
 
     markDanglingStreamingAsStopped() {

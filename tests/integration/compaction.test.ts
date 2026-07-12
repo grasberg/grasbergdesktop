@@ -16,6 +16,7 @@ import type {
   ModelInfo,
   StreamEventEnvelope,
   TestConnectionResult,
+  ToolCallRecord,
 } from '@shared/types'
 import { CHANNELS } from '@shared/ipc'
 import { openDatabase, type AppDatabase } from '../../src/main/db/database'
@@ -173,5 +174,130 @@ describe('ChatService context compaction', () => {
       (m) => m.role === 'user' || m.role === 'assistant'
     )
     expect(userAssistant.length).toBeGreaterThanOrEqual(15)
+  })
+
+  it('counts replayed tool payloads in the auto-compaction estimate', async () => {
+    const provider = db.providers.create({
+      id: randomUUID(),
+      type: 'openai-compatible',
+      label: 'Fake',
+      baseUrl: 'https://fake.example/v1',
+      defaultModelId: 'fake-model',
+      enabled: true,
+    })
+    db.providers.setKeyRow(
+      provider.id,
+      'insecure:' + Buffer.from('sk-tools', 'utf8').toString('base64'),
+      'sk-…tools'
+    )
+    db.settings.update({ compactionEnabled: true, compactionThresholdRatio: 0.1 })
+    const conversation = db.conversations.create({
+      mode: 'chat',
+      title: 'Agentic',
+      providerId: provider.id,
+      modelId: 'fake-model',
+    })
+    // An agentic transcript: tiny message content, huge tool results — all of it
+    // replayed onto the wire by buildHistory.
+    for (let i = 0; i < 10; i++) {
+      const assistant = i % 2 === 1
+      const toolCalls: ToolCallRecord[] = assistant
+        ? [
+            {
+              id: `call-${i}`,
+              name: 'grep',
+              arguments: '{"pattern":"needle"}',
+              result: 'y'.repeat(5000),
+              status: 'done',
+            },
+          ]
+        : []
+      db.messages.insert({
+        id: randomUUID(),
+        conversationId: conversation.id,
+        role: assistant ? 'assistant' : 'user',
+        content: `turn ${i}`,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        status: 'complete',
+        seq: db.messages.nextSeq(conversation.id),
+        createdAt: Date.now(),
+      })
+    }
+
+    const adapter = new CompactionAdapter(() => ({
+      text: 'CONDENSED SUMMARY',
+      toolCalls: [],
+      finishReason: 'stop',
+    }))
+    let resolveDone: () => void = () => undefined
+    const done = new Promise<void>((r) => (resolveDone = r))
+    const service = new ChatService(
+      db,
+      (channel, payload) => {
+        if (channel !== CHANNELS.streamEvent) return
+        const env = payload as StreamEventEnvelope
+        if (env.event.type === 'done' || env.event.type === 'error') resolveDone()
+      },
+      { resolveAdapter: () => adapter }
+    )
+
+    await service.send({ conversationId: conversation.id, content: 'next question' })
+    await done
+
+    // The message text alone is a few hundred chars — only the replayed tool
+    // rounds push the transcript past the threshold.
+    expect(adapter.chatCalls).toHaveLength(1)
+    expect(db.conversations.getById(conversation.id)!.summaryText).toBe('CONDENSED SUMMARY')
+  })
+
+  it('editAndRerun drops a summary that covered the truncated messages', async () => {
+    const conversation = seed()
+    const messages = db.messages.listByConversation(conversation.id)
+    const edited = messages[2] // a user turn (seq 3)
+    // A compacted conversation: the summary covers well past the edited turn.
+    db.conversations.setSummary(conversation.id, 'OLD SUMMARY', messages[9].seq)
+
+    const adapter = new CompactionAdapter(() => ({
+      text: 'CONDENSED SUMMARY',
+      toolCalls: [],
+      finishReason: 'stop',
+    }))
+    let resolveDone: () => void = () => undefined
+    const done = new Promise<void>((r) => (resolveDone = r))
+    const service = new ChatService(
+      db,
+      (channel, payload) => {
+        if (channel !== CHANNELS.streamEvent) return
+        const env = payload as StreamEventEnvelope
+        if (env.event.type === 'done' || env.event.type === 'error') resolveDone()
+      },
+      { resolveAdapter: () => adapter }
+    )
+
+    await service.editAndRerun({
+      conversationId: conversation.id,
+      messageId: edited.id,
+      newContent: 'the edited question',
+    })
+    await done
+
+    // The stale summary is gone (its messages were deleted and their seqs reused).
+    const stored = db.conversations.getById(conversation.id)!
+    expect(stored.summaryText ?? null).toBeNull()
+    expect(stored.summaryThroughSeq ?? null).toBeNull()
+
+    // The edited turn actually reached the model, and no stale summary did.
+    const wire = adapter.invocations[0].messages
+    expect(
+      wire.some(
+        (m) =>
+          m.role === 'user' &&
+          typeof m.content === 'string' &&
+          m.content.includes('the edited question')
+      )
+    ).toBe(true)
+    expect(
+      wire.some((m) => typeof m.content === 'string' && m.content.includes('OLD SUMMARY'))
+    ).toBe(false)
   })
 })

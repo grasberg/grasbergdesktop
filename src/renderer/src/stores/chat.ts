@@ -35,13 +35,28 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
     })
   }
 
-  /** Applies a StartStreamResult that replaces an existing assistant message. */
-  const beginReplacementStream = (replacedMessageId: string, result: StartStreamResult): void => {
-    set((s) => ({
-      messages: replaceOrAppend(s.messages, replacedMessageId, result.assistantMessage),
-      streaming: { streamId: result.streamId, assistantMessageId: result.assistantMessage.id },
-      error: null,
-    }))
+  /**
+   * Applies a StartStreamResult that replaces an existing assistant message.
+   * No-ops when the user switched away while the IPC was in flight — main keeps
+   * generating and handleStreamEvent re-adopts the placeholder on return.
+   */
+  const beginReplacementStream = (
+    conversationId: string,
+    replacedMessageId: string,
+    result: StartStreamResult
+  ): void => {
+    set((s) =>
+      s.conversation?.id === conversationId
+        ? {
+            messages: replaceOrAppend(s.messages, replacedMessageId, result.assistantMessage),
+            streaming: {
+              streamId: result.streamId,
+              assistantMessageId: result.assistantMessage.id,
+            },
+            error: null,
+          }
+        : {}
+    )
   }
 
   /** Replaces the message with the given id by `fn(message)`; others untouched. */
@@ -200,14 +215,23 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
             ...(overrides ? { overrides } : {}),
           })
         )
-        set((s) => ({
-          messages: [
-            ...s.messages,
-            ...(result.userMessage ? [result.userMessage] : []),
-            result.assistantMessage,
-          ],
-          streaming: { streamId: result.streamId, assistantMessageId: result.assistantMessage.id },
-        }))
+        // main awaits model/token resolution before answering, so another
+        // conversation may be open by now — never graft this stream onto it.
+        set((s) =>
+          s.conversation?.id === conversation.id
+            ? {
+                messages: [
+                  ...s.messages,
+                  ...(result.userMessage ? [result.userMessage] : []),
+                  result.assistantMessage,
+                ],
+                streaming: {
+                  streamId: result.streamId,
+                  assistantMessageId: result.assistantMessage.id,
+                },
+              }
+            : {}
+        )
       } catch (e) {
         set({ error: toNormalized(e) })
       }
@@ -258,7 +282,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
         const result = await unwrap(
           window.uld.chat.regenerate({ conversationId: conversation.id, messageId })
         )
-        beginReplacementStream(messageId, result)
+        beginReplacementStream(conversation.id, messageId, result)
       } catch (e) {
         set({ error: toNormalized(e) })
       }
@@ -273,6 +297,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
           window.uld.chat.editAndRerun({ conversationId: conversation.id, messageId, newContent })
         )
         set((s) => {
+          if (s.conversation?.id !== conversation.id) return {}
           const idx = s.messages.findIndex((m) => m.id === messageId)
           const kept = idx >= 0 ? s.messages.slice(0, idx) : s.messages
           return {
@@ -440,6 +465,19 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
           return
         }
       }
+    },
+
+    handleConversationsChanged(conversationId) {
+      const { conversation, streaming } = get()
+      // Only the open conversation needs re-pulling, and never mid-stream: the
+      // live deltas are ahead of what's persisted, and 'done' refreshes anyway.
+      if (conversation?.id !== conversationId || streaming) return
+      void window.uld.conversations.messages(conversationId).then((res) => {
+        if (res.ok && get().conversation?.id === conversationId && !get().streaming) {
+          set({ messages: res.data })
+        }
+      })
+      refreshOpenConversation(conversationId)
     },
 
     clearError() {

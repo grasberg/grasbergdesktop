@@ -416,6 +416,66 @@ describe('CodeService.revertChange', () => {
   })
 })
 
+describe('CodeService write jail (symlinks)', () => {
+  /** Windows without the symlink privilege cannot create one — skip there. */
+  function trySymlink(target: string, path: string, type: 'file' | 'junction'): boolean {
+    try {
+      symlinkSync(target, path, type)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  it('refuses to apply a create through a DANGLING symlink leaving the root', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const change = service.proposeChange(conversation.id, 'notes/new.txt', 'create', 'pwned\n')
+
+    // A symlink inside the project pointing at a file that does NOT exist
+    // outside it: existsSync() reports it as absent, a plain write follows it.
+    const outside = join(baseDir, 'authorized_keys')
+    mkdirSync(join(projectDir, 'notes'), { recursive: true })
+    if (!trySymlink(outside, join(projectDir, 'notes', 'new.txt'), 'file')) return
+
+    expectInvalid(() => service.applyChange(change.id))
+    expect(existsSync(outside)).toBe(false)
+  })
+
+  it('refuses to apply a create through a symlinked parent dir, creating no dirs outside', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const change = service.proposeChange(conversation.id, 'notes/deep/x.txt', 'create', 'pwned\n')
+
+    const outsideDir = join(baseDir, 'outside-dir')
+    mkdirSync(outsideDir, { recursive: true })
+    if (!trySymlink(outsideDir, join(projectDir, 'notes'), 'junction')) return
+
+    expectInvalid(() => service.applyChange(change.id), 'escapes the project root')
+    // The old code ran mkdirSync(dirname) BEFORE the containment check.
+    expect(existsSync(join(outsideDir, 'deep'))).toBe(false)
+    expect(existsSync(join(outsideDir, 'x.txt'))).toBe(false)
+  })
+
+  it('refuses to revert a delete through a DANGLING symlink leaving the root', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const del = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'delete')!
+
+    service.applyChange(del.id)
+    expect(existsSync(join(projectDir, 'src', 'app.ts'))).toBe(false)
+
+    // Someone drops a dangling symlink where the deleted file used to be.
+    const outside = join(baseDir, 'startup.cmd')
+    if (!trySymlink(outside, join(projectDir, 'src', 'app.ts'), 'file')) return
+
+    expectInvalid(() => service.revertChange(del.id))
+    expect(existsSync(outside)).toBe(false)
+  })
+})
+
 describe('CodeService.suggestFiles', () => {
   it('returns matching relative paths, basename matches first', () => {
     const project = openTestProject()

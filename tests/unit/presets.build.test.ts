@@ -113,4 +113,28 @@ describe('decoders', () => {
       cachedInputPerMTok: 0.5,
     })
   })
+
+  // Unknown cache pricing must NOT decode as free: estimateCost then falls back
+  // to the input rate. Older generated tuples encode a missing cache_read as 0.
+  it('leaves cached input unknown for an absent or zero cache price', () => {
+    expect(decodePricing(['x', 'X', 0, 0, 0, 0, 0, 5, 15, -1])).toEqual({
+      inputPerMTok: 5,
+      outputPerMTok: 15,
+    })
+    expect(decodePricing(['x', 'X', 0, 0, 0, 0, 0, 5, 15, 0])).toEqual({
+      inputPerMTok: 5,
+      outputPerMTok: 15,
+    })
+  })
+
+  it('encodes a missing cache_read as unknown even when input/output are priced', () => {
+    const built = buildPresetCatalog({
+      cachey: {
+        id: 'cachey',
+        api: 'https://api.cachey.ai/v1',
+        models: { m: { id: 'm', cost: { input: 5, output: 15 } } },
+      },
+    })
+    expect(built.models.cachey[0][9]).toBe(-1)
+  })
 })

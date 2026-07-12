@@ -331,6 +331,49 @@ describe('ChatService — Mixture of Agents', () => {
     // Advisor blocks were still captured/persisted.
     expect(doneEnvelope.event.message.moaReferences).toHaveLength(2)
   })
+
+  it('contains a DB failure in the advisor phase instead of wedging the conversation', async () => {
+    const aggregatorId = seedProvider()
+    const advisorId = seedProvider()
+    const preset: MoaPreset = {
+      id: randomUUID(),
+      name: 'Panel',
+      referenceModels: [{ providerId: advisorId, modelId: 'ref-a' }],
+      aggregator: { providerId: aggregatorId, modelId: 'agg' },
+      enabled: true,
+    }
+    db.settings.update({ moaPresets: [preset] })
+    const conversation = db.conversations.create({
+      mode: 'chat',
+      title: 'MoA',
+      moaPresetId: preset.id,
+    })
+
+    // The advisor label is built from a providers read; make that read throw
+    // (the aggregator's own resolution still works).
+    const getById = db.providers.getById.bind(db.providers)
+    db.providers.getById = (id: string) => {
+      if (id === advisorId) throw new Error('db read failed')
+      return getById(id)
+    }
+
+    const { service, done } = makeHarness(async () => ({
+      text: 'unused',
+      toolCalls: [],
+      finishReason: 'stop',
+    }))
+    await service.send({ conversationId: conversation.id, content: 'hello' })
+    const doneEnvelope = await done
+
+    // The aggregator still answered; the placeholder never stays 'streaming'.
+    if (doneEnvelope.event.type !== 'done') throw new Error('expected done')
+    expect(doneEnvelope.event.message.status).toBe('complete')
+    expect(doneEnvelope.event.message.content).toBe('Final synthesized answer.')
+    // And the conversation's generation slot was released: a new send works.
+    await expect(
+      service.send({ conversationId: conversation.id, content: 'again' })
+    ).resolves.toBeTruthy()
+  })
 })
 
 describe('MoA preset schema + settings round-trip', () => {

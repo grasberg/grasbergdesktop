@@ -251,7 +251,7 @@ export default function McpServersTab(): ReactElement {
         ) : null}
       </header>
 
-      {formOpen ? <McpForm editing={editing} onDone={closeForm} /> : null}
+      {formOpen ? <McpForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} /> : null}
 
       {!loaded ? (
         <p className="field-hint">Loading…</p>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AdapterMessage, AdapterStreamEvent } from '../../../src/main/providers/adapter'
+import { ProviderError } from '../../../src/main/providers/errors'
 import {
   GoogleAdapter,
   buildGeminiBody,
@@ -126,6 +127,30 @@ describe('GoogleAdapter.chatStream', () => {
     ])
     const finish = events.filter((e) => e.type === 'finish')
     expect(finish).toEqual([{ type: 'finish', reason: 'stop' }])
+  })
+
+  it('throws on an in-band error payload instead of finishing a truncated reply', async () => {
+    // A mid-stream backend failure arrives as {"error":{...}} over HTTP 200.
+    let thrown: unknown
+    try {
+      await collectStream([
+        'data: {"candidates":[{"content":{"parts":[{"text":"Half"}]}}]}\n\n',
+        'data: {"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}\n\n',
+      ])
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(ProviderError)
+    const err = thrown as ProviderError
+    expect(err.code).toBe('server')
+    expect(err.retryable).toBe(true)
+    expect(err.message).toContain('The model is overloaded.')
+  })
+
+  it('throws when the prompt was blocked (promptFeedback, no candidates)', async () => {
+    await expect(
+      collectStream(['data: {"promptFeedback":{"blockReason":"SAFETY"}}\n\n'])
+    ).rejects.toThrow(/blocked \(SAFETY\)/i)
   })
 })
 

@@ -59,10 +59,13 @@ export interface ToolsStoreState {
   /** Enqueues an approval request pushed from main (deduped by requestId). */
   setPendingApproval(req: ToolApprovalRequest): void
   /**
-   * Answers the head request and dequeues it, revealing the next. Scope
-   * 'conversation' also auto-approves the tool's future calls there.
+   * Answers the request the dialog rendered (its requestId) and dequeues it,
+   * revealing the next. Scope 'conversation' also auto-approves the tool's
+   * future calls there. Ignored when that request is no longer the head — main
+   * may have settled it under the click, and the next request's arguments have
+   * not been seen by the user.
    */
-  respond(approved: boolean, scope?: ToolApprovalScope): Promise<void>
+  respond(requestId: string, approved: boolean, scope?: ToolApprovalScope): Promise<void>
   /**
    * Drops a request that main settled on its own (timeout/abort/stopAll) so a
    * stale dialog auto-dismisses without the user having to answer it.
@@ -72,8 +75,12 @@ export interface ToolsStoreState {
   questionQueue: UserQuestionRequest[]
   /** Enqueues a question pushed from main (deduped by requestId). */
   setPendingQuestion(req: UserQuestionRequest): void
-  /** Answers the head question (null = dismissed) and dequeues it. */
-  respondQuestion(answer: string | null): Promise<void>
+  /**
+   * Answers the question the dialog rendered (null = dismissed) and dequeues
+   * it. Ignored when that request is no longer the head (same settle race as
+   * `respond`), so an answer never lands on an unseen question.
+   */
+  respondQuestion(requestId: string, answer: string | null): Promise<void>
   /** Drops a question main settled on its own (timeout/abort/stopAll). */
   settleQuestion(requestId: string): void
 }
@@ -151,9 +158,9 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
       )
     },
 
-    async respond(approved, scope) {
+    async respond(requestId, approved, scope) {
       const pending = get().approvalQueue[0]
-      if (!pending) return
+      if (!pending || pending.requestId !== requestId) return
       // Dequeue first so the dialog advances to the next request and cannot
       // double-submit; main treats an unknown requestId as already-answered.
       set((s) => ({
@@ -183,9 +190,9 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
       )
     },
 
-    async respondQuestion(answer) {
+    async respondQuestion(requestId, answer) {
       const pending = get().questionQueue[0]
-      if (!pending) return
+      if (!pending || pending.requestId !== requestId) return
       set((s) => ({
         questionQueue: s.questionQueue.filter((r) => r.requestId !== pending.requestId),
       }))

@@ -141,6 +141,32 @@ describe('OpenAICompatibleAdapter.generateImage', () => {
       adapter.generateImage({ modelId: 'gpt-image-2', prompt: 'x', count: 1 }, ctx(huge))
     ).rejects.toThrow(/too large/i)
   })
+
+  it('stops an oversized URL download at the cap instead of buffering the whole body', async () => {
+    const CHUNK = 1024 * 1024
+    let pulled = 0
+    // Would stream 100 MB if read to the end; the cap must cut it off early.
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 100) {
+          controller.close()
+          return
+        }
+        pulled++
+        controller.enqueue(new Uint8Array(CHUNK))
+      },
+    })
+    const fetchImpl = makeFetchSequence(
+      makeJsonResponse(200, { data: [{ url: 'https://cdn.example/big.png' }] }),
+      new Response(endless, { status: 200, headers: { 'content-type': 'image/png' } })
+    )
+    const adapter = new OpenAICompatibleAdapter()
+    await expect(
+      adapter.generateImage({ modelId: 'dall-e-3', prompt: 'x', count: 1 }, ctx(fetchImpl))
+    ).rejects.toThrow(/too large/i)
+    // Cancelled at the cap (plus the stream's own readahead) — never read to the end.
+    expect(pulled).toBeLessThanOrEqual(GENERATED_IMAGE_MAX_BYTES / CHUNK + 2)
+  })
 })
 
 describe('ZhipuAdapter.generateImage (CogView)', () => {

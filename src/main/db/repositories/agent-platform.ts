@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentRun, Checkpoint, CheckpointFile } from '@shared/types'
+import type { AgentRun, Checkpoint, CheckpointFile, CheckpointLite } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 
 interface AgentRunRow {
@@ -28,6 +28,14 @@ interface CheckpointRow {
   created_at: number
 }
 
+interface CheckpointLiteRow {
+  id: string
+  conversation_id: string
+  label: string
+  created_at: number
+  paths_json: string
+}
+
 function toRun(row: AgentRunRow): AgentRun {
   return {
     id: row.id,
@@ -54,6 +62,16 @@ function parseFiles(raw: string): CheckpointFile[] {
   }
 }
 
+function parsePaths(raw: string): string[] {
+  try {
+    const value = JSON.parse(raw) as unknown
+    if (!Array.isArray(value)) return []
+    return value.filter((item): item is string => typeof item === 'string')
+  } catch {
+    return []
+  }
+}
+
 function toCheckpoint(row: CheckpointRow): Checkpoint {
   return {
     id: row.id,
@@ -71,8 +89,16 @@ export interface AgentPlatformRepository {
   runsList(conversationId?: string): AgentRun[]
   runStart(input: Omit<AgentRun, 'id' | 'status' | 'result' | 'startedAt' | 'finishedAt'>): AgentRun
   runFinish(id: string, status: Exclude<AgentRun['status'], 'running'>, result: string): AgentRun | null
+  /**
+   * Marks any run still in status 'running' as 'stopped' — recovery for agent
+   * runs interrupted by a crash/quit. Called at app boot. Returns the number of
+   * runs fixed.
+   */
+  markDanglingRunsAsStopped(): number
   checkpointCreate(input: Omit<Checkpoint, 'id' | 'createdAt'>): Checkpoint
   checkpointsList(conversationId: string): Checkpoint[]
+  /** Listing without the file snapshots — restore reads them via checkpointGet. */
+  checkpointsListLite(conversationId: string): CheckpointLite[]
   checkpointGet(id: string): Checkpoint | null
 }
 
@@ -115,6 +141,13 @@ export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatfo
       )
       return runGet(id)
     },
+    markDanglingRunsAsStopped() {
+      const result = driver.run(
+        "UPDATE agent_runs SET status = 'stopped', finished_at = ? WHERE status = 'running'",
+        [Date.now()]
+      )
+      return result.changes
+    },
     checkpointCreate(input) {
       const id = randomUUID()
       const now = Date.now()
@@ -134,6 +167,26 @@ export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatfo
           [conversationId]
         )
         .map(toCheckpoint)
+    },
+    checkpointsListLite(conversationId) {
+      return driver
+        .all<CheckpointLiteRow>(
+          `SELECT id, conversation_id, label, created_at,
+             CASE WHEN json_valid(files_json)
+               THEN (SELECT json_group_array(json_extract(value, '$.relPath'))
+                     FROM json_each(checkpoints.files_json))
+               ELSE '[]' END AS paths_json
+           FROM checkpoints WHERE conversation_id = ?
+           ORDER BY created_at DESC LIMIT 100`,
+          [conversationId]
+        )
+        .map((row) => ({
+          id: row.id,
+          conversationId: row.conversation_id,
+          label: row.label,
+          createdAt: row.created_at,
+          filePaths: parsePaths(row.paths_json),
+        }))
     },
     checkpointGet,
   }

@@ -43,18 +43,21 @@ export default function ToolApprovalDialog(): ReactElement | null {
 
   // Esc = Deny. Capture phase so the global shortcut handler (which would
   // otherwise stop the in-flight generation) never sees the event.
+  // Every response names the request this dialog rendered — main may settle the
+  // head request underneath us, and the answer must not land on the next one.
+  const requestId = pending?.requestId ?? null
   useEffect(() => {
-    if (!visible) return
+    if (!visible || !requestId) return
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        void useToolsStore.getState().respond(false)
+        void useToolsStore.getState().respond(requestId, false)
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [visible])
+  }, [visible, requestId])
 
   if (!pending || !visible) return null
 
@@ -106,7 +109,7 @@ export default function ToolApprovalDialog(): ReactElement | null {
             type="button"
             ref={denyRef}
             className="btn"
-            onClick={() => void useToolsStore.getState().respond(false)}
+            onClick={() => void useToolsStore.getState().respond(pending.requestId, false)}
           >
             Deny
           </button>
@@ -115,7 +118,9 @@ export default function ToolApprovalDialog(): ReactElement | null {
               type="button"
               className="btn"
               title="Also auto-approve future calls of this tool in this conversation (until the app restarts)"
-              onClick={() => void useToolsStore.getState().respond(true, 'conversation')}
+              onClick={() =>
+                void useToolsStore.getState().respond(pending.requestId, true, 'conversation')
+              }
             >
               Allow for this conversation
             </button>
@@ -123,7 +128,7 @@ export default function ToolApprovalDialog(): ReactElement | null {
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => void useToolsStore.getState().respond(true)}
+            onClick={() => void useToolsStore.getState().respond(pending.requestId, true)}
           >
             Allow once
           </button>

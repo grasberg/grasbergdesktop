@@ -314,6 +314,32 @@ describe('runResearchPipeline', () => {
     expect(outcome.injectedContext).toContain('research for this question failed')
   })
 
+  it('keeps the numbered sources and report instructions when the findings are huge', async () => {
+    const deps = makeDeps((opts) => {
+      if (opts.params.responseFormat === 'json') {
+        return Promise.resolve(
+          textResult(JSON.stringify({ queries: ['q1', 'q2', 'q3', 'q4', 'q5', 'q6'] }))
+        )
+      }
+      const toolRounds = opts.messages.filter((m) => m.role === 'tool').length
+      if (toolRounds === 0) return Promise.resolve(toolsResult([toolCall('web_search', { query: 'x' })]))
+      if (toolRounds === 1) {
+        return Promise.resolve(toolsResult([toolCall('fetch_url', { url: 'https://example.com/a' })]))
+      }
+      // Every worker floods its findings past the per-worker cap.
+      return Promise.resolve(textResult('F'.repeat(30_000)))
+    })
+
+    const outcome = await runResearchPipeline('q', 'deep', deps)
+    expect(outcome.research.sources).toHaveLength(1)
+    // The tail (citation ids + instructions) survives; the findings are what shrinks.
+    expect(outcome.injectedContext).toContain('[1] Example Site — https://example.com/a')
+    expect(outcome.injectedContext).toContain('Cite claims inline with [n]')
+    expect(outcome.injectedContext).toContain('Do not mention this process')
+    expect(outcome.injectedContext).toContain('### Topic: q6')
+    expect(outcome.injectedContext.length).toBeLessThanOrEqual(24_000)
+  })
+
   it('sums planner + worker usage into workerUsage', async () => {
     const deps = makeDeps(
       scriptedChat(async () => ({

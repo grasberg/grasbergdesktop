@@ -36,6 +36,23 @@ describe('buildBackup', () => {
     expect(backup.skills[0]).toMatchObject({ name: 'triage', enabled: true })
   })
 
+  it('never exports security-sensitive settings', () => {
+    source.settings.update({
+      outboundWebhookUrl: 'https://hooks.example/T000/B111/secret',
+      telegramBridgePairingCode: '482913',
+      shellExecutionEnabled: true,
+      fontSize: 'large',
+    })
+    const backup = buildBackup(source)
+    expect(backup.settings.outboundWebhookUrl).toBeUndefined()
+    expect(backup.settings.telegramBridgePairingCode).toBeUndefined()
+    expect(backup.settings.shellExecutionEnabled).toBeUndefined()
+    expect(backup.settings.fontSize).toBe('large')
+    const json = JSON.stringify(backup)
+    expect(json).not.toContain('hooks.example')
+    expect(json).not.toContain('482913')
+  })
+
   it('never contains key material', () => {
     source.providers.create({
       id: 'p1',
@@ -227,6 +244,72 @@ describe('applyBackup', () => {
     expect(second.workflowsImported).toBe(0)
     expect(target.conversations.list()).toHaveLength(1)
     expect(target.messages.listByConversation(conversation.id)).toHaveLength(2)
+  })
+
+  it('rejects conversation ids that are not bare app ids', () => {
+    // A Work conversation's id becomes a directory name under the workspaces
+    // base — a traversal segment must never reach the DB.
+    const summary = applyBackup(target, {
+      format: BACKUP_FORMAT,
+      version: 3,
+      conversations: [
+        { id: '../../evil', mode: 'work', title: 'Escape', messages: [] },
+        { id: 'sub/dir', mode: 'work', title: 'Escape 2', messages: [] },
+        { id: 'a1b2-c3', mode: 'work', title: 'Fine', messages: [] },
+      ],
+    })
+    expect(summary.conversationsImported).toBe(1)
+    expect(summary.skippedItems).toBe(2)
+    expect(target.conversations.list().map((c) => c.id)).toEqual(['a1b2-c3'])
+  })
+
+  it('skips a workflow whose graph does not match the strict schema', () => {
+    const summary = applyBackup(target, {
+      format: BACKUP_FORMAT,
+      version: 3,
+      workflows: [
+        { name: 'Broken', graph: { nodes: [{}], edges: [] } },
+        { name: 'Good', graph: { nodes: [], edges: [] } },
+      ],
+    })
+    expect(summary.workflowsImported).toBe(1)
+    expect(summary.skippedItems).toBe(1)
+    expect(target.workflows.list().map((w) => w.name)).toEqual(['Good'])
+  })
+
+  it('imports each conversation atomically: a failed transcript leaves nothing behind', () => {
+    const realInsert = target.messages.insert
+    let inserts = 0
+    target.messages.insert = (message) => {
+      if (++inserts === 2) throw new Error('disk full')
+      realInsert(message)
+    }
+    // Only the transaction may roll the half-import back — not a compensating
+    // delete, which a crash would never get to run either.
+    target.conversations.remove = () => {
+      throw new Error('remove unavailable')
+    }
+
+    const summary = applyBackup(target, {
+      format: BACKUP_FORMAT,
+      version: 3,
+      conversations: [
+        {
+          id: 'half',
+          mode: 'chat',
+          title: 'Half',
+          messages: [
+            { id: 'm1', role: 'user', content: 'one', seq: 1 },
+            { id: 'm2', role: 'assistant', content: 'two', seq: 2 },
+          ],
+        },
+      ],
+    })
+
+    expect(summary.conversationsImported).toBe(0)
+    expect(summary.skippedItems).toBe(1)
+    expect(target.conversations.getById('half')).toBeNull()
+    expect(target.messages.listByConversation('half')).toHaveLength(0)
   })
 
   it('remaps legacy pre-v3 modes to work on import', () => {

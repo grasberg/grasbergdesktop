@@ -28,6 +28,13 @@ const SCOPE = 'openid profile email offline_access'
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 /** Refresh a little before the token actually expires. */
 const EXPIRY_SKEW_MS = 60 * 1000
+/**
+ * Hard ceiling on a token exchange/refresh HTTP call so a token endpoint that
+ * accepts the connection but never responds can't hang the awaiting caller (and,
+ * for an interactive send, keep the conversation's generation slot reserved)
+ * indefinitely. The caller may also pass its own AbortSignal to cut it short.
+ */
+const TOKEN_REQUEST_TIMEOUT_MS = 30 * 1000
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
@@ -135,8 +142,22 @@ export class OpenAiOAuthManager {
     string,
     Promise<{ accessToken: string; accountId: string | null }>
   >()
+  /**
+   * Bumped whenever a session is removed or replaced. A refresh that started
+   * before the bump must not write its (now stale) tokens back — that would
+   * resurrect a session the user just signed out of.
+   */
+  private readonly sessionGeneration = new Map<string, number>()
 
   constructor(private readonly deps: OAuthDeps) {}
+
+  private generation(providerId: string): number {
+    return this.sessionGeneration.get(providerId) ?? 0
+  }
+
+  private bumpGeneration(providerId: string): void {
+    this.sessionGeneration.set(providerId, this.generation(providerId) + 1)
+  }
 
   private get fetchImpl(): typeof fetch {
     return this.deps.fetchImpl ?? globalThis.fetch
@@ -153,6 +174,7 @@ export class OpenAiOAuthManager {
   }
 
   logout(providerId: string): void {
+    this.bumpGeneration(providerId)
     this.deps.repo.deleteOAuthRow(providerId)
   }
 
@@ -220,7 +242,14 @@ export class OpenAiOAuthManager {
         )
       )
       v4.listen(REDIRECT_PORT, '127.0.0.1', () => {
-        void this.deps.openExternal(buildAuthorizeUrl(challenge, state))
+        this.deps.openExternal(buildAuthorizeUrl(challenge, state)).catch((e) =>
+          reject(
+            new ProviderError('unknown', 'Could not open the system browser for ChatGPT sign-in.', {
+              retryable: false,
+              cause: e,
+            })
+          )
+        )
       })
       servers.push(v4)
       // IPv6 loopback is best-effort: hosts without IPv6 simply skip it.
@@ -243,12 +272,22 @@ export class OpenAiOAuthManager {
     }).finally(() => cleanup?.())
 
     const tokens = await this.exchangeCode(code, verifier)
+    // A refresh of the previous session may still be in flight — invalidate it
+    // so it can't overwrite the session we are about to store.
+    this.bumpGeneration(providerId)
     this.persist(providerId, tokens)
     return this.status(providerId)
   }
 
-  /** Return a valid access token + account id, refreshing when near expiry. */
-  async getAccessToken(providerId: string): Promise<{ accessToken: string; accountId: string | null }> {
+  /**
+   * Return a valid access token + account id, refreshing when near expiry. An
+   * optional AbortSignal cancels an in-flight refresh HTTP call (e.g. the caller
+   * pressed Stop), so a hung token endpoint never keeps the caller blocked.
+   */
+  async getAccessToken(
+    providerId: string,
+    signal?: AbortSignal
+  ): Promise<{ accessToken: string; accountId: string | null }> {
     const row = this.deps.repo.getOAuthRow(providerId)
     if (!row) {
       throw new ProviderError('auth', 'Not signed in to ChatGPT — sign in from Settings → Providers.', {
@@ -267,7 +306,9 @@ export class OpenAiOAuthManager {
     // provider must share ONE refresh or the second invalidates the first.
     let pending = this.refreshInFlight.get(providerId)
     if (!pending) {
-      pending = this.doRefresh(providerId, row).finally(() => this.refreshInFlight.delete(providerId))
+      pending = this.doRefresh(providerId, row, signal).finally(() =>
+        this.refreshInFlight.delete(providerId)
+      )
       this.refreshInFlight.set(providerId, pending)
     }
     return pending
@@ -275,12 +316,19 @@ export class OpenAiOAuthManager {
 
   private async doRefresh(
     providerId: string,
-    row: OAuthTokenRow
+    row: OAuthTokenRow,
+    signal?: AbortSignal
   ): Promise<{ accessToken: string; accountId: string | null }> {
+    const generation = this.generation(providerId)
     const refreshToken = this.deps.decrypt(row.encryptedRefresh as string)
-    const tokens = await this.refresh(refreshToken)
+    const tokens = await this.refresh(refreshToken, signal)
     // A refresh may omit a new refresh token — keep the old one.
     if (!tokens.refresh_token) tokens.refresh_token = refreshToken
+    if (this.generation(providerId) !== generation || !this.deps.repo.getOAuthRow(providerId)) {
+      throw new ProviderError('auth', 'Signed out of ChatGPT — sign in again from Settings.', {
+        retryable: false,
+      })
+    }
     this.persist(providerId, tokens, row)
     return {
       accessToken: tokens.access_token,
@@ -315,28 +363,48 @@ export class OpenAiOAuthManager {
     })
   }
 
-  private async refresh(refreshToken: string): Promise<TokenResponse> {
-    return this.tokenRequest({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-      scope: SCOPE,
-    })
+  private async refresh(refreshToken: string, signal?: AbortSignal): Promise<TokenResponse> {
+    return this.tokenRequest(
+      {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
+        scope: SCOPE,
+      },
+      signal
+    )
   }
 
-  private async tokenRequest(form: Record<string, string>): Promise<TokenResponse> {
+  private async tokenRequest(
+    form: Record<string, string>,
+    signal?: AbortSignal
+  ): Promise<TokenResponse> {
+    // Bound the call by a hard timeout, and honour the caller's abort, via a
+    // local controller so a hung endpoint can't block the awaiting caller.
+    const controller = new AbortController()
+    const onAbort = (): void => controller.abort()
+    if (signal) {
+      if (signal.aborted) controller.abort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
+    const timer = setTimeout(() => controller.abort(), TOKEN_REQUEST_TIMEOUT_MS)
+    timer.unref?.()
     let res: Response
     try {
       res = await this.fetchImpl(TOKEN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
         body: new URLSearchParams(form).toString(),
+        signal: controller.signal,
       })
     } catch (e) {
       throw new ProviderError('network', 'Could not reach the OpenAI token endpoint.', {
         retryable: true,
         cause: e,
       })
+    } finally {
+      clearTimeout(timer)
+      if (signal) signal.removeEventListener('abort', onAbort)
     }
     if (!res.ok) {
       throw new ProviderError('auth', `ChatGPT token exchange failed (HTTP ${res.status}).`, {

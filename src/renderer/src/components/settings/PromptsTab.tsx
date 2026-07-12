@@ -107,7 +107,9 @@ export default function PromptsTab(): ReactElement {
         ) : null}
       </header>
 
-      {formOpen ? <PromptForm editing={editing} onDone={closeForm} /> : null}
+      {formOpen ? (
+        <PromptForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />
+      ) : null}
 
       {!loaded ? (
         <p className="field-hint">Loading…</p>

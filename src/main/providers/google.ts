@@ -20,7 +20,7 @@ import type {
   ContentPart,
   ProviderAdapter,
 } from './adapter'
-import { ProviderError } from './errors'
+import { ProviderError, normalizeHttpError } from './errors'
 import { checkedFetch, joinUrl, requireStreamBody } from './http'
 import { collectStream, parseDataUrl, parseToolArguments, probeConnection } from './native'
 import { withRetry } from './retry'
@@ -147,6 +147,35 @@ function mapGeminiFinish(reason: unknown): FinishReason | undefined {
   }
 }
 
+/**
+ * Gemini reports two failures with HTTP 200: a mid-stream backend failure comes
+ * back as an in-band `{error:{code,message,status}}` payload, and a prompt the
+ * safety filter blocked as `promptFeedback.blockReason` with no candidates.
+ * Both would otherwise read as a successful, empty reply — throw instead.
+ */
+export function assertNoGeminiPayloadError(json: unknown, secrets: string[]): void {
+  if (!json || typeof json !== 'object') return
+  const ev = json as Record<string, unknown>
+  const err = ev.error as { code?: unknown } | undefined
+  if (err && typeof err === 'object') {
+    throw normalizeHttpError(
+      typeof err.code === 'number' ? err.code : 500,
+      JSON.stringify(err),
+      'google',
+      undefined,
+      secrets
+    )
+  }
+  const blockReason = (ev.promptFeedback as { blockReason?: unknown } | undefined)?.blockReason
+  const candidates = ev.candidates
+  if (typeof blockReason === 'string' && (!Array.isArray(candidates) || candidates.length === 0)) {
+    throw new ProviderError('invalid_request', `The prompt was blocked (${blockReason}).`, {
+      retryable: false,
+      providerType: 'google',
+    })
+  }
+}
+
 /** One parsed Gemini SSE chunk → normalized stream events (tool ids are placeholders). */
 export function parseGeminiChunk(json: unknown): AdapterStreamEvent[] {
   if (!json || typeof json !== 'object') return []
@@ -233,6 +262,7 @@ export class GoogleAdapter implements ProviderAdapter {
       } catch {
         continue
       }
+      assertNoGeminiPayloadError(json, [ctx.apiKey])
       for (const e of parseGeminiChunk(json)) {
         if (e.type === 'tool_call') {
           sawToolCall = true

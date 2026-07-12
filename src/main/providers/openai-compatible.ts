@@ -33,7 +33,7 @@ import type {
   ProviderAdapter,
 } from './adapter'
 import { ProviderError, toNormalizedError, toProviderError } from './errors'
-import { checkedFetch, joinUrl, requireStreamBody } from './http'
+import { checkedFetch, joinUrl, readBytesCapped, requireStreamBody } from './http'
 import { withRetry } from './retry'
 import { parseSSE } from './sse'
 
@@ -353,8 +353,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       secrets: [ctx.apiKey],
       fetchImpl: ctx.fetchImpl,
     })
-    const buffer = new Uint8Array(await res.arrayBuffer())
-    if (buffer.byteLength === 0 || buffer.byteLength > GENERATED_IMAGE_MAX_BYTES) {
+    const buffer = await readBytesCapped(res, GENERATED_IMAGE_MAX_BYTES)
+    if (!buffer || buffer.byteLength === 0) {
       throw new ProviderError('unknown', 'The generated image was empty or too large.', {
         retryable: false,
         providerType: this.type,
@@ -498,8 +498,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       reasoning: msg.reasoning_content ?? undefined,
       toolCalls,
       usage: completion.usage ? mapUsage(completion.usage) : undefined,
+      // Emitted tool calls win over the reported reason: quirky servers return
+      // tool calls alongside finish_reason 'stop', and the tool loop gates on
+      // 'tool_calls'.
       finishReason:
-        mapFinishReason(choice.finish_reason) ?? (toolCalls.length > 0 ? 'tool_calls' : 'stop'),
+        toolCalls.length > 0 ? 'tool_calls' : (mapFinishReason(choice.finish_reason) ?? 'stop'),
     }
   }
 
@@ -560,7 +563,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
     // Providers that never send finish_reason: flush what we have and infer.
     for (const ev of flushToolCalls()) yield ev
-    yield { type: 'finish', reason: finishReason ?? (emitted.size > 0 ? 'tool_calls' : 'stop') }
+    yield { type: 'finish', reason: emitted.size > 0 ? 'tool_calls' : (finishReason ?? 'stop') }
   }
 
   async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {

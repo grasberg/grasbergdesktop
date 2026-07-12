@@ -19,7 +19,7 @@ import type { AppDatabase } from '../../db/database'
 import type { Keystore } from '../../keys/keystore'
 import { redactKnownSecrets } from '../../providers/redact'
 import { capToolResult } from '../definitions'
-import { namespaceMcpToolId } from './naming'
+import { namespaceMcpToolIds } from './naming'
 import { defaultMcpConnector, type McpConnection, type McpConnector } from './transports'
 
 interface ServerState {
@@ -46,6 +46,8 @@ export class McpManager {
   private readonly states = new Map<string, ServerState>()
   /** toolId -> { serverId, originalName } (authoritative for execution). */
   private readonly reverse = new Map<string, { serverId: string; name: string }>()
+  /** serverId -> lifecycle generation; bumped by every connect/disconnect. */
+  private readonly generations = new Map<string, number>()
   private readonly connector: McpConnector
 
   constructor(private readonly deps: McpManagerDeps) {
@@ -92,7 +94,20 @@ export class McpManager {
     }
   }
 
+  /** Invalidates any in-flight connect for `serverId` and returns the new generation. */
+  private bumpGeneration(serverId: string): number {
+    const next = (this.generations.get(serverId) ?? 0) + 1
+    this.generations.set(serverId, next)
+    return next
+  }
+
+  /** True once a newer connect/disconnect/remove has superseded this attempt. */
+  private superseded(serverId: string, generation: number): boolean {
+    return this.generations.get(serverId) !== generation
+  }
+
   private async disconnect(serverId: string): Promise<void> {
+    this.bumpGeneration(serverId)
     const state = this.states.get(serverId)
     if (!state) return
     this.clearServerTools(serverId)
@@ -106,6 +121,7 @@ export class McpManager {
   private async connect(config: McpServerConfig): Promise<void> {
     // Reset any prior state for this server.
     await this.disconnect(config.id)
+    const generation = this.bumpGeneration(config.id)
     const secrets = this.decryptSecrets(config.id)
     const state: ServerState = {
       status: 'connecting',
@@ -118,14 +134,31 @@ export class McpManager {
 
     try {
       const connection = await this.connector(config, secrets)
+      // A concurrent disconnect/remove/reconnect may have superseded this
+      // attempt while the transport was coming up. Nothing tracks the
+      // connection we just opened any more, so close it here — otherwise the
+      // stdio child survives as a zombie that even stopAll can't reach.
+      if (this.superseded(config.id, generation)) {
+        await this.closeQuietly(connection)
+        return
+      }
       // Track the connection BEFORE listTools so that if discovery fails, the
       // catch (and disconnect/stopAll) can still close the already-spawned
       // transport/stdio child — otherwise it leaks as a zombie process that
       // multiplies on every reconnect.
       state.connection = connection
       const discovered = await connection.listTools()
-      state.tools = discovered.map((tool) => {
-        const toolId = namespaceMcpToolId(config.key, tool.name)
+      if (this.superseded(config.id, generation)) {
+        state.connection = null
+        await this.closeQuietly(connection)
+        return
+      }
+      const toolIds = namespaceMcpToolIds(
+        config.key,
+        discovered.map((tool) => tool.name)
+      )
+      state.tools = discovered.map((tool, index) => {
+        const toolId = toolIds[index]
         this.reverse.set(toolId, { serverId: config.id, name: tool.name })
         return { toolId, name: tool.name, description: tool.description, schema: tool.inputSchema }
       })
@@ -135,6 +168,7 @@ export class McpManager {
       // Close the transport if it came up before the failure (see above).
       await this.closeQuietly(state.connection)
       state.connection = null
+      if (this.superseded(config.id, generation)) return
       state.status = 'error'
       // Redact: the message may echo the request URL or an auth header value,
       // and this string is broadcast to the renderer via getRuntime().
@@ -275,6 +309,7 @@ export class McpManager {
   async remove(id: string): Promise<McpServerConfig[]> {
     await this.disconnect(id)
     this.states.delete(id)
+    this.generations.delete(id)
     this.deps.db.secrets.deleteAllFor('mcp_server', id)
     this.deps.db.mcpServers.remove(id)
     this.notifyChanged()

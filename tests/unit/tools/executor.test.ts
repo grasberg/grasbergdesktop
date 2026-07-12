@@ -201,6 +201,57 @@ describe('fetch_url', () => {
     expect(garbage).toMatch(/not a valid absolute URL/i)
   })
 
+  it('refuses internal targets in every spelling a URL can carry', async () => {
+    const fetchImpl = vi.fn()
+    const { executor } = createToolSystem(db, null, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    const internal = [
+      'https://localhost:8443/x',
+      'https://127.0.0.1/x',
+      'https://192.168.1.1/x',
+      'https://[::1]/x',
+      // WHATWG canonicalizes an IPv4-mapped IPv6 host to compressed HEX
+      // ('[::ffff:7f00:1]'), which a dotted-quad-only guard never matches.
+      'https://[::ffff:127.0.0.1]:8443/x',
+      'https://[::ffff:7f00:1]/x',
+      'https://[::ffff:c0a8:101]/x',
+      'https://[fe80::1]/x',
+      'https://[fd00::1]/x',
+      // Shorthand / octal / decimal IPv4 spellings of 127.0.0.1.
+      'https://127.1/x',
+      'https://0177.0.0.1/x',
+      'https://2130706433/x',
+      'https://0x7f000001/x',
+      // Trailing-dot FQDN forms resolve like their bare forms.
+      'https://localhost./x',
+      'https://127.0.0.1./x',
+    ]
+    for (const url of internal) {
+      const result = await executor.execute(call('fetch_url', { url }), {
+        conversation: conv(false),
+        approval: approveAll,
+      })
+      expect(result, url).toMatch(/internal\/loopback\/link-local/i)
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('still allows a public IPv6 literal', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } })
+    )
+    const { executor } = createToolSystem(db, null, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    const result = await executor.execute(
+      call('fetch_url', { url: 'https://[2606:4700:4700::1111]/x' }),
+      { conversation: conv(false), approval: approveAll }
+    )
+    expect(result).toContain('HTTP 200')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
   it('refuses non-textual content types', async () => {
     const fetchImpl = vi.fn(
       async () =>
@@ -543,6 +594,25 @@ describe('run_shell_command tool (opt-in)', () => {
     const { registry } = createToolSystem(db) // default settings: shell off
     expect(registry.listDefinitions().some((t) => t.id === 'run_shell_command')).toBe(false)
   })
+
+  it("the stream's abort signal kills a long-running command instead of waiting for its timeout", async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const controller = new AbortController()
+    const started = Date.now()
+    const running = executor.execute(
+      // 10 minutes of nothing: only the signal can end this before the timeout.
+      call('run_shell_command', {
+        command: 'node -e "setTimeout(() => {}, 600000)"',
+        timeoutSeconds: 600,
+      }),
+      { conversation: conv(true), approval: approveAll, signal: controller.signal }
+    )
+    setTimeout(() => controller.abort(), 300)
+    const result = await running
+    expect(result).toMatch(/aborted/i)
+    expect(Date.now() - started).toBeLessThan(20_000)
+  }, 30_000)
 })
 
 describe('repo_map tool', () => {

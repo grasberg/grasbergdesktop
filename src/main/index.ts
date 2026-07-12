@@ -4,13 +4,14 @@
  * navigation guards, sandboxed renderer).
  */
 
-import { mkdirSync, existsSync } from 'node:fs'
+import { mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserWindow, Menu, Tray, app, globalShortcut, session, shell } from 'electron'
+import { BrowserWindow, Menu, Tray, app, dialog, globalShortcut, session, shell } from 'electron'
 import { CHANNELS } from '@shared/ipc'
 import { toRunSnippet } from '@shared/workflow-status'
 import { openDatabase, type AppDatabase } from './db/database'
+import { redactSecrets } from './providers/redact'
 import { keystore } from './keys/keystore'
 import { ChatService } from './services/chat-service'
 import { ApprovalBroker } from './services/approval-broker'
@@ -213,6 +214,10 @@ function createWindow(): BrowserWindow {
   mainWindow = win
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
+    // The hidden browser-tool window is a BrowserWindow too, so leaving it open
+    // would keep 'window-all-closed' from ever firing (the app would live on
+    // with no UI). It is recreated on demand by the next browser/computer call.
+    browserSession?.close()
   })
 
   win.once('ready-to-show', () => {
@@ -272,6 +277,9 @@ function bootstrap(): void {
   db = database
   // Recover generations interrupted by a crash or hard quit.
   database.messages.markDanglingStreamingAsStopped()
+  // Same for background agent runs — their control-plane rows would otherwise
+  // stay 'running' forever in the Agent Control Center.
+  database.agentPlatform.markDanglingRunsAsStopped()
   // Seed the shipped skill library (no-op once seeded at the current version).
   // In dev the folder sits in the repo; packaged builds copy it next to the
   // asar via electron-builder extraResources.
@@ -407,7 +415,7 @@ function bootstrap(): void {
     tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker, questions },
     imageDir: attachmentsDir,
     browser,
-    getAccessToken: (providerId) => oauth.getAccessToken(providerId),
+    getAccessToken: (providerId, signal) => oauth.getAccessToken(providerId, signal),
   })
 
   const imBridge = new ImBridgeManager({
@@ -504,8 +512,35 @@ function bootstrap(): void {
   installQuickAccess()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    // Counting windows would count the hidden browser-tool one (see mainWindow).
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
   })
+}
+
+/**
+ * Startup failed (corrupt database, failed migration). A packaged build has no
+ * console, so the user has to be told in a dialog — including where the
+ * pre-migration snapshot the database layer leaves behind can be found.
+ */
+function showStartupFailure(message: string): void {
+  if (process.env.SMOKE_TEST === '1') return
+  try {
+    const dataDir = join(app.getPath('userData'), 'data')
+    const dbPath = join(dataDir, 'uld.sqlite3')
+    const snapshot = (existsSync(dataDir) ? readdirSync(dataDir) : []).find(
+      (name) => name.startsWith('uld.sqlite3.pre-v') && name.endsWith('.bak')
+    )
+    const recovery = snapshot
+      ? `\n\nA pre-migration snapshot of the database exists:\n${join(dataDir, snapshot)}\n` +
+        `With Grasberg closed, you can restore it by renaming that file over ${dbPath}.`
+      : ''
+    dialog.showErrorBox(
+      'Grasberg could not start',
+      `${message}\n\nDatabase: ${dbPath}${recovery}`
+    )
+  } catch {
+    // A dialog is best-effort — the exit below happens either way.
+  }
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
@@ -539,8 +574,10 @@ if (!gotSingleInstanceLock) {
     .whenReady()
     .then(bootstrap)
     .catch((e: unknown) => {
-      // Startup failures (e.g. corrupt database) — message never contains keys.
-      console.error('Failed to start:', e instanceof Error ? e.message : String(e))
+      // Startup failures (e.g. corrupt database) — redacted before it is shown.
+      const message = redactSecrets(e instanceof Error ? e.message : String(e))
+      console.error('Failed to start:', message)
+      showStartupFailure(message)
       void cleanup().finally(() => app.exit(1))
     })
 }

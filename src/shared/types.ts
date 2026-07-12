@@ -1478,3 +1478,12 @@ export interface AppInfo {
   encryptionAvailable: boolean
   userDataPath: string
 }
+
+/** A checkpoint without its file snapshots — what the checkpoint list renders. */
+export interface CheckpointLite {
+  id: string
+  conversationId: string
+  label: string
+  createdAt: number
+  filePaths: string[]
+}

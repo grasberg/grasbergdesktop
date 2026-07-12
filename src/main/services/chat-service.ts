@@ -75,6 +75,7 @@ import { formatSourcesSection } from '@shared/citations'
 import { storeGeneratedImage } from '../ipc/attachments'
 import { runCompletionHooks } from './completion-hooks'
 import { findPricing } from '@shared/pricing'
+import { presetPricing } from '@shared/presets'
 import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
 
 const DEFAULT_TITLE = 'New chat'
@@ -95,7 +96,11 @@ export function pickAutoRouteProvider(
   }
   const cost = (provider: ProviderConfig): number | null => {
     if (isLocal(provider)) return 0
-    const pricing = findPricing(provider.type, provider.defaultModelId)
+    // A preset-backed provider is type 'openai-compatible', whose pricing table
+    // is empty by design — its prices live in the preset catalog.
+    const pricing = provider.presetId
+      ? presetPricing(provider.presetId, provider.defaultModelId)
+      : findPricing(provider.type, provider.defaultModelId)
     return pricing ? pricing.inputPerMTok + pricing.outputPerMTok * 2 : null
   }
   let candidates = providers.filter(
@@ -275,7 +280,10 @@ export interface ChatServiceOptions {
    * Resolves an OAuth access token (+ account id) for providers using a login
    * flow. Injected from the OpenAI OAuth manager; absent in tests/headless.
    */
-  getAccessToken?: (providerId: string) => Promise<{ accessToken: string; accountId: string | null }>
+  getAccessToken?: (
+    providerId: string,
+    signal?: AbortSignal
+  ) => Promise<{ accessToken: string; accountId: string | null }>
   /** Directory holding stored image attachments (for the vision wire payload). */
   imageDir?: string
   /** Embedded browser — a computer-use screenshot is injected after each round. */
@@ -533,9 +541,26 @@ function messageEstimateText(message: Message): string {
   return text
 }
 
+/**
+ * Tokens one message costs on the wire: its text plus the tool round buildHistory
+ * replays with it (arguments + the truncated result of every call). In agentic
+ * conversations the replayed tool payload dominates the transcript, so an
+ * estimate that ignores it never reaches the compaction threshold.
+ */
+function estimateMessageTokens(message: Message): number {
+  let tokens = estimateTokens(messageEstimateText(message))
+  for (const call of message.toolCalls ?? []) {
+    tokens += estimateTokens(call.arguments)
+    tokens += estimateTokens(truncateToolResultForReplay(call.result ?? ''))
+  }
+  return tokens
+}
+
 export class ChatService {
   private readonly streams = new Map<string, ActiveStream>()
   private readonly activeByConversation = new Map<string, string>()
+  /** Abort controllers of PENDING reservations (see reserve()). */
+  private readonly pendingControllers = new Map<string, AbortController>()
   private readonly backgroundTasks = new Map<string, BackgroundTask>()
   private backgroundTaskSeq = 0
 
@@ -620,6 +645,14 @@ export class ChatService {
         throw new ProviderError('invalid_request', 'Message not found.')
       }
       this.db.messages.deleteAfterSeq(conversation.id, target.seq)
+      // The summary covered messages that no longer exist, and the truncated
+      // seqs get reused — leaving it would make the edited turn (and every turn
+      // after it) fall below summary_through_seq and vanish from the wire.
+      if ((conversation.summaryThroughSeq ?? 0) >= target.seq) {
+        this.db.conversations.clearSummary(conversation.id)
+        conversation.summaryText = null
+        conversation.summaryThroughSeq = null
+      }
       return this.start(conversation, settings, resolved, updated, moa)
     })
   }
@@ -632,6 +665,10 @@ export class ChatService {
   stopConversation(conversationId: string): void {
     const streamId = this.activeByConversation.get(conversationId)
     if (!streamId) return
+    if (streamId === PENDING_STREAM) {
+      this.pendingControllers.get(conversationId)?.abort()
+      return
+    }
     this.streams.get(streamId)?.controller.abort()
   }
 
@@ -646,8 +683,19 @@ export class ChatService {
       if (task.status === 'running') {
         task.status = 'stopped'
         task.controller.abort()
+        // The .then/.catch handlers below skip runFinish once the record is no
+        // longer 'running', so the persistent row must be closed here or it
+        // stays 'running' forever.
+        if (task.runId) {
+          try {
+            this.db.agentPlatform.runFinish(task.runId, 'stopped', task.result)
+          } catch {
+            // Writes can fail during shutdown; boot recovery sweeps the rest.
+          }
+        }
       }
     }
+    for (const controller of this.pendingControllers.values()) controller.abort()
     const active = [...this.streams.values()]
     for (const { controller } of active) controller.abort()
     if (active.length === 0) return
@@ -690,15 +738,22 @@ export class ChatService {
    * either registered its stream and double-start. `start()` overwrites the
    * PENDING marker with the real stream id; releaseReservation() clears it only
    * while it is still PENDING (i.e. the generation never actually started).
+   *
+   * The generation's AbortController is created here, not in registerStream, so
+   * a Stop issued during the pre-registration phase (resolveTarget's OAuth token
+   * refresh) is not silently dropped: registerStream adopts this controller, so
+   * the generation aborts as soon as it reaches the adapter.
    */
   private reserve(conversationId: string): void {
     this.ensureIdle(conversationId)
     this.activeByConversation.set(conversationId, PENDING_STREAM)
+    this.pendingControllers.set(conversationId, new AbortController())
   }
 
   private releaseReservation(conversationId: string): void {
     if (this.activeByConversation.get(conversationId) === PENDING_STREAM) {
       this.activeByConversation.delete(conversationId)
+      this.pendingControllers.delete(conversationId)
     }
   }
 
@@ -723,9 +778,10 @@ export class ChatService {
 
   /**
    * Registers a generation in both tracking maps (overwriting the PENDING
-   * reservation) so stop()/stopConversation()/stopAll() can reach it. The
-   * caller must assign the real work promise to `active.done` and pair this
-   * with releaseStream() when the work settles.
+   * reservation) so stop()/stopConversation()/stopAll() can reach it. Adopts the
+   * reservation's controller, so a Stop already issued during the pending phase
+   * still aborts this generation. The caller must assign the real work promise
+   * to `active.done` and pair this with releaseStream() when the work settles.
    */
   private registerStream(conversationId: string): {
     streamId: string
@@ -733,7 +789,8 @@ export class ChatService {
     active: ActiveStream
   } {
     const streamId = randomUUID()
-    const controller = new AbortController()
+    const controller = this.pendingControllers.get(conversationId) ?? new AbortController()
+    this.pendingControllers.delete(conversationId)
     const active: ActiveStream = { controller, conversationId, done: Promise.resolve() }
     this.streams.set(streamId, active)
     this.activeByConversation.set(conversationId, streamId)
@@ -787,7 +844,13 @@ export class ChatService {
           `${provider.label} uses ChatGPT sign-in, which isn't available in this context.`
         )
       }
-      const token = await this.options.getAccessToken(provider.id)
+      // Pass the pending reservation's abort signal (if this resolve is part of
+      // a reserved generation) so a Stop during the PENDING phase cancels a hung
+      // token refresh and frees the conversation slot instead of blocking on it.
+      const token = await this.options.getAccessToken(
+        provider.id,
+        this.pendingControllers.get(conversation.id)?.signal
+      )
       apiKey = token.accessToken
       accountId = token.accountId
     } else {
@@ -1229,7 +1292,7 @@ export class ChatService {
       const settings = this.db.settings.get()
       const resolved = await this.resolveTarget(conversation, settings, undefined)
       const compacted = await this.compact(conversation, resolved, settings, undefined, true)
-      if (compacted) this.broadcast(CHANNELS.conversationsChanged, {})
+      if (compacted) this.broadcast(CHANNELS.conversationsChanged, { conversationId: conversation.id })
       return { compacted }
     } finally {
       this.releaseReservation(conversation.id)
@@ -1261,7 +1324,7 @@ export class ChatService {
 
     if (!force) {
       const estimate =
-        active.reduce((sum, m) => sum + estimateTokens(messageEstimateText(m)), 0) +
+        active.reduce((sum, m) => sum + estimateMessageTokens(m), 0) +
         estimateTokens(conversation.summaryText ?? '')
       if (estimate < threshold) return false
     }
@@ -1344,12 +1407,14 @@ export class ChatService {
 
     this.insertUserMessage(conversationId, userText)
 
-    const toolPlan = this.planTools(resolved)
+    // A headless reply (the IM bridge) is one non-streaming chat() call with no
+    // tools on the wire, so the prompt must not advertise any: empty promptOpts
+    // suppress both the tools section and the manual-instructions fallback.
     const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
     const history = this.buildHistory(
       conversation,
       settings,
-      toolPlan.promptOpts,
+      {},
       visionEnabled,
       this.shouldReplayToolCalls(resolved)
     )
@@ -1379,7 +1444,7 @@ export class ChatService {
     }
     this.db.messages.insert(assistant)
     this.db.conversations.touch(conversationId, Date.now())
-    this.broadcast(CHANNELS.conversationsChanged, {})
+    this.broadcast(CHANNELS.conversationsChanged, { conversationId })
     await runCompletionHooks(conversation, assistant)
     return result.text
   }
@@ -1450,13 +1515,13 @@ export class ChatService {
     // by default; users can grant more in Settings).
     const approvedTools = new Set(opts?.approvedToolIds ?? [])
     const tools = this.options.tools
-    const toolDefs: AdapterToolDef[] =
-      opts?.useTools && tools
-        ? tools.registry
-            .listEnabledDefinitions()
-            .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
-            .map(toAdapterToolDef)
-        : []
+    // Keep the enabled defs: the grants hold definition ids ('custom:<uuid>' for
+    // custom tools) while a call arrives under its WIRE name, so the name has to
+    // be mapped back to an id before the membership test below.
+    const enabledDefs = opts?.useTools && tools ? tools.registry.listEnabledDefinitions() : []
+    const toolDefs: AdapterToolDef[] = enabledDefs
+      .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
+      .map(toAdapterToolDef)
     const params: ChatParams = {
       ...resolved.params,
       ...(opts?.json ? { responseFormat: 'json' as const } : {}),
@@ -1490,10 +1555,16 @@ export class ChatService {
       for (const call of result.toolCalls) {
         const out = await tools.executor.execute(call, {
           conversation: stub,
-          approval: async (req) => ({
-            approved: approvedTools.has(req.toolCall.name),
-            scope: 'once' as const,
-          }),
+          approval: async (req) => {
+            const def = enabledDefs.find(
+              (d) => d.id === req.toolCall.name || d.name === req.toolCall.name
+            )
+            return {
+              approved: !!def && approvedTools.has(def.id),
+              scope: 'once' as const,
+            }
+          },
+          ...(opts?.signal ? { signal: opts.signal } : {}),
         })
         messages.push({ role: 'tool', content: out, toolCallId: call.id })
       }
@@ -1931,6 +2002,7 @@ export class ChatService {
                   // mutations, auto-accept edits still skips the edit dialog.
                   planMode: ctx.planMode,
                   autoAcceptEdits: ctx.autoAcceptEdits,
+                  ...(signal ? { signal } : {}),
                 })
               : `Tool '${call.name}' is not available to the sub-agent.`
           messages.push({ role: 'tool', content: out, toolCallId: call.id })
@@ -1961,16 +2033,21 @@ export class ChatService {
     emit: (event: StreamEvent) => void
   ): Promise<MoaReferenceOutput[]> {
     const settings = buildOpts.settings
-    const references: MoaReferenceOutput[] = preset.referenceModels.map((ref, index) => ({
-      index,
-      label: this.moaLabel(ref),
-      providerId: ref.providerId,
-      modelId: ref.modelId,
-      status: 'running',
-      text: '',
-    }))
+    const references: MoaReferenceOutput[] = []
 
     try {
+      // moaLabel reads the providers table, so the blocks are built inside the
+      // try — a DB failure here must not escape this never-throws method.
+      for (const [index, ref] of preset.referenceModels.entries()) {
+        references.push({
+          index,
+          label: this.moaLabel(ref),
+          providerId: ref.providerId,
+          modelId: ref.modelId,
+          status: 'running',
+          text: '',
+        })
+      }
       // Advisors see the conversation turns only (system prompt + tools stripped),
       // matching Hermes: keeps reference calls cheap and dodges strict-provider
       // rejections of an unfamiliar system prompt.
@@ -2096,7 +2173,12 @@ export class ChatService {
           ),
         executeTool: (call) =>
           tools
-            ? tools.executor.execute(call, { conversation, streamId, approval: researchApproval })
+            ? tools.executor.execute(call, {
+                conversation,
+                streamId,
+                approval: researchApproval,
+                signal: controller.signal,
+              })
             : Promise.resolve('Error: tools are unavailable in this context.'),
         listToolDefs: () => researchToolDefs,
         emit: (activity) => emit({ type: 'research-activity', activity }),
@@ -2147,6 +2229,35 @@ export class ChatService {
     }
   }
 
+  /**
+   * Containment for the fan-out phase that runs BEFORE the generation is handed
+   * to runStream (which has its own try/catch/finally): persists the placeholder
+   * as failed and tells the renderer, so an unexpected throw can never leave the
+   * message spinning as 'streaming'. The caller frees the conversation's slot.
+   */
+  private failPlaceholder(
+    conversationId: string,
+    placeholder: Message,
+    e: unknown,
+    emit: (event: StreamEvent) => void,
+    resolved?: ResolvedTarget
+  ): void {
+    const error = toNormalizedError(
+      e,
+      resolved?.provider.type,
+      resolved?.apiKey ? [resolved.apiKey] : undefined
+    )
+    let finalMessage: Message | null
+    try {
+      finalMessage = this.db.messages.update(placeholder.id, { status: 'error', error })
+      if (finalMessage) this.db.conversations.touch(conversationId, Date.now())
+    } catch {
+      // Writes can fail during shutdown; broadcast the in-memory fallback.
+      finalMessage = { ...placeholder, status: 'error', error }
+    }
+    if (finalMessage) emit({ type: 'error', error, message: finalMessage })
+  }
+
   private async runMoaStream(
     streamId: string,
     conversation: Conversation,
@@ -2165,14 +2276,21 @@ export class ChatService {
         // A window can be torn down mid-broadcast; persistence still happens.
       }
     }
-    const references = await this.runAdvisors(
-      conversation,
-      preset,
-      buildOpts,
-      placeholder,
-      controller,
-      emit
-    )
+    let references: MoaReferenceOutput[]
+    try {
+      references = await this.runAdvisors(
+        conversation,
+        preset,
+        buildOpts,
+        placeholder,
+        controller,
+        emit
+      )
+    } catch (e) {
+      this.failPlaceholder(conversationId, placeholder, e, emit, aggregator)
+      this.releaseStream(streamId, conversationId)
+      return
+    }
 
     const anyReferences = references.some((r) => r.status !== 'running')
     return this.runStream(
@@ -2257,6 +2375,8 @@ export class ChatService {
           message: finalMessage,
         })
       }
+    } catch (e) {
+      this.failPlaceholder(conversationId, placeholder, e, emit)
     } finally {
       this.releaseStream(streamId, conversationId)
     }
@@ -2546,12 +2666,16 @@ export class ChatService {
             autoAcceptEdits,
             onToolOutput,
             onAttachment,
+            signal: controller.signal,
           })
           call.result = result
           call.status = toolCallStatus(result)
+          // Recorded as it settles, not after the round: a Stop between two
+          // calls throws out of this loop, and a call whose side effects already
+          // happened must never be missing from the persisted message.
+          toolCalls.push(call)
           emit({ type: 'tool-call', toolCall: { ...call } }) // with result/status
         }
-        toolCalls.push(...roundCalls)
 
         // Feed the round back: assistant message with toolCalls, then one
         // role-'tool' message per result, and re-invoke the adapter.
@@ -2626,7 +2750,7 @@ export class ChatService {
       const title = firstLine.slice(0, TITLE_MAX_CHARS)
       if (title.length === 0) return
       this.db.conversations.update(conversationId, { title })
-      this.broadcast(CHANNELS.conversationsChanged, {})
+      this.broadcast(CHANNELS.conversationsChanged, { conversationId })
     } catch {
       // Titling is cosmetic — never let it break stream completion.
     }

@@ -22,6 +22,7 @@ import { z } from 'zod'
 import { CHANNELS, err, ok, type ChannelName, type PickFilesResult } from '@shared/ipc'
 import type {
   AppInfo,
+  AppSettings,
   Attachment,
   ConversationMode,
   ScheduledTaskInput,
@@ -55,6 +56,7 @@ import {
   mcpServerPatchSchema,
   memoryInputSchema,
   memoryPatchSchema,
+  outboundWebhookUrlSchema,
   promptTemplateInputSchema,
   promptTemplatePatchSchema,
   skillInputSchema,
@@ -365,6 +367,59 @@ const imTelegramSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Settings cleanup
+// ---------------------------------------------------------------------------
+
+/**
+ * The settings patch that removes every reference to a deleted provider: the
+ * global/per-mode/research/image defaults are cleared, and a MoA preset that
+ * routed through it is disabled (its advisors on the provider are dropped, but
+ * never the last one — the schema requires at least one reference model).
+ * Without this, new conversations keep getting stamped with a provider that no
+ * longer exists and every send fails.
+ */
+function providerRefsCleared(settings: AppSettings, providerId: string): Partial<AppSettings> {
+  const patch: Partial<AppSettings> = {}
+  if (settings.defaultProviderId === providerId) {
+    patch.defaultProviderId = null
+    patch.defaultModelId = null
+  }
+  if (settings.researchWorkerProviderId === providerId) {
+    patch.researchWorkerProviderId = null
+    patch.researchWorkerModelId = null
+  }
+  if (settings.defaultImageProviderId === providerId) {
+    patch.defaultImageProviderId = null
+    patch.defaultImageModelId = null
+  }
+  const modeModels = { ...settings.modeModels }
+  let modeChanged = false
+  for (const mode of conversationModeSchema.options) {
+    if (modeModels[mode]?.providerId === providerId) {
+      modeModels[mode] = { providerId: null, modelId: null }
+      modeChanged = true
+    }
+  }
+  if (modeChanged) patch.modeModels = modeModels
+  let presetsChanged = false
+  const moaPresets = settings.moaPresets.map((preset) => {
+    const references = preset.referenceModels.filter((m) => m.providerId !== providerId)
+    const broken =
+      references.length !== preset.referenceModels.length ||
+      preset.aggregator.providerId === providerId
+    if (!broken) return preset
+    presetsChanged = true
+    return {
+      ...preset,
+      referenceModels: references.length > 0 ? references : preset.referenceModels,
+      enabled: false,
+    }
+  })
+  if (presetsChanged) patch.moaPresets = moaPresets
+  return patch
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -543,11 +598,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.providersDelete, (id) => {
     const providerId = requireString(id, 'Provider id')
     // Delete the provider and clear every reference to it in one transaction so
-    // no dangling defaultProviderId or conversation.provider_id survives.
+    // no dangling settings id or conversation.provider_id survives.
     db.driver.transaction(() => {
-      if (db.settings.get().defaultProviderId === providerId) {
-        db.settings.update({ defaultProviderId: null, defaultModelId: null })
-      }
+      const patch = providerRefsCleared(db.settings.get(), providerId)
+      if (Object.keys(patch).length > 0) db.settings.update(patch)
       db.conversations.clearProvider(providerId)
       db.providers.remove(providerId)
     })
@@ -735,26 +789,30 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       req
     )
     const source = found(db.conversations.getById(parsed.id), 'Conversation')
-    const fork = db.conversations.create({
-      mode: source.mode,
-      title: `${source.title} (fork)`,
-      providerId: source.providerId,
-      modelId: source.modelId,
-      systemPrompt: source.systemPrompt,
-      // Forks get an independent task workspace on first use; sharing the
-      // source workspace would make one branch mutate the other's checklist.
-      workspaceId: null,
-      projectId: source.projectId,
-      projectRef: source.projectRef,
-      moaPresetId: source.moaPresetId,
+    // One transaction: a fork is the conversation AND its transcript — a
+    // partially copied fork would look like a valid (silently truncated) one.
+    return db.driver.transaction(() => {
+      const fork = db.conversations.create({
+        mode: source.mode,
+        title: `${source.title} (fork)`,
+        providerId: source.providerId,
+        modelId: source.modelId,
+        systemPrompt: source.systemPrompt,
+        // Forks get an independent task workspace on first use; sharing the
+        // source workspace would make one branch mutate the other's checklist.
+        workspaceId: null,
+        projectId: source.projectId,
+        projectRef: source.projectRef,
+        moaPresetId: source.moaPresetId,
+      })
+      const messages = db.messages
+        .listByConversation(source.id)
+        .filter((message) => parsed.throughSeq === undefined || message.seq <= parsed.throughSeq)
+      for (const message of messages) {
+        db.messages.insert({ ...message, id: randomUUID(), conversationId: fork.id })
+      }
+      return fork
     })
-    const messages = db.messages
-      .listByConversation(source.id)
-      .filter((message) => parsed.throughSeq === undefined || message.seq <= parsed.throughSeq)
-    for (const message of messages) {
-      db.messages.insert({ ...message, id: randomUUID(), conversationId: fork.id })
-    }
-    return fork
   })
 
   // -- projects (per-mode organizational grouping) ---------------------------------
@@ -1019,8 +1077,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     )
   )
 
+  // Metadata only: the pre-edit file snapshots stay in main until a restore
+  // reads them back through checkpointGet.
   register(CHANNELS.codeCheckpointsList, (conversationId) =>
-    db.agentPlatform.checkpointsList(requireString(conversationId, 'Conversation id'))
+    db.agentPlatform.checkpointsListLite(requireString(conversationId, 'Conversation id'))
   )
 
   register(CHANNELS.codeCheckpointRestore, (checkpointId) =>
@@ -1271,42 +1331,42 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     imBridgeManager.setTelegram(parseInput(imTelegramSchema, input))
   )
 
-  register(CHANNELS.imSetWebhook, (url) => {
-    if (url !== null && typeof url !== 'string') throw invalid('Webhook URL must be a string or null.')
-    return imBridgeManager.setWebhook(url as string | null)
-  })
+  // Delivery drops a webhook that isn't https (or http on localhost), so the
+  // same rule is enforced here — a webhook that can never fire is rejected.
+  register(CHANNELS.imSetWebhook, (url) =>
+    imBridgeManager.setWebhook(parseInput(outboundWebhookUrlSchema, url ?? null))
+  )
 
   // -- workflows --------------------------------------------------------------
 
   const asGraph = (value: unknown): WorkflowGraph =>
     parseInput(workflowGraphSchema, value) as WorkflowGraph
+
+  const workflowInputSchema = z.object({
+    name: z.string().trim().min(1).max(200),
+    graph: workflowGraphSchema,
+    schedule: z.object({ everyMinutes: z.number() }).nullish(),
+    scheduleEnabled: z.boolean().optional(),
+  })
+
   const asWorkflowInput = (value: unknown): WorkflowInput => {
-    const o = value as {
-      name?: unknown
-      graph?: unknown
-      schedule?: unknown
-      scheduleEnabled?: unknown
-    }
-    const name = typeof o?.name === 'string' ? o.name.trim() : ''
-    if (name.length === 0) throw invalid('Workflow name is required.')
+    const parsed = parseInput(workflowInputSchema, value)
     // Interval clamped to [1 minute, 7 days]; anything else = no schedule.
-    let schedule: WorkflowInput['schedule'] = null
-    if (o?.schedule && typeof o.schedule === 'object') {
-      const every = (o.schedule as { everyMinutes?: unknown }).everyMinutes
-      if (typeof every === 'number' && Number.isFinite(every) && every >= 1) {
-        schedule = { everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
-      }
-    }
+    const every = parsed.schedule?.everyMinutes
+    const schedule: WorkflowInput['schedule'] =
+      typeof every === 'number' && Number.isFinite(every) && every >= 1
+        ? { everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
+        : null
     // Enabling the schedule with an invalid interval must fail loudly, not
     // save a workflow that silently never fires.
-    if (o?.scheduleEnabled === true && schedule === null) {
+    if (parsed.scheduleEnabled === true && schedule === null) {
       throw invalid('Schedule interval must be at least 1 minute.')
     }
     return {
-      name,
-      graph: asGraph(o?.graph),
+      name: parsed.name,
+      graph: parsed.graph as WorkflowGraph,
       schedule,
-      scheduleEnabled: o?.scheduleEnabled === true,
+      scheduleEnabled: parsed.scheduleEnabled === true,
     }
   }
 
@@ -1506,7 +1566,13 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.agentPackImport, async () => {
     const picked = await showOpen({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] })
     if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
-    const parsed = parseInput(agentPackSchema, JSON.parse(await readFile(picked.filePaths[0], 'utf8')))
+    let raw: unknown
+    try {
+      raw = JSON.parse(await readFile(picked.filePaths[0], 'utf8'))
+    } catch {
+      throw invalid('The selected file is not valid JSON.')
+    }
+    const parsed = parseInput(agentPackSchema, raw)
     for (const agent of parsed.agents) {
       const existing = db.agents.getByName(agent.name)
       if (existing) db.agents.update(existing.id, agent)
