@@ -16,6 +16,8 @@ npm run typecheck    # tsc --noEmit for BOTH projects (tsconfig.node.json + tsco
 npm test             # vitest run (full suite; plain Node, no Electron needed)
 npm run test:watch   # vitest watch mode
 npm run build        # typecheck + electron-vite build → out/
+npm run verify       # full gate: test → build → bundle:check → smoke (what CI runs)
+npm run verify:fast  # typecheck + unit tests only (quick iteration)
 npm run package:win  # build + electron-builder NSIS installer → release/
 ```
 
@@ -24,16 +26,16 @@ Run tests by name: `npx vitest run -t "some test name"`
 
 ### Verification gates
 
-After nontrivial changes, all four must pass:
+After nontrivial changes run `npm run verify`; CI (`.github/workflows/verify.yml`) runs the same chain on windows-latest. To isolate a failure, the individual gates:
 
 1. `npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json`
 2. `npx vitest run`
-3. `npx electron-vite build`
-4. `SMOKE_TEST=1 npx electron .` — prints `SMOKE_OK` and exits 0 (skips MCP/IM connections)
+3. `npx electron-vite build` (then `npm run bundle:check` for the renderer size budget)
+4. `npm run smoke` — spawns Electron with `SMOKE_TEST=1`, asserts `SMOKE_OK` within 30 s (skips MCP/IM connections)
 
 ## Architecture
 
-Three build targets (electron-vite): **main** (Node), **preload** (contextBridge), **renderer** (sandboxed browser, no Node). Two tsconfig projects: `tsconfig.node.json` covers main + preload + shared; `tsconfig.web.json` covers renderer + shared. Path aliases: `@shared` → `src/shared` (everywhere, including tests), `@` → `src/renderer/src` (renderer only).
+Three build targets (electron-vite): **main** (Node), **preload** (contextBridge), **renderer** (sandboxed browser, no Node). Two tsconfig projects: `tsconfig.node.json` covers main + preload + shared; `tsconfig.web.json` covers renderer + shared. Path aliases: `@shared` → `src/shared` (everywhere, including tests), `@` → `src/renderer/src` (renderer only). Deeper reference docs: `docs/ARCHITECTURE.md`, `docs/DB_SCHEMA.md`.
 
 ### The spine (pinned contracts)
 
@@ -49,6 +51,8 @@ All IPC returns `IpcResult<T>`; every handler in `src/main/ipc/` validates its i
 ### Conversation modes (two since v24/v25)
 
 `ConversationMode = 'chat' | 'work'`. **Chat** is a plain conversation. **Work** is the agentic mode: one `WorkView` (renderer `components/work/`) with an on-demand right panel — Files (directory tree), Changes (reviewable code-change pipeline + git), Preview (sandboxed `.html` rendering), Tasks (goal + plans/checklists). A Work task without a user-connected folder gets its own workspace folder (`{userData}/data/workspaces/<conversationId>/`) lazily on the first file write: `WorkspaceRootService` (`src/main/code/workspace-root.ts`) creates the dir, registers it as a `code_projects` row and links `conversation.projectId`, so the entire existing code pipeline (tree, path jail, diffs, git) works on it unchanged. Auto workspaces are the ONLY folders the app ever deletes (path-prefix check); user grants are never touched. The legacy cowork/code/write/design modes were collapsed in v24 (legacy content deleted by explicit product decision) and their mode CHECKs dropped in v25 (v13 pattern: zod enforces the enum). Backups from before v3 import legacy modes as `work`.
+
+Remote git lives in `src/main/code/git-service.ts` (surfaced in the Changes panel's `CommitBar`) with hard safety rules: pushes never force and pushing the default branch requires explicit confirmation; pulls are fast-forward-only and require a clean worktree; remote URLs must be HTTPS/SSH with no embedded credentials; PR creation shells out to the `gh` CLI (test seam: `deps.githubCommand`).
 
 ### Security invariants
 
@@ -73,7 +77,7 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 
 ### Chat/streaming pipeline (`src/main/services/chat-service.ts`)
 
-`chat.send` persists the user message + a placeholder assistant message (`status: 'streaming'`), returns a `streamId`, then runs the adapter generator and forwards `StreamEventEnvelope`s to the renderer. Stop aborts the AbortController and persists partial text as `stopped`; streaming rows are marked `stopped` at boot. Regenerate = delete trailing assistant message and re-run; edit+rerun = truncate after the edited message. History is linear (`seq` column). The chat service also owns the multi-round tool-call loop, the `delegate` sub-agent, context compaction, and headless generation (IM bridge, workflows).
+`chat.send` persists the user message + a placeholder assistant message (`status: 'streaming'`), returns a `streamId`, then runs the adapter generator and forwards `StreamEventEnvelope`s to the renderer. Stop aborts the AbortController and persists partial text as `stopped`; streaming rows are marked `stopped` at boot. Regenerate = delete trailing assistant message and re-run; edit+rerun = truncate after the edited message. History is linear (`seq` column). Text/reasoning deltas are coalesced by `StreamDeltaBuffer` (`src/main/services/stream-delta-buffer.ts`, ~32 ms windows, flushed before any non-delta event) before being pushed to the renderer. The chat service also owns the multi-round tool-call loop, the `delegate` sub-agent, context compaction, and headless generation (IM bridge, workflows).
 
 **Mixture of Agents:** a conversation can opt into a MoA preset (`AppSettings.moaPresets`; composer toggle sets `conversation.moaPresetId`, or one-shot via `/moa`). `runMoaStream` fans the preset's advisor models out in parallel (`adapter.chat`, no tools, conversation text only), streams each as a `moa-reference` event + persists them on the message (`Message.moaReferences`), then delegates to the same `runStream` with the aggregator as the acting model and the advisor analyses injected into the last user turn — so the aggregator keeps the full tool loop / abort / persistence path. Advisor failures are captured, never fatal.
 
@@ -87,9 +91,11 @@ The renderer routes on `ui.view` (`AppView = 'home' | 'conversation' | 'workflow
 
 Three independent background-execution systems — don't conflate them:
 
-- **Workflows** (`src/main/workflows/`): visual node graphs (React Flow) executed in-process by `engine.ts`; `runner.ts` owns run history + push events and is shared by manual runs and the interval `scheduler.ts`.
-- **Scheduled tasks** (`src/main/scheduled-tasks/`): standalone prompt tasks (v27 `scheduled_tasks`, once/daily/weekly recurrence), deliberately independent of workflow graphs; a 30 s clock scheduler runs due prompts headlessly with tools enabled.
+- **Workflows** (`src/main/workflows/`): visual node graphs (React Flow) executed in-process by `engine.ts` — independent nodes run in parallel by dependency level (max 3 concurrent), aborts propagate via a linked AbortController; `runner.ts` owns run history + push events and is shared by manual runs and the interval `scheduler.ts`.
+- **Scheduled tasks** (`src/main/scheduled-tasks/`): standalone prompt tasks (`scheduled_tasks` table, v27–v29; once/hourly/daily/weekly recurrence), deliberately independent of workflow graphs; a 30 s clock scheduler runs due prompts headlessly. The model can create them from chat via the `schedule_task` tool; since v29 each task carries its own pre-approved tool ids and optional working folder, which the scheduler passes into `generateForWorkflow`.
 - **Background agents** (v26): `agent_runs` is the persistent control plane for background `delegate` runs (stoppable from Settings); `checkpoints` stores pre-edit file snapshots for reversible code changes. Project hooks are declarative DB rows executed behind the same approval boundary as tools.
+
+Both schedulers share one `ScheduledRunQueue` (`src/main/scheduling/run-queue.ts`: bounded concurrency of 2, key-deduped) so scheduled workflows and prompt tasks can't stampede providers.
 
 All headless generation funnels through the chat service: `generateForWorkflow` (one-shot — workflows, scheduled tasks, git commit-message suggestions) and `generateHeadless` (conversation reply — Telegram bridge). New headless callers should reuse these, not spawn their own adapter loops.
 
