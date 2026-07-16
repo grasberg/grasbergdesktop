@@ -29,6 +29,7 @@ import {
 } from './repositories/prompt-templates'
 import { createMcpServersRepository, type McpServersRepository } from './repositories/mcp-servers'
 import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
+import { createInboxRepository, type InboxRepository } from './repositories/inbox'
 import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
@@ -63,6 +64,7 @@ export interface AppDatabase {
   knowledge: KnowledgeRepository
   agentPlatform: AgentPlatformRepository
   scheduledTasks: ScheduledTasksRepository
+  inbox: InboxRepository
   close(): void
 }
 
@@ -208,6 +210,7 @@ export function openDatabase(filePath: string): AppDatabase {
     knowledge: createKnowledgeRepository(driver),
     agentPlatform: createAgentPlatformRepository(driver),
     scheduledTasks: createScheduledTasksRepository(driver),
+    inbox: createInboxRepository(driver),
     close() {
       driver.close()
     },

@@ -47,6 +47,7 @@ describe('ToolRegistry.listDefinitions', () => {
       'fetch_url',
       'web_search',
       'git_write',
+      'github',
       'propose_shell_command',
       'edit_file',
       'write_file',
@@ -64,6 +65,7 @@ describe('ToolRegistry.listDefinitions', () => {
     }
     const byId = new Map(definitions.map((d) => [d.id, d]))
     expect(byId.get('repo_map')!.risk).toBe('sensitive')
+    expect(byId.get('github')!.risk).toBe('sensitive')
     expect(byId.get('delegate')!.risk).toBe('safe')
     expect(byId.get('file_search')!.risk).toBe('sensitive')
     expect(byId.get('read_file')!.risk).toBe('sensitive')

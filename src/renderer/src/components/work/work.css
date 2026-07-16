@@ -503,3 +503,215 @@
   gap: 8px;
   margin-top: 4px;
 }
+
+/* -- Terminal tab ---------------------------------------------------------- */
+
+.terminal-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-hint {
+  flex: 1;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-restart {
+  flex-shrink: 0;
+}
+
+.terminal-scrollback {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-inset, var(--bg-panel));
+}
+
+.terminal-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.terminal-prompt {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.terminal-input {
+  flex: 1;
+  font-size: 0.78rem;
+}
+
+.terminal-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* -- Arena tab --------------------------------------------------------------- */
+
+.arena-setup,
+.arena-board {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.arena-task {
+  width: 100%;
+  resize: vertical;
+}
+
+.arena-candidate-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.arena-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.arena-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.arena-board-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arena-board-task {
+  flex: 1;
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arena-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.arena-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.arena-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arena-card-model {
+  flex: 1;
+  font-size: 0.75rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arena-card-status {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.arena-diffstat {
+  margin: 0;
+  padding: 8px;
+  font-size: 0.7rem;
+  background: var(--bg-inset, var(--bg-panel));
+  border-radius: var(--radius-sm, 4px);
+  overflow: auto;
+  max-height: 120px;
+}
+
+.arena-summary {
+  margin: 0;
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+}
+
+.arena-diff summary {
+  cursor: pointer;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.arena-diff pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  font-size: 0.7rem;
+  background: var(--bg-inset, var(--bg-panel));
+  border-radius: var(--radius-sm, 4px);
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.arena-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.run-dot.busy {
+  background: var(--warning, #e6a700);
+}

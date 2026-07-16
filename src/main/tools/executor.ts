@@ -32,6 +32,8 @@ import type {
   GitStatus,
   GitHubPrInput,
   GitHubPrResult,
+  GitHubPrReviewInput,
+  SandboxLevel,
   ScheduledTask,
   ScheduledTaskInput,
   ScheduledTaskRecurrence,
@@ -143,6 +145,16 @@ export interface ToolExecutorDeps {
     pull(root: string): Promise<GitStatus>
     push(root: string, confirmDefaultBranch?: boolean): Promise<GitStatus>
     createPullRequest(root: string, input: GitHubPrInput): Promise<GitHubPrResult>
+    reviewPullRequest(root: string, input: GitHubPrReviewInput): Promise<string>
+  } | null
+  /** Read-only GitHub queries for the 'github' tool (wired to GitService). */
+  gitHub?: {
+    listIssues(root: string, state: 'open' | 'closed' | 'all'): Promise<string>
+    viewIssue(root: string, issueNumber: number): Promise<string>
+    viewPullRequest(root: string, prNumber?: number): Promise<string>
+    pullRequestDiff(root: string, prNumber?: number): Promise<string>
+    listCiRuns(root: string): Promise<string>
+    ciFailedLogs(root: string, runId?: number): Promise<string>
   } | null
   /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
   delegateBackground?: {
@@ -225,6 +237,12 @@ export interface ToolExecuteContext {
   signal?: AbortSignal
   /** Plan mode (code conversations): mutating tools are refused. */
   planMode?: boolean
+  /**
+   * Sandbox posture: 'read-only' refuses every mutating tool; 'full' allows
+   * run_shell_command an absolute cwd outside the project folder. Unset
+   * behaves as 'workspace-write' (the pre-sandbox default).
+   */
+  sandboxLevel?: SandboxLevel
   /** Auto-accept edits: edit_file/write_file skip the approval dialog. */
   autoAcceptEdits?: boolean
   /** Receives live output chunks from long-running tools (shell commands). */
@@ -1033,6 +1051,13 @@ export class ToolExecutor {
         "the user instead of calling '" + definition.name + "'; they can turn plan mode off to proceed."
       )
     }
+    if (ctx.sandboxLevel === 'read-only' && definition.mutating === true) {
+      return (
+        "This conversation's sandbox level is read-only: only non-mutating tools may run. " +
+        "Describe the change you want to make and ask the user to raise the sandbox level " +
+        "before calling '" + definition.name + "'."
+      )
+    }
 
     const decision = this.deps.registry.getPermission(definition)
     if (decision === 'deny') {
@@ -1102,6 +1127,12 @@ export class ToolExecutor {
       if (action === 'create_pull_request') {
         return `Creates a${args.draft === true ? ' draft' : ''} GitHub pull request titled '${getString(args, 'title') ?? ''}'.`
       }
+      if (action === 'pr_review') {
+        const event = getString(args, 'review_event') ?? 'comment'
+        const target =
+          typeof args.number === 'number' ? `PR #${args.number}` : "the current branch's PR"
+        return `Posts a ${event.replace('_', ' ')} review on ${target}.`
+      }
       if (action === 'stage') {
         const paths = Array.isArray(args.paths)
           ? args.paths.filter((p): p is string => typeof p === 'string')
@@ -1168,6 +1199,8 @@ export class ToolExecutor {
         return this.runGenerateImage(args, ctx)
       case 'git_write':
         return this.runGitWrite(args, ctx)
+      case 'github':
+        return this.runGitHubRead(args, ctx)
       case 'edit_file':
         return this.runEditFile(args, ctx)
       case 'write_file':
@@ -1999,6 +2032,24 @@ export class ToolExecutor {
           const updated = await gitWrite.push(root, args.confirm_default_branch === true)
           return `Pushed '${updated.branch ?? 'current branch'}' to ${updated.upstream ?? 'origin'}.`
         }
+        case 'pr_review': {
+          const eventRaw = getString(args, 'review_event') ?? ''
+          if (
+            eventRaw !== 'comment' &&
+            eventRaw !== 'approve' &&
+            eventRaw !== 'request_changes'
+          ) {
+            return "Error: 'review_event' must be comment | approve | request_changes."
+          }
+          const input: GitHubPrReviewInput = {
+            event: eventRaw,
+            ...(typeof args.number === 'number' && Number.isInteger(args.number) && args.number > 0
+              ? { number: args.number }
+              : {}),
+            ...(typeof args.body === 'string' ? { body: args.body.slice(0, 20_000) } : {}),
+          }
+          return await gitWrite.reviewPullRequest(root, input)
+        }
         case 'create_pull_request': {
           const [title, titleError] = requireStringArg(args, 'title')
           if (titleError) return titleError
@@ -2014,11 +2065,56 @@ export class ToolExecutor {
         default:
           return (
             "Error: 'action' must be one of stage | commit | create_branch | set_origin | fetch | " +
-            'pull | push | create_pull_request.'
+            'pull | push | create_pull_request | pr_review.'
           )
       }
     } catch (e) {
       return redactSecrets(`git_write failed: ${errorMessage(e)}`)
+    }
+  }
+
+  private async runGitHubRead(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    const gitHub = this.deps.gitHub
+    if (!gitHub) return 'Error: GitHub queries are unavailable in this context.'
+    const root = this.requireProjectRoot(ctx)
+    if (!root) return ToolExecutor.NO_PROJECT
+    const action = getString(args, 'action') ?? ''
+    const num = (key: string): number | undefined => {
+      const value = args[key]
+      return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+    }
+    try {
+      switch (action) {
+        case 'list_issues': {
+          const state = getString(args, 'state')
+          return await gitHub.listIssues(
+            root,
+            state === 'closed' || state === 'all' ? state : 'open'
+          )
+        }
+        case 'view_issue': {
+          const issue = num('number')
+          if (issue === undefined) {
+            return "Error: 'number' (a positive integer) is required for view_issue."
+          }
+          return await gitHub.viewIssue(root, issue)
+        }
+        case 'view_pr':
+          return await gitHub.viewPullRequest(root, num('number'))
+        case 'pr_diff':
+          return await gitHub.pullRequestDiff(root, num('number'))
+        case 'ci_runs':
+          return await gitHub.listCiRuns(root)
+        case 'ci_failed_logs':
+          return await gitHub.ciFailedLogs(root, num('run_id'))
+        default:
+          return `Error: unknown github action '${action}'. Use list_issues | view_issue | view_pr | pr_diff | ci_runs | ci_failed_logs.`
+      }
+    } catch (e) {
+      return redactSecrets(`GitHub query failed: ${errorMessage(e)}`)
     }
   }
 
@@ -2233,20 +2329,42 @@ export class ToolExecutor {
     const [command, commandError] = requireStringArg(args, 'command')
     if (commandError) return commandError
 
+    // Optional working directory: relative stays jailed to the project root;
+    // absolute paths are a 'full'-sandbox capability (still approval-gated).
+    let workingDir = root
+    const cwdArg = getString(args, 'cwd')?.trim()
+    if (cwdArg) {
+      if (path.isAbsolute(cwdArg) || /^[A-Za-z]:/.test(cwdArg)) {
+        if (ctx.sandboxLevel !== 'full') {
+          return (
+            "Error: an absolute cwd requires sandbox level 'full'. At the current level, " +
+            'shell commands run inside the granted project folder (relative cwd only).'
+          )
+        }
+        workingDir = path.resolve(cwdArg)
+      } else {
+        const resolved = resolveWithinRoot(root, cwdArg)
+        if (!resolved) {
+          return `Error: cwd must stay inside the project folder (got '${cwdArg}').`
+        }
+        workingDir = resolved
+      }
+    }
+
     // Long-running work (dev servers, watch modes): detach as a background
     // job pollable via task_output / stoppable via task_stop.
     if (args.background === true) {
       if (!this.deps.shellBackground) {
         return 'Error: background shell jobs are unavailable in this build.'
       }
-      return this.deps.shellBackground.start(command, root)
+      return this.deps.shellBackground.start(command, workingDir)
     }
 
     const timeoutMs =
       clampIntArg(args, 'timeoutSeconds', SHELL_TIMEOUT_MS / 1000, SHELL_MAX_TIMEOUT_SEC) * 1000
     const onToolOutput = ctx.onToolOutput
     const onChunk = onToolOutput ? (chunk: string) => onToolOutput(toolCall.id, chunk) : undefined
-    const result = await runShell(command, root, timeoutMs, ctx.signal, onChunk)
+    const result = await runShell(command, workingDir, timeoutMs, ctx.signal, onChunk)
     const parts: string[] = []
     if (result.timedOut) {
       parts.push(`Command timed out after ${timeoutMs / 1000}s and was killed.`)

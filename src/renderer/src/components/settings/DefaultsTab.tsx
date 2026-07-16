@@ -576,6 +576,28 @@ export default function DefaultsTab() {
         </span>
       </label>
 
+      <h4 className="section-subhead">Economy model</h4>
+      <p className="field-hint">
+        A cheap model for internal plumbing generations — condensing long conversations, commit
+        message suggestions and memory consolidation. Your conversations still use their own
+        model. Unset = the default model handles these too.
+      </p>
+      <div className="mode-model-list">
+        <ModeModelRow
+          label="Economy model"
+          value={{
+            providerId: settings.economyProviderId,
+            modelId: settings.economyModelId,
+          }}
+          onChange={(next) =>
+            void persist({
+              economyProviderId: next.providerId,
+              economyModelId: next.modelId,
+            })
+          }
+        />
+      </div>
+
       <h4 className="section-subhead">Deep Research</h4>
       <p className="field-hint">
         The /research command (and the DR composer toggle) searches the web with web_search and

@@ -1161,6 +1161,9 @@ export class ChatService {
       ...(conversation.mode === 'work' && conversation.params.planMode === true
         ? { planMode: true }
         : {}),
+      ...(conversation.mode === 'work' && conversation.params.sandboxLevel === 'read-only'
+        ? { sandboxReadOnly: true }
+        : {}),
       ...(enabledSkills.length > 0
         ? {
             skills: enabledSkills.map((s) => ({
@@ -1347,10 +1350,24 @@ export class ChatService {
       parts.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${messageEstimateText(m)}`)
     }
 
-    const adapter = this.adapterFor(resolved)
+    // Compaction is internal plumbing: route it to the configured economy
+    // model when one is set; a broken economy config falls back silently to
+    // the conversation's own model rather than blocking the summary.
+    let target = resolved
+    if (settings.economyProviderId) {
+      try {
+        target = await this.resolveTarget(conversation, settings, {
+          providerId: settings.economyProviderId,
+          modelId: settings.economyModelId ?? undefined,
+        })
+      } catch {
+        target = resolved
+      }
+    }
+    const adapter = this.adapterFor(target)
     const result = await adapter.chat(
       {
-        modelId: resolved.modelId,
+        modelId: target.modelId,
         messages: [
           { role: 'system', content: COMPACTION_INSTRUCTION },
           { role: 'user', content: parts.join('\n\n') },
@@ -1358,7 +1375,7 @@ export class ChatService {
         params: { maxTokens: 1024 },
         stream: false,
       },
-      this.adapterCtx(resolved, signal)
+      this.adapterCtx(target, signal)
     )
     const summary = result.text.trim()
     if (summary.length === 0) return false
@@ -1472,6 +1489,12 @@ export class ChatService {
       approvedToolIds?: string[]
       /** Working folder (code_projects row) for file/shell tools. */
       projectId?: string | null
+      /**
+       * Internal plumbing generation (commit messages, dreaming): route to
+       * the configured economy model when one is set. Explicit provider/model
+       * ids and agent profiles always win over the economy routing.
+       */
+      economy?: boolean
     }
   ): Promise<string> {
     const settings = this.db.settings.get()
@@ -1502,9 +1525,16 @@ export class ChatService {
         'The agent profile selected for this node is missing or disabled.'
       )
     }
+    const economy =
+      opts?.economy === true && !providerId && !modelId && !agent && settings.economyProviderId
+        ? {
+            providerId: settings.economyProviderId,
+            modelId: settings.economyModelId ?? undefined,
+          }
+        : null
     const resolved = await this.resolveTarget(stub, settings, {
-      providerId: providerId ?? agent?.providerId ?? undefined,
-      modelId: modelId ?? agent?.modelId ?? undefined,
+      providerId: providerId ?? agent?.providerId ?? economy?.providerId,
+      modelId: modelId ?? agent?.modelId ?? economy?.modelId,
     })
     const adapter = this.adapterFor(resolved)
 
@@ -2000,9 +2030,11 @@ export class ChatService {
                   streamId: ctx.streamId,
                   approval: ctx.approval,
                   // Inherit the parent's mode gates: plan mode still blocks
-                  // mutations, auto-accept edits still skips the edit dialog.
+                  // mutations, auto-accept edits still skips the edit dialog,
+                  // and the sandbox level travels into sub-agents unchanged.
                   planMode: ctx.planMode,
                   autoAcceptEdits: ctx.autoAcceptEdits,
+                  ...(ctx.sandboxLevel ? { sandboxLevel: ctx.sandboxLevel } : {}),
                   ...(signal ? { signal } : {}),
                 })
               : `Tool '${call.name}' is not available to the sub-agent.`
@@ -2653,6 +2685,8 @@ export class ChatService {
           : undefined
         const planMode = conversation.mode === 'work' && conversation.params.planMode === true
         const autoAcceptEdits = !planMode && conversation.params.autoAcceptEdits === true
+        const sandboxLevel =
+          conversation.mode === 'work' ? conversation.params.sandboxLevel : undefined
         // Live tool output (shell commands) streams into the same envelope
         // channel so the renderer can show it while the tool runs.
         const onToolOutput = (toolCallId: string, chunk: string): void =>
@@ -2674,6 +2708,7 @@ export class ChatService {
             ...(askUser ? { askUser } : {}),
             planMode,
             autoAcceptEdits,
+            ...(sandboxLevel ? { sandboxLevel } : {}),
             onToolOutput,
             onAttachment,
             signal: controller.signal,

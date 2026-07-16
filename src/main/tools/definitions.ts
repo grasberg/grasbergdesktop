@@ -326,7 +326,9 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       'given relative paths), "commit" (commit what is staged with the given message), or ' +
       '"create_branch" (create and switch to a new branch), "set_origin" (connect an HTTPS/SSH remote), ' +
       'plus remote "fetch", fast-forward-only ' +
-      '"pull", non-force "push", and "create_pull_request" through GitHub CLI. EVERY call requires the user\'s ' +
+      '"pull", non-force "push", "create_pull_request" through GitHub CLI, and "pr_review" ' +
+      '(post a comment/approve/request_changes review on a pull request via review_event + ' +
+      "body). EVERY call requires the user's " +
       'explicit approval — there are no standing grants. Committing on the repository\'s ' +
       'default branch and pushing it additionally require confirm_default_branch: true. Pull ' +
       'requires a clean worktree and can never create a merge commit. Push can never force. ' +
@@ -345,6 +347,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
             'pull',
             'push',
             'create_pull_request',
+            'pr_review',
           ],
           description: 'The single git operation to perform.',
         },
@@ -360,6 +363,16 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         body: { type: 'string', description: 'For "create_pull_request": optional PR body.' },
         base: { type: 'string', description: 'For "create_pull_request": optional base branch.' },
         draft: { type: 'boolean', description: 'For "create_pull_request": create as draft.' },
+        review_event: {
+          type: 'string',
+          enum: ['comment', 'approve', 'request_changes'],
+          description: 'For "pr_review": the kind of review to post.',
+        },
+        number: {
+          type: 'integer',
+          minimum: 1,
+          description: 'For "pr_review": PR number (omit for the current branch pull request).',
+        },
         confirm_default_branch: {
           type: 'boolean',
           description:
@@ -373,6 +386,51 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
     mutating: true,
     noStandingApproval: true,
+  },
+  {
+    id: 'github',
+    name: 'github',
+    description:
+      'Read-only GitHub queries for the granted project via the GitHub CLI (gh must be ' +
+      'installed and authenticated): "list_issues" (optionally state "closed"/"all"), ' +
+      '"view_issue" (number — title, body, comments), "view_pr" (a pull request incl. its CI ' +
+      'status rollup; number optional = the current branch PR), "pr_diff" (the PR diff), ' +
+      '"ci_runs" (recent workflow runs), "ci_failed_logs" (the failing steps of a run; run_id ' +
+      'optional = latest failed run). Typical flows: fix an issue (view_issue, create a ' +
+      'branch, edit, commit, push, create_pull_request), review a PR (view_pr + pr_diff, then ' +
+      'git_write pr_review), fix CI (ci_failed_logs, edit, commit, push).',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list_issues', 'view_issue', 'view_pr', 'pr_diff', 'ci_runs', 'ci_failed_logs'],
+          description: 'The single GitHub query to run.',
+        },
+        number: {
+          type: 'integer',
+          minimum: 1,
+          description:
+            'Issue/PR number for "view_issue" (required) and "view_pr"/"pr_diff" (optional).',
+        },
+        run_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'For "ci_failed_logs": the workflow run id (omit = latest failed run).',
+        },
+        state: {
+          type: 'string',
+          enum: ['open', 'closed', 'all'],
+          description: 'For "list_issues": which issues to list (default open).',
+        },
+      },
+      required: ['action'],
+    },
+    // Read-only, but it talks to the network about the user's repository:
+    // per-call approval by default, relaxable in Settings like any tool.
+    risk: 'sensitive',
+    builtin: true,
+    enabled: true,
   },
   {
     id: 'propose_shell_command',
@@ -808,6 +866,12 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'boolean',
           description:
             'Run as a detached background job; returns a task id for task_output/task_stop.',
+        },
+        cwd: {
+          type: 'string',
+          description:
+            'Optional working directory: a path relative to the project folder, or an absolute ' +
+            "path when the conversation's sandbox level is 'full' (otherwise refused).",
         },
       },
       required: ['command'],

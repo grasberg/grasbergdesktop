@@ -72,6 +72,18 @@ describe('buildModeSystemPrompt', () => {
     expect(buildModeSystemPrompt('chat', { planMode: true })).not.toContain('PLAN MODE IS ACTIVE')
   })
 
+  it('work mode appends the read-only sandbox section only when sandboxReadOnly is set', () => {
+    const readOnly = buildModeSystemPrompt('work', { sandboxReadOnly: true })
+    expect(readOnly).toContain('SANDBOX LEVEL: READ-ONLY')
+    expect(readOnly).toContain('raise the sandbox level')
+
+    expect(buildModeSystemPrompt('work')).not.toContain('SANDBOX LEVEL: READ-ONLY')
+    // Sandbox levels are a work-mode concept only.
+    expect(buildModeSystemPrompt('chat', { sandboxReadOnly: true })).not.toContain(
+      'SANDBOX LEVEL: READ-ONLY'
+    )
+  })
+
   it('work mode carries the design guidance as self-contained html files', () => {
     const prompt = buildModeSystemPrompt('work')
     expect(prompt).toContain('self-contained .html FILES')

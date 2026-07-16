@@ -56,6 +56,10 @@ export interface MessagesRepository {
    * number of messages fixed.
    */
   markDanglingStreamingAsStopped(): number
+  /** Assistant messages' usage since `sinceMs` (for the local usage summary). */
+  usageSince(
+    sinceMs: number
+  ): Array<{ providerId: string; modelId: string; usage: TokenUsage }>
 }
 
 interface MessageRow {
@@ -111,6 +115,21 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
   }
 
   return {
+    usageSince(sinceMs) {
+      const rows = driver.all<Pick<MessageRow, 'provider_id' | 'model_id' | 'usage_json'>>(
+        `SELECT provider_id, model_id, usage_json FROM messages
+          WHERE role = 'assistant' AND usage_json IS NOT NULL AND created_at >= ?`,
+        [sinceMs]
+      )
+      const result: Array<{ providerId: string; modelId: string; usage: TokenUsage }> = []
+      for (const row of rows) {
+        const usage = parseJsonColumn<TokenUsage>(row.usage_json)
+        if (!usage || !row.provider_id || !row.model_id) continue
+        result.push({ providerId: row.provider_id, modelId: row.model_id, usage })
+      }
+      return result
+    },
+
     listByConversation(conversationId) {
       const rows = driver.all<MessageRow>(
         'SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq ASC',

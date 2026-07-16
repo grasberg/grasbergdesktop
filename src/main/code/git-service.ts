@@ -22,6 +22,7 @@ import type {
   GitFileChange,
   GitHubPrInput,
   GitHubPrResult,
+  GitHubPrReviewInput,
   GitStatus,
   WorktreeInfo,
 } from '@shared/types'
@@ -31,6 +32,8 @@ import { redactSecrets } from '../providers/redact'
 const GIT_TIMEOUT_MS = 20_000
 const GITHUB_TIMEOUT_MS = 30_000
 const GIT_MAX_OUTPUT = 512 * 1024
+/** Cap for GitHub read results (issue bodies, PR diffs, CI logs). */
+const GITHUB_READ_MAX_CHARS = 48_000
 /** Diff fed to the commit-message model, capped. */
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 48_000
 
@@ -119,6 +122,14 @@ function validateRelPath(relPath: string): string {
   }
   if (rel.split(/[\\/]+/).includes('..')) throw invalid('File paths must not contain "..".')
   return rel
+}
+
+/** GitHub issue/PR/run numbers travel as ONE argv element; digits only. */
+function validGithubNumber(value: number): string {
+  if (!Number.isInteger(value) || value <= 0 || value > 1_000_000_000) {
+    throw invalid('A positive GitHub number is required.')
+  }
+  return String(value)
 }
 
 function validateRemoteUrl(value: string): string {
@@ -492,6 +503,169 @@ export class GitService {
     const message = text.trim().replace(/^```[a-z]*\n?|```$/g, '').trim()
     if (message.length === 0) throw invalid('The model produced no message — write one manually.')
     return { message: message.slice(0, 5000) }
+  }
+
+  // -- App-owned worktree helpers (Code Arena) ---------------------------------
+
+  /**
+   * Stages EVERYTHING in an APP-OWNED worktree and returns stat + capped diff
+   * + the changed file list. Never call this on a user-granted folder — the
+   * arena calls it only on worktrees it created beneath worktreesDir.
+   */
+  async captureWorktreeDiff(
+    worktreeRoot: string
+  ): Promise<{ stat: string; diff: string; files: GitFileChange[] }> {
+    const add = await runGit(['add', '-A'], worktreeRoot)
+    if (!add.ok) throw invalid(`git add failed: ${add.stderr || 'unknown error'}`)
+    const stat = await runGit(['diff', '--cached', '--stat'], worktreeRoot)
+    const diff = await runGit(['diff', '--cached'], worktreeRoot)
+    const status = await runGit(['status', '--porcelain=v1', '-z'], worktreeRoot)
+    const files = status.ok ? parsePorcelainStatus(status.stdout).staged : []
+    const cappedDiff =
+      diff.stdout.length > GITHUB_READ_MAX_CHARS
+        ? `${diff.stdout.slice(0, GITHUB_READ_MAX_CHARS)}\n…[diff truncated]`
+        : diff.stdout
+    return { stat: stat.ok ? stat.stdout.trim() : '', diff: cappedDiff, files }
+  }
+
+  /**
+   * Removes an APP-OWNED worktree and deletes its grasberg/* branch. The
+   * caller (ArenaService) enforces that worktreePath lives under the
+   * app-owned worktrees directory — this method additionally refuses to
+   * delete branches outside the grasberg/ namespace.
+   */
+  async removeWorktree(mainRoot: string, worktreePath: string, branch: string): Promise<void> {
+    const removed = await runGit(['worktree', 'remove', '--force', worktreePath], mainRoot)
+    if (!removed.ok) {
+      throw invalid(`git worktree remove failed: ${removed.stderr || 'unknown error'}`)
+    }
+    if (branch.startsWith('grasberg/') && BRANCH_NAME_RE.test(branch)) {
+      await runGit(['branch', '-D', branch], mainRoot)
+    }
+  }
+
+  // -- GitHub reads + PR review (GitHub CLI; argv only, never a shell) ---------
+
+  /** Runs gh and returns capped, redacted stdout — or throws a clear error. */
+  private async github(argv: string[], root: string): Promise<string> {
+    const result = await (this.options.githubCommand ?? runGithub)(argv, root)
+    if (!result.ok) {
+      throw invalid(
+        `GitHub CLI failed: ${result.stderr || 'unknown error'} (is gh installed and authenticated?)`
+      )
+    }
+    const text = redactSecrets(result.stdout).trim()
+    return text.length > GITHUB_READ_MAX_CHARS
+      ? `${text.slice(0, GITHUB_READ_MAX_CHARS)}\n…[truncated]`
+      : text
+  }
+
+  /** Issues as compact JSON (read-only). */
+  async listIssues(root: string, state: 'open' | 'closed' | 'all' = 'open'): Promise<string> {
+    if (state !== 'open' && state !== 'closed' && state !== 'all') {
+      throw invalid("Issue state must be 'open', 'closed' or 'all'.")
+    }
+    const out = await this.github(
+      [
+        'issue', 'list', '--state', state, '--limit', '30',
+        '--json', 'number,title,state,labels,assignees,updatedAt',
+      ],
+      root
+    )
+    return out || '[]'
+  }
+
+  /** One issue with body + comments (read-only). */
+  async viewIssue(root: string, issueNumber: number): Promise<string> {
+    const out = await this.github(
+      [
+        'issue', 'view', validGithubNumber(issueNumber),
+        '--json', 'number,title,body,state,labels,url,comments',
+      ],
+      root
+    )
+    return out || 'Issue not found.'
+  }
+
+  /** A PR incl. CI status rollup; number omitted = current branch's PR. */
+  async viewPullRequest(root: string, prNumber?: number): Promise<string> {
+    const argv = ['pr', 'view']
+    if (prNumber !== undefined) argv.push(validGithubNumber(prNumber))
+    argv.push(
+      '--json',
+      'number,title,body,state,url,baseRefName,headRefName,reviewDecision,statusCheckRollup'
+    )
+    return (await this.github(argv, root)) || 'No pull request found.'
+  }
+
+  /** The PR's unified diff (read-only, capped). */
+  async pullRequestDiff(root: string, prNumber?: number): Promise<string> {
+    const argv = ['pr', 'diff']
+    if (prNumber !== undefined) argv.push(validGithubNumber(prNumber))
+    return (await this.github(argv, root)) || '(empty diff)'
+  }
+
+  /** Recent workflow runs as compact JSON (read-only). */
+  async listCiRuns(root: string): Promise<string> {
+    const out = await this.github(
+      [
+        'run', 'list', '--limit', '10',
+        '--json', 'databaseId,displayTitle,workflowName,headBranch,status,conclusion,createdAt',
+      ],
+      root
+    )
+    return out || '[]'
+  }
+
+  /** Failing steps' logs; without runId the latest failed run is picked. */
+  async ciFailedLogs(root: string, runId?: number): Promise<string> {
+    let id = runId !== undefined ? validGithubNumber(runId) : null
+    if (id === null) {
+      const listed = await this.github(
+        ['run', 'list', '--limit', '20', '--json', 'databaseId,conclusion'],
+        root
+      )
+      try {
+        const runs = JSON.parse(listed || '[]') as Array<{
+          databaseId?: number
+          conclusion?: string
+        }>
+        const failed = runs.find(
+          (r) => r.conclusion === 'failure' && typeof r.databaseId === 'number'
+        )
+        if (!failed) return 'No failed workflow runs found.'
+        id = String(failed.databaseId)
+      } catch {
+        throw invalid('Could not list workflow runs to find the latest failure.')
+      }
+    }
+    return (await this.github(['run', 'view', id, '--log-failed'], root)) || '(no failing-step logs)'
+  }
+
+  /** Posts a PR review (comment / approve / request changes). */
+  async reviewPullRequest(root: string, input: GitHubPrReviewInput): Promise<string> {
+    const flag =
+      input.event === 'approve'
+        ? '--approve'
+        : input.event === 'request_changes'
+          ? '--request-changes'
+          : input.event === 'comment'
+            ? '--comment'
+            : null
+    if (!flag) throw invalid("Review event must be 'comment', 'approve' or 'request_changes'.")
+    const body = input.body?.trim() ?? ''
+    if (body.length > 20_000) throw invalid('Review body is too long (max 20000 characters).')
+    if (body.length === 0 && input.event !== 'approve') {
+      throw invalid('A review body is required for comment/request_changes.')
+    }
+    const argv = ['pr', 'review']
+    if (input.number !== undefined) argv.push(validGithubNumber(input.number))
+    argv.push(flag)
+    if (body) argv.push('--body', body)
+    await this.github(argv, root)
+    const target =
+      input.number !== undefined ? `PR #${input.number}` : "the current branch's pull request"
+    return `Posted a ${input.event.replace('_', ' ')} review on ${target}.`
   }
 
   // -- internals --------------------------------------------------------------

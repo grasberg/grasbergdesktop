@@ -78,6 +78,14 @@ import type {
   PromptTemplatePatch,
   StartStreamResult,
   StreamEventEnvelope,
+  ArenaStartRequest,
+  ArenaState,
+  InboxItem,
+  InboxItemType,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalSessionInfo,
+  UsageSummaryEntry,
   TestConnectionResult,
   ToolApprovalRequest,
   ToolApprovalScope,
@@ -291,6 +299,25 @@ export const CHANNELS = {
   kbSources: 'kb:sources',
   kbRemoveSource: 'kb:removeSource',
 
+  // code arena (same task, N models, isolated worktrees)
+  arenaStart: 'arena:start',
+  arenaStatus: 'arena:status',
+  arenaApply: 'arena:apply',
+  arenaStop: 'arena:stop',
+  arenaDiscard: 'arena:discard',
+
+  // agent inbox (unified review queue for background results)
+  inboxList: 'inbox:list',
+  inboxMarkReviewed: 'inbox:markReviewed',
+
+  // usage (local, estimate-only spend summary)
+  usageSummary: 'usage:summary',
+
+  // terminal (user-driven Work-view terminal; sessions are per conversation)
+  terminalCreate: 'terminal:create',
+  terminalInput: 'terminal:input',
+  terminalDispose: 'terminal:dispose',
+
   // push channels (main -> renderer, via webContents.send)
   streamEvent: 'push:streamEvent',
   toolApprovalRequest: 'push:toolApprovalRequest',
@@ -315,6 +342,12 @@ export const CHANNELS = {
    */
   workflowRunFinished: 'push:workflowRunFinished',
   scheduledTasksChanged: 'push:scheduledTasksChanged',
+  /** Sent with { arena: ArenaState } on every arena/candidate state change. */
+  arenaChanged: 'push:arenaChanged',
+  /** Sent with TerminalDataEvent for every terminal output chunk. */
+  terminalData: 'push:terminalData',
+  /** Sent with TerminalExitEvent when a terminal session's shell exits. */
+  terminalExit: 'push:terminalExit',
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
@@ -651,6 +684,42 @@ export interface UldApi {
     /** Metadata only — the file snapshots stay in main until a restore. */
     checkpointsList(conversationId: string): Promise<IpcResult<CheckpointLite[]>>
     checkpointRestore(checkpointId: string): Promise<IpcResult<CodeChange>>
+  }
+  usage: {
+    /** Local, estimate-only usage summary over the last `days` days (default 30). */
+    summary(days?: number): Promise<IpcResult<UsageSummaryEntry[]>>
+  }
+  inbox: {
+    /** Unified review queue: finished background results, newest first. */
+    list(): Promise<IpcResult<InboxItem[]>>
+    markReviewed(itemType: InboxItemType, itemId: string): Promise<IpcResult<void>>
+  }
+  arena: {
+    /** Race 2–4 models on the same task in isolated worktrees. */
+    start(req: ArenaStartRequest): Promise<IpcResult<ArenaState>>
+    /** The conversation's current arena, or null. */
+    status(conversationId: string): Promise<IpcResult<ArenaState | null>>
+    /** Apply the winning candidate's files through the change pipeline. */
+    apply(conversationId: string, runId: string): Promise<IpcResult<ArenaState>>
+    /** Abort every still-running candidate. */
+    stop(conversationId: string): Promise<IpcResult<ArenaState | null>>
+    /** Remove the arena's worktrees and forget it. */
+    discard(conversationId: string): Promise<IpcResult<void>>
+    onChanged(cb: (event: { arena: ArenaState }) => void): () => void
+  }
+  terminal: {
+    /**
+     * Returns the conversation's live terminal session (with scrollback for
+     * replay) or spawns one in the granted folder. User-driven only — the
+     * model has no tool that reaches these sessions.
+     */
+    create(conversationId: string): Promise<IpcResult<TerminalSessionInfo>>
+    /** Writes user input (typically one line ending in \n) to the session. */
+    input(sessionId: string, data: string): Promise<IpcResult<void>>
+    /** Kills the session's shell. */
+    dispose(sessionId: string): Promise<IpcResult<void>>
+    onData(cb: (event: TerminalDataEvent) => void): () => void
+    onExit(cb: (event: TerminalExitEvent) => void): () => void
   }
   tools: {
     list(): Promise<IpcResult<ToolDefinition[]>>

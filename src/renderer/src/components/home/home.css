@@ -294,3 +294,34 @@ button.home-row-main {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* -- Inbox card ------------------------------------------------------------ */
+
+.inbox-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.inbox-row .home-row-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.inbox-review-btn {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  padding: 4px 8px;
+}
+
+.inbox-count {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent, #4a7dff);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  vertical-align: middle;
+}

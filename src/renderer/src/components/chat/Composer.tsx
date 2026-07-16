@@ -7,7 +7,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type ReactElement,
 } from 'react'
-import type { Attachment, ChatParams, ResearchDepth } from '@shared/types'
+import type { Attachment, ChatParams, ResearchDepth, SandboxLevel } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
 import { providerUsable as isProviderUsable } from '@/lib/providers'
@@ -524,6 +524,22 @@ export default function Composer(): ReactElement {
     }
   }
 
+  const setSandboxLevel = async (level: SandboxLevel): Promise<void> => {
+    if (!conversation || conversation.mode !== 'work') return
+    try {
+      const params: ChatParams = { ...conversation.params }
+      // 'workspace-write' is the default — store it as absence, like planMode.
+      if (level === 'workspace-write') delete params.sandboxLevel
+      else params.sandboxLevel = level
+      const updated = await unwrap(
+        window.uld.conversations.update({ id: conversation.id, patch: { params } })
+      )
+      useChatStore.setState({ conversation: updated })
+    } catch (error) {
+      toast(`Could not set the sandbox level: ${toNormalized(error).message}`, 'error')
+    }
+  }
+
   const toggleAutoAcceptEdits = async (): Promise<void> => {
     if (!conversation || conversation.mode !== 'work') return
     setAutoAcceptBusy(true)
@@ -758,6 +774,26 @@ export default function Composer(): ReactElement {
                     </span>
                     <span>Plan Mode</span>
                   </button>
+                ) : null}
+                {conversation?.mode === 'work' ? (
+                  <label
+                    className="composer-plus-subcontrol"
+                    title={
+                      'read-only: the assistant may only investigate — every mutating tool is refused. ' +
+                      'workspace-write: file writes and shell commands stay inside the granted folder (default). ' +
+                      'full: shell commands may also target an absolute cwd outside the folder (each call still asks).'
+                    }
+                  >
+                    <span>Sandbox</span>
+                    <select
+                      value={conversation.params.sandboxLevel ?? 'workspace-write'}
+                      onChange={(e) => void setSandboxLevel(e.target.value as SandboxLevel)}
+                    >
+                      <option value="read-only">read-only</option>
+                      <option value="workspace-write">workspace-write</option>
+                      <option value="full">full</option>
+                    </select>
+                  </label>
                 ) : null}
               </div>
             </>

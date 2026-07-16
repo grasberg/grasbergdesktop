@@ -240,6 +240,21 @@ export interface TokenUsage {
   cacheCreationTokens?: number
 }
 
+/** One row of the local usage summary (Settings → Usage). Estimates only. */
+export interface UsageSummaryEntry {
+  providerId: string
+  providerLabel: string
+  providerType: ProviderType
+  modelId: string
+  /** Assistant messages that recorded usage for this provider+model. */
+  messages: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  /** Estimated from the static local price list; null for unknown models. */
+  estimatedCostUsd: number | null
+}
+
 export interface Message {
   id: string
   conversationId: string
@@ -286,6 +301,44 @@ export interface Message {
  */
 export type ReasoningEffort = 'low' | 'medium' | 'high'
 
+/**
+ * Sandbox posture for a Work conversation's tool loop:
+ * - 'read-only': every mutating tool is refused — safe autonomous investigation.
+ * - 'workspace-write' (the default when unset): today's behavior — writes are
+ *   path-jailed to the granted folder and shell commands run in it.
+ * - 'full': additionally allows run_shell_command to target an absolute cwd
+ *   outside the project folder. Every shell call still requires approval.
+ */
+export type SandboxLevel = 'read-only' | 'workspace-write' | 'full'
+
+// ---------------------------------------------------------------------------
+// Terminal (user-driven Work-view terminal sessions; pipes-based, no pty)
+// ---------------------------------------------------------------------------
+
+/** A live (or replayed) terminal session bound to one Work conversation. */
+export interface TerminalSessionInfo {
+  sessionId: string
+  conversationId: string
+  /** The shell binary backing the session (cmd.exe / bash / $SHELL). */
+  shell: string
+  cwd: string
+  /** Capped scrollback so a re-opened panel can replay history. */
+  backlog: string
+  alive: boolean
+}
+
+/** Push payload: one interleaved stdout/stderr chunk. */
+export interface TerminalDataEvent {
+  sessionId: string
+  chunk: string
+}
+
+/** Push payload: the session's shell exited (code null = killed/failed). */
+export interface TerminalExitEvent {
+  sessionId: string
+  code: number | null
+}
+
 /** Sampling parameters; all optional — provider defaults apply when unset. */
 export interface ChatParams {
   temperature?: number
@@ -300,6 +353,8 @@ export interface ChatParams {
    * approval dialog (all other tools still ask). Off unless explicitly set.
    */
   autoAcceptEdits?: boolean
+  /** Sandbox posture (work mode); unset = 'workspace-write'. */
+  sandboxLevel?: SandboxLevel
   /** Reasoning/thinking effort; unset = provider default. */
   reasoningEffort?: ReasoningEffort
   /**
@@ -635,6 +690,13 @@ export interface AppSettings {
    */
   researchWorkerProviderId: string | null
   researchWorkerModelId: string | null
+  /**
+   * Economy model: a cheap model for internal plumbing generations —
+   * context compaction, commit-message suggestions, memory consolidation
+   * (dreaming). Null = those use the default model too.
+   */
+  economyProviderId: string | null
+  economyModelId: string | null
   /** Depth used when /research or the composer toggle doesn't specify one. */
   researchDefaultDepth: ResearchDepth
   /**
@@ -688,6 +750,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outboundWebhookUrl: null,
   researchWorkerProviderId: null,
   researchWorkerModelId: null,
+  economyProviderId: null,
+  economyModelId: null,
   researchDefaultDepth: 'standard',
   defaultImageProviderId: null,
   defaultImageModelId: null,
@@ -735,6 +799,75 @@ export interface AgentRun {
   modelId: string | null
   startedAt: number
   finishedAt: number | null
+}
+
+// ---------------------------------------------------------------------------
+// Code Arena (same task, N models, isolated worktrees, side-by-side diffs)
+// ---------------------------------------------------------------------------
+
+export interface ArenaCandidateState {
+  /** The persisted agent_runs row backing this candidate. */
+  runId: string
+  providerId: string
+  modelId: string
+  providerLabel: string
+  worktreePath: string
+  branch: string
+  status: 'running' | 'done' | 'error' | 'stopped'
+  /** The model's closing summary (or the error), capped. */
+  summary: string
+  /** `git diff --stat` of the candidate's worktree, captured on finish. */
+  diffStat: string
+  /** Full unified diff (capped) for side-by-side review. */
+  diff: string
+  /** Files the candidate changed (staged in its worktree). */
+  changedFiles: GitFileChange[]
+}
+
+export interface ArenaState {
+  id: string
+  conversationId: string
+  /** The REAL project the winner is applied to. */
+  projectId: string
+  task: string
+  status: 'running' | 'finished' | 'applied' | 'discarded'
+  candidates: ArenaCandidateState[]
+  appliedRunId: string | null
+  createdAt: number
+}
+
+export interface ArenaStartRequest {
+  conversationId: string
+  task: string
+  /** 2–4 models to race on identical worktree copies of the repo. */
+  candidates: MoaModelRef[]
+}
+
+// ---------------------------------------------------------------------------
+// Agent inbox (unified review queue for background results)
+// ---------------------------------------------------------------------------
+
+export type InboxItemType = 'agent_run' | 'workflow_run' | 'scheduled_task_run'
+
+/** One reviewable background result in the Home inbox. */
+export interface InboxItem {
+  itemType: InboxItemType
+  /** Stable id within its type (scheduled tasks: `taskId:lastRunAt`). */
+  itemId: string
+  /** What produced it: the agent name, workflow name or task title. */
+  sourceLabel: string
+  /** The task/prompt/output headline shown as the row title. */
+  title: string
+  status: 'ok' | 'error' | 'stopped'
+  /** Capped result/output/error preview. */
+  snippet: string
+  /** Open target when the item belongs to a conversation. */
+  conversationId: string | null
+  /** Open target when the item is a workflow run. */
+  workflowId: string | null
+  finishedAt: number
+  /** Set when the user marked it reviewed (from inbox_state). */
+  reviewedAt: number | null
 }
 
 export interface CheckpointFile {
@@ -869,6 +1002,15 @@ export interface GitHubPrInput {
 
 export interface GitHubPrResult {
   url: string
+}
+
+/** Input for git_write action 'pr_review' (posts a PR review via gh). */
+export interface GitHubPrReviewInput {
+  /** PR number; omitted = the current branch's pull request. */
+  number?: number
+  event: 'comment' | 'approve' | 'request_changes'
+  /** Review text; required for comment/request_changes. */
+  body?: string
 }
 
 export interface CodeChange {

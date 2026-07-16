@@ -796,4 +796,21 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE scheduled_tasks ADD COLUMN project_id TEXT`,
     ],
   },
+  {
+    version: 30,
+    name: 'inbox-state',
+    // The agent inbox's only persistence: which finished background results
+    // (agent runs, workflow runs, scheduled-task runs) the user marked as
+    // reviewed. One composite-key row per reviewed item; unreviewed items
+    // simply have no row. Deliberately NO foreign keys: the three source
+    // tables prune independently and a dangling review row is harmless.
+    statements: [
+      `CREATE TABLE inbox_state (
+         item_type TEXT NOT NULL,
+         item_id TEXT NOT NULL,
+         reviewed_at INTEGER NOT NULL,
+         PRIMARY KEY (item_type, item_id)
+       )`,
+    ],
+  },
 ]

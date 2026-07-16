@@ -1093,3 +1093,39 @@
 .kb-source { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
 .kb-source-name { overflow-wrap: anywhere; }
 .kb-source-chunks { color: var(--text-muted); margin-left: auto; }
+
+/* -- Usage tab ------------------------------------------------------------- */
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  margin-top: 10px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  white-space: nowrap;
+}
+
+.usage-table th {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.usage-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-total {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  text-align: right;
+}

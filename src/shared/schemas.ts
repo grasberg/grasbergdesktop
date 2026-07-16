@@ -18,6 +18,7 @@ export const chatParamsSchema = z
     presencePenalty: z.number().min(-2).max(2).optional(),
     planMode: z.boolean().optional(),
     autoAcceptEdits: z.boolean().optional(),
+    sandboxLevel: z.enum(['read-only', 'workspace-write', 'full']).optional(),
     reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
     responseFormat: z.enum(['json']).optional(),
   })
@@ -375,6 +376,8 @@ export const settingsPatchSchema = z
     outboundWebhookUrl: outboundWebhookUrlSchema,
     researchWorkerProviderId: z.string().nullable(),
     researchWorkerModelId: z.string().max(200).nullable(),
+    economyProviderId: z.string().nullable(),
+    economyModelId: z.string().max(200).nullable(),
     researchDefaultDepth: researchDepthSchema,
     defaultImageProviderId: z.string().nullable(),
     defaultImageModelId: z.string().max(200).nullable(),

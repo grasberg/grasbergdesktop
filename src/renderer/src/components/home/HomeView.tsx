@@ -11,6 +11,7 @@ import { unwrap } from '@/api/uld'
 import { modKeyLabel } from '@/lib/platform'
 import { useWorkflowsStore } from '@/stores/workflows'
 import ScheduledCard from './ScheduledCard'
+import InboxCard from './InboxCard'
 import RecentRunsCard from './RecentRunsCard'
 import RecentWorkCard from './RecentWorkCard'
 import ProjectsCard from './ProjectsCard'
@@ -74,6 +75,7 @@ export default function HomeView(): React.JSX.Element {
       </header>
       <div className="home-grid">
         <ScheduledCard />
+        <InboxCard />
         <RecentRunsCard />
         <RecentWorkCard items={recent} projectNameById={projectNameById} />
         <ProjectsCard projects={projects} />

@@ -27,6 +27,8 @@ export interface ModePromptOptions {
   skills?: { name: string; description: string; content: string }[]
   /** Work mode: plan-first, read-only round (mutating tools are refused). */
   planMode?: boolean
+  /** Work mode: the conversation's sandbox level is read-only (mutating tools refused). */
+  sandboxReadOnly?: boolean
   /**
    * Today's local date, e.g. "Friday, July 11, 2026" — lets the model resolve
    * relative dates ("tomorrow", "next Monday") for scheduling. Date only, so
@@ -131,6 +133,11 @@ const PLAN_MODE_SECTION = `PLAN MODE IS ACTIVE. The user wants a plan before any
 - Deliver a concise implementation plan: the goal as you understand it, the files you will touch and how, the order of steps, risks or open questions, and how the result will be verified.
 - End by asking the user to review the plan. They will turn plan mode off when they want you to implement it.`
 
+const SANDBOX_READ_ONLY_SECTION = `SANDBOX LEVEL: READ-ONLY. The user has locked this conversation to read-only investigation:
+- Read-only tools (read_file, grep, glob, file_search, repo_map, list_directory, git queries, web tools) all work normally — investigate freely and autonomously.
+- Every mutating tool (edit_file, write_file, run_shell_command, git_write, …) will be refused while this level is active. Do not attempt them.
+- When a change is needed, describe exactly what you would do and ask the user to raise the sandbox level (composer plus-menu → Sandbox) to proceed.`
+
 function toolsUsageSection(toolNames: string[]): string {
   return `You can call tools (${toolNames.join(', ')}). Guidance for using them:
 - Use tools when the task needs the user's actual data or environment (their files, live web content, running commands). Answer directly from your own knowledge when it does not — do not call tools for questions you can already answer, or to re-read content already present in the conversation.
@@ -230,6 +237,7 @@ export function buildModeSystemPrompt(
   if (mode === 'work') {
     sections.push(WORK_SECTION)
     if (opts.planMode) sections.push(PLAN_MODE_SECTION)
+    if (opts.sandboxReadOnly) sections.push(SANDBOX_READ_ONLY_SECTION)
   }
   if (opts.toolNames && opts.toolNames.length > 0) {
     if (opts.toolsAvailable === false) {

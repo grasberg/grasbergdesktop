@@ -7,8 +7,11 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
 import type {
+  ArenaState,
   McpServerRuntime,
   StreamEventEnvelope,
+  TerminalDataEvent,
+  TerminalExitEvent,
   ToolApprovalRequest,
   UserQuestionRequest,
   WorkflowRunFinishedEvent,
@@ -136,6 +139,30 @@ const api: UldApi = {
       ipcRenderer.invoke(CHANNELS.codeCheckpointsList, conversationId),
     checkpointRestore: (checkpointId) =>
       ipcRenderer.invoke(CHANNELS.codeCheckpointRestore, checkpointId),
+  },
+  usage: {
+    summary: (days) => ipcRenderer.invoke(CHANNELS.usageSummary, days),
+  },
+  inbox: {
+    list: () => ipcRenderer.invoke(CHANNELS.inboxList),
+    markReviewed: (itemType, itemId) =>
+      ipcRenderer.invoke(CHANNELS.inboxMarkReviewed, { itemType, itemId }),
+  },
+  arena: {
+    start: (req) => ipcRenderer.invoke(CHANNELS.arenaStart, req),
+    status: (conversationId) => ipcRenderer.invoke(CHANNELS.arenaStatus, conversationId),
+    apply: (conversationId, runId) =>
+      ipcRenderer.invoke(CHANNELS.arenaApply, { conversationId, runId }),
+    stop: (conversationId) => ipcRenderer.invoke(CHANNELS.arenaStop, conversationId),
+    discard: (conversationId) => ipcRenderer.invoke(CHANNELS.arenaDiscard, conversationId),
+    onChanged: subscribe<{ arena: ArenaState }>(CHANNELS.arenaChanged),
+  },
+  terminal: {
+    create: (conversationId) => ipcRenderer.invoke(CHANNELS.terminalCreate, conversationId),
+    input: (sessionId, data) => ipcRenderer.invoke(CHANNELS.terminalInput, { sessionId, data }),
+    dispose: (sessionId) => ipcRenderer.invoke(CHANNELS.terminalDispose, sessionId),
+    onData: subscribe<TerminalDataEvent>(CHANNELS.terminalData),
+    onExit: subscribe<TerminalExitEvent>(CHANNELS.terminalExit),
   },
   tools: {
     list: () => ipcRenderer.invoke(CHANNELS.toolsList),

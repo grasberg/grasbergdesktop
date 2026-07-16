@@ -81,6 +81,7 @@ function makeSystem(currentStatus: GitStatus) {
   const pull = vi.fn(async () => currentStatus)
   const push = vi.fn(async () => currentStatus)
   const createPullRequest = vi.fn(async () => ({ url: 'https://github.com/acme/repo/pull/1' }))
+  const reviewPullRequest = vi.fn(async () => 'Posted a comment review on PR #1.')
   const system = createToolSystem(db, null, {
     gitWrite: {
       status: async () => currentStatus,
@@ -92,6 +93,7 @@ function makeSystem(currentStatus: GitStatus) {
       pull,
       push,
       createPullRequest,
+      reviewPullRequest,
     },
   })
   return { ...system, stage, commit, createBranch, setOrigin, fetch, pull, push, createPullRequest }

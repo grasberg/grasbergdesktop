@@ -615,6 +615,68 @@ describe('run_shell_command tool (opt-in)', () => {
   }, 30_000)
 })
 
+describe('sandbox levels', () => {
+  it("read-only refuses mutating tools without asking, read-only tools still work", async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const approval = vi.fn(async () => APPROVE)
+    const blocked = await executor.execute(
+      call('write_file', { path: 'new.txt', content: 'x' }),
+      { conversation: conv(true), approval, sandboxLevel: 'read-only' }
+    )
+    expect(blocked).toMatch(/sandbox level is read-only/i)
+    expect(approval).not.toHaveBeenCalled()
+
+    const shell = await executor.execute(call('run_shell_command', { command: 'echo hi' }), {
+      conversation: conv(true),
+      approval,
+      sandboxLevel: 'read-only',
+    })
+    expect(shell).toMatch(/sandbox level is read-only/i)
+    expect(approval).not.toHaveBeenCalled()
+
+    const grep = await executor.execute(call('grep', { pattern: 'needle' }), {
+      conversation: conv(true),
+      approval: approveAll,
+      sandboxLevel: 'read-only',
+    })
+    expect(grep).toContain('alpha.txt:2:')
+  })
+
+  it('a relative shell cwd stays jailed to the project root at every level', async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const inside = await executor.execute(
+      call('run_shell_command', { command: 'node -p "process.cwd()"', cwd: 'src' }),
+      { conversation: conv(true), approval: approveAll }
+    )
+    expect(inside).toContain(join(projectDir, 'src'))
+
+    const escape = await executor.execute(
+      call('run_shell_command', { command: 'echo hi', cwd: '../..' }),
+      { conversation: conv(true), approval: approveAll }
+    )
+    expect(escape).toMatch(/must stay inside the project folder/i)
+  })
+
+  it("an absolute shell cwd is refused below 'full' and honoured at 'full'", async () => {
+    db.settings.update({ shellExecutionEnabled: true })
+    const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const refused = await executor.execute(
+      call('run_shell_command', { command: 'echo hi', cwd: dir }),
+      { conversation: conv(true), approval: approveAll }
+    )
+    expect(refused).toMatch(/requires sandbox level 'full'/i)
+
+    const allowed = await executor.execute(
+      call('run_shell_command', { command: 'node -p "process.cwd()"', cwd: dir }),
+      { conversation: conv(true), approval: approveAll, sandboxLevel: 'full' }
+    )
+    expect(allowed).toContain('Exit code: 0')
+    expect(allowed).toContain(dir)
+  })
+})
+
 describe('repo_map tool', () => {
   it('ranks project files for a query and lists their symbols', async () => {
     const { executor } = createToolSystem(db)

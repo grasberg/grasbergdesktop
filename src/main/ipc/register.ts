@@ -36,6 +36,7 @@ import type {
 import { runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
 import type { WorkspaceRootService } from '../code/workspace-root'
+import type { TerminalService } from '../terminal/terminal-service'
 import type { KnowledgeService } from '../services/knowledge'
 import type { DreamingService } from '../services/dreaming'
 import {
@@ -46,6 +47,9 @@ import {
   resolveModelCatalog,
 } from '@shared/catalog'
 import { presetMeta } from '@shared/presets'
+import { buildUsageSummary } from '@shared/usage-summary'
+import { buildInboxItems } from '../services/inbox'
+import type { ArenaService } from '../services/arena'
 import { modeModelDefault } from '@shared/mode-models'
 import {
   apiKeySchema,
@@ -124,6 +128,10 @@ export interface RegisterIpcDeps {
   attachmentsDir: string
   /** App-owned directory for isolated Git worktrees. */
   worktreesDir: string
+  /** User-driven Work-view terminal sessions (pipes-based, per conversation). */
+  terminalService: TerminalService
+  /** Code Arena: N models racing the same task in isolated worktrees. */
+  arenaService: ArenaService
   getWindows: () => BrowserWindow[]
 }
 
@@ -1130,6 +1138,117 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.codeCheckpointRestore, (checkpointId) =>
     codeService.restoreCheckpoint(requireString(checkpointId, 'Checkpoint id'))
   )
+
+  // -- code arena ----------------------------------------------------------------
+
+  register(CHANNELS.arenaStart, (req) => {
+    const parsed = parseInput(
+      z.object({
+        conversationId: z.string().min(1),
+        task: z.string().trim().min(1).max(20_000),
+        candidates: z
+          .array(z.object({ providerId: z.string().min(1), modelId: z.string().min(1).max(200) }))
+          .min(2)
+          .max(4),
+      }),
+      req
+    )
+    return deps.arenaService.start(parsed)
+  })
+
+  register(CHANNELS.arenaStatus, (conversationId) =>
+    deps.arenaService.status(requireString(conversationId, 'Conversation id'))
+  )
+
+  register(CHANNELS.arenaApply, (req) => {
+    const parsed = parseInput(
+      z.object({ conversationId: z.string().min(1), runId: z.string().min(1) }),
+      req
+    )
+    return deps.arenaService.apply(parsed.conversationId, parsed.runId)
+  })
+
+  register(CHANNELS.arenaStop, (conversationId) =>
+    deps.arenaService.stop(requireString(conversationId, 'Conversation id'))
+  )
+
+  register(CHANNELS.arenaDiscard, (conversationId) =>
+    deps.arenaService.discard(requireString(conversationId, 'Conversation id'))
+  )
+
+  // -- agent inbox (unified review queue for background results) ----------------
+
+  register(CHANNELS.inboxList, () =>
+    buildInboxItems(
+      {
+        agentRuns: db.agentPlatform.runsList(),
+        workflowRuns: db.workflows.listRecentRunsWithNames(30),
+        scheduledTasks: db.scheduledTasks.list(),
+      },
+      db.inbox.reviewedByKey()
+    )
+  )
+
+  register(CHANNELS.inboxMarkReviewed, (req) => {
+    const parsed = parseInput(
+      z.object({
+        itemType: z.enum(['agent_run', 'workflow_run', 'scheduled_task_run']),
+        itemId: z.string().min(1).max(200),
+      }),
+      req
+    )
+    db.inbox.markReviewed(parsed.itemType, parsed.itemId)
+  })
+
+  // -- usage (local, estimate-only spend summary) -------------------------------
+
+  register(CHANNELS.usageSummary, (days) => {
+    const window = typeof days === 'number' && days >= 1 && days <= 365 ? days : 30
+    const since = Date.now() - window * 24 * 60 * 60 * 1000
+    const providers = new Map(db.providers.list().map((p) => [p.id, p]))
+    const rows = db.messages.usageSince(since).flatMap((row) => {
+      const provider = providers.get(row.providerId)
+      if (!provider) return []
+      return [
+        {
+          providerId: row.providerId,
+          providerLabel: provider.label,
+          providerType: provider.type,
+          modelId: row.modelId,
+          usage: row.usage,
+        },
+      ]
+    })
+    return buildUsageSummary(rows)
+  })
+
+  // -- terminal (user-driven Work-view terminal; the click IS the consent) ------
+
+  register(CHANNELS.terminalCreate, (conversationId) => {
+    const conversation = found(
+      db.conversations.getById(requireString(conversationId, 'Conversation id')),
+      'Conversation'
+    )
+    if (!conversation.projectId) {
+      throw invalid('Connect a folder to this task before opening a terminal.')
+    }
+    return deps.terminalService.createOrAttach(
+      conversation.id,
+      projectRoot(conversation.projectId)
+    )
+  })
+
+  register(CHANNELS.terminalInput, (req) => {
+    const parsed = parseInput(
+      z.object({ sessionId: z.string().min(1), data: z.string().min(1).max(8_192) }),
+      req
+    )
+    deps.terminalService.write(parsed.sessionId, parsed.data)
+  })
+
+  register(CHANNELS.terminalDispose, (sessionId) => {
+    deps.terminalService.dispose(requireString(sessionId, 'Session id'))
+  })
 
   // -- tools --------------------------------------------------------------------
 

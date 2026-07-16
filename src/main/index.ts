@@ -32,6 +32,8 @@ import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
 import { WorkflowScheduler } from './workflows/scheduler'
 import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSession } from './browser/session'
+import { TerminalService } from './terminal/terminal-service'
+import { ArenaService } from './services/arena'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
 import { ProjectHookService } from './services/project-hooks'
@@ -59,6 +61,8 @@ let workflowRunnerRef: WorkflowRunner | null = null
  */
 let mainWindow: BrowserWindow | null = null
 let browserSession: BrowserSession | null = null
+let terminalService: TerminalService | null = null
+let arenaService: ArenaService | null = null
 let oauthManager: OpenAiOAuthManager | null = null
 let cleanedUp = false
 let quitting = false
@@ -102,6 +106,10 @@ async function cleanup(): Promise<void> {
     // Teardown conveniences only.
   }
   browserSession?.close()
+  // Kill every user terminal shell we spawned.
+  terminalService?.disposeAll()
+  // Abort running arena candidates (their agent_runs settle as stopped).
+  arenaService?.stopAll()
   // Close MCP connections (kills any stdio child processes) before the db.
   try {
     await mcpManager?.stopAll()
@@ -307,7 +315,7 @@ function bootstrap(): void {
   const gitService = new GitService({
     generateText: (prompt) =>
       chatService
-        ? chatService.generateForWorkflow(prompt)
+        ? chatService.generateForWorkflow(prompt, undefined, undefined, { economy: true })
         : Promise.reject(new Error('Generation unavailable during startup.')),
     beforeCommit: (root) => projectHooks.runForRoot('beforeCommit', root),
   })
@@ -327,6 +335,27 @@ function bootstrap(): void {
   // Secret custom-tool headers are decrypted here (main only) at call time.
   const browser = new BrowserSession()
   browserSession = browser
+  // User-driven Work-view terminal sessions (pipes-based; killed on quit).
+  const terminals = new TerminalService({ broadcast })
+  terminalService = terminals
+  // Code Arena: N models race the same task in isolated app-owned worktrees.
+  const arena = new ArenaService({
+    db: database,
+    git: gitService,
+    code: {
+      openProject: (path) => codeService.openProject(path),
+      proposeChange: (conversationId, relPath, changeType, newContent) =>
+        codeService.proposeChange(conversationId, relPath, changeType, newContent),
+      applyChange: (changeId) => codeService.applyChange(changeId),
+    },
+    worktreesDir,
+    broadcast,
+    generate: (prompt, providerId, modelId, opts) =>
+      chatService
+        ? chatService.generateForWorkflow(prompt, providerId, modelId, opts)
+        : Promise.reject(new Error('Generation unavailable during startup.')),
+  })
+  arenaService = arena
   // Knowledge bases (RAG): embeddings go through chatService (set below) so
   // keys never leave main; the tool executor searches via this service.
   const knowledgeService = new KnowledgeService({
@@ -371,6 +400,15 @@ function bootstrap(): void {
       pull: (root) => gitService.pull(root),
       push: (root, confirmDefaultBranch) => gitService.push(root, confirmDefaultBranch),
       createPullRequest: (root, input) => gitService.createPullRequest(root, input),
+      reviewPullRequest: (root, input) => gitService.reviewPullRequest(root, input),
+    },
+    gitHub: {
+      listIssues: (root, state) => gitService.listIssues(root, state),
+      viewIssue: (root, issueNumber) => gitService.viewIssue(root, issueNumber),
+      viewPullRequest: (root, prNumber) => gitService.viewPullRequest(root, prNumber),
+      pullRequestDiff: (root, prNumber) => gitService.pullRequestDiff(root, prNumber),
+      listCiRuns: (root) => gitService.listCiRuns(root),
+      ciFailedLogs: (root, runId) => gitService.ciFailedLogs(root, runId),
     },
     delegateBackground: {
       start: (task, ctx, agentName) =>
@@ -472,7 +510,8 @@ function bootstrap(): void {
   // inside the service; the manual Settings → Memory action bypasses gates).
   const dreaming = new DreamingService({
     db: database,
-    generate: (prompt, opts) => chatService!.generateForWorkflow(prompt, undefined, undefined, opts),
+    generate: (prompt, opts) =>
+      chatService!.generateForWorkflow(prompt, undefined, undefined, { ...opts, economy: true }),
   })
   dreamingService = dreaming
 
@@ -510,6 +549,8 @@ function bootstrap(): void {
     knowledgeService,
     attachmentsDir,
     worktreesDir,
+    terminalService: terminals,
+    arenaService: arena,
     getWindows: () => BrowserWindow.getAllWindows(),
   })
 

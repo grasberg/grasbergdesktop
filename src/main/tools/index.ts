@@ -88,6 +88,8 @@ export interface CreateToolSystemOptions {
   imageGeneration?: NonNullable<ToolExecutorDeps['imageGeneration']>
   /** Local git writes for 'git_write' (wired to GitService). */
   gitWrite?: NonNullable<ToolExecutorDeps['gitWrite']>
+  /** Read-only GitHub queries for the 'github' tool (wired to GitService). */
+  gitHub?: NonNullable<ToolExecutorDeps['gitHub']>
   /** Background sub-agent tasks (delegate background=true, task_output, task_stop). */
   delegateBackground?: NonNullable<ToolExecutorDeps['delegateBackground']>
   /** Approval-gated project writes for edit_file/write_file (wired to CodeService). */
@@ -143,6 +145,7 @@ export function createToolSystem(
     delegate: options.delegate,
     imageGeneration: options.imageGeneration ?? null,
     gitWrite: options.gitWrite ?? null,
+    gitHub: options.gitHub ?? null,
     delegateBackground: options.delegateBackground ?? null,
     codeChanges: options.codeChanges ?? null,
     ensureWorkspaceRoot: options.ensureWorkspaceRoot ?? null,

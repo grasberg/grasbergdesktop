@@ -18,8 +18,10 @@ import FileTree from '@/components/code/FileTree'
 import { grantFolderAccess } from './WorkControls'
 import PreviewTab from './PreviewTab'
 import TasksTab from './TasksTab'
+import TerminalTab from './TerminalTab'
+import ArenaTab from './ArenaTab'
 
-export type WorkTab = 'files' | 'changes' | 'preview' | 'tasks'
+export type WorkTab = 'files' | 'changes' | 'preview' | 'terminal' | 'arena' | 'tasks'
 
 function FolderIcon(): ReactElement {
   return (
@@ -282,6 +284,8 @@ export default function WorkPanel({
       ? [{ key: 'changes' as const, label: 'Changes', badge: proposedCount || undefined }]
       : []),
     ...(htmlFiles.length > 0 ? [{ key: 'preview' as const, label: 'Preview' }] : []),
+    ...(hasProject ? [{ key: 'terminal' as const, label: 'Terminal' }] : []),
+    ...(hasProject ? [{ key: 'arena' as const, label: 'Arena' }] : []),
     { key: 'tasks', label: 'Tasks' },
   ]
   const active = tabs.some((t) => t.key === activeTab) ? activeTab : 'files'
@@ -328,6 +332,8 @@ export default function WorkPanel({
             reloadKey={htmlReloadKey}
           />
         ) : null}
+        {active === 'terminal' ? <TerminalTab /> : null}
+        {active === 'arena' ? <ArenaTab /> : null}
         {active === 'tasks' ? <TasksTab /> : null}
       </div>
     </aside>

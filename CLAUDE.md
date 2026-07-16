@@ -42,7 +42,7 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v29, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v30, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
 - `src/renderer/src/stores/contracts.ts` — renderer store contracts
 
@@ -50,9 +50,13 @@ All IPC returns `IpcResult<T>`; every handler in `src/main/ipc/` validates its i
 
 ### Conversation modes (two since v24/v25)
 
-`ConversationMode = 'chat' | 'work'`. **Chat** is a plain conversation. **Work** is the agentic mode: one `WorkView` (renderer `components/work/`) with an on-demand right panel — Files (directory tree), Changes (reviewable code-change pipeline + git), Preview (sandboxed `.html` rendering), Tasks (goal + plans/checklists). A Work task without a user-connected folder gets its own workspace folder (`{userData}/data/workspaces/<conversationId>/`) lazily on the first file write: `WorkspaceRootService` (`src/main/code/workspace-root.ts`) creates the dir, registers it as a `code_projects` row and links `conversation.projectId`, so the entire existing code pipeline (tree, path jail, diffs, git) works on it unchanged. Auto workspaces are the ONLY folders the app ever deletes (path-prefix check); user grants are never touched. The legacy cowork/code/write/design modes were collapsed in v24 (legacy content deleted by explicit product decision) and their mode CHECKs dropped in v25 (v13 pattern: zod enforces the enum). Backups from before v3 import legacy modes as `work`.
+`ConversationMode = 'chat' | 'work'`. **Chat** is a plain conversation. **Work** is the agentic mode: one `WorkView` (renderer `components/work/`) with an on-demand right panel — Files (directory tree), Changes (reviewable code-change pipeline + git), Preview (sandboxed `.html` rendering), Terminal (user-driven pipes-based console, `src/main/terminal/terminal-service.ts` — deliberately NO node-pty, sessions per conversation, the model can never reach it), Arena (Code Arena, see below), Tasks (goal + plans/checklists). A Work task without a user-connected folder gets its own workspace folder (`{userData}/data/workspaces/<conversationId>/`) lazily on the first file write: `WorkspaceRootService` (`src/main/code/workspace-root.ts`) creates the dir, registers it as a `code_projects` row and links `conversation.projectId`, so the entire existing code pipeline (tree, path jail, diffs, git) works on it unchanged. Auto workspaces are the ONLY folders the app ever deletes (path-prefix check); user grants are never touched. The legacy cowork/code/write/design modes were collapsed in v24 (legacy content deleted by explicit product decision) and their mode CHECKs dropped in v25 (v13 pattern: zod enforces the enum). Backups from before v3 import legacy modes as `work`.
 
-Remote git lives in `src/main/code/git-service.ts` (surfaced in the Changes panel's `CommitBar`) with hard safety rules: pushes never force and pushing the default branch requires explicit confirmation; pulls are fast-forward-only and require a clean worktree; remote URLs must be HTTPS/SSH with no embedded credentials; PR creation shells out to the `gh` CLI (test seam: `deps.githubCommand`).
+Remote git lives in `src/main/code/git-service.ts` (surfaced in the Changes panel's `CommitBar`) with hard safety rules: pushes never force and pushing the default branch requires explicit confirmation; pulls are fast-forward-only and require a clean worktree; remote URLs must be HTTPS/SSH with no embedded credentials; PR creation shells out to the `gh` CLI (test seam: `deps.githubCommand`). GitHub depth beyond that: the read-only `github` tool (issues, PR view/diff, CI runs, failing-step logs) and `git_write` action `pr_review` — all `gh`-argv-based in git-service, never a shell.
+
+**Code Arena** (`src/main/services/arena.ts`): race the same task on 2–4 models, each headless (`generateForWorkflow` with pre-approved file tools) in its own app-owned worktree (`GitService.createWorktree`), diffs captured per candidate (`captureWorktreeDiff`); applying the winner routes every file through the audited CodeChange pipeline. Arena metadata is in-memory; candidates persist as `agent_runs` rows (visible in the Home inbox). Discard deletes ONLY worktrees under the app-owned worktrees dir (path-prefix check).
+
+**Sandbox levels** (`ChatParams.sandboxLevel`, work mode): 'read-only' refuses every mutating tool (standing posture, prompt section in `prompts.ts`), 'workspace-write' (default, unset) = the classic path-jailed behavior, 'full' additionally lets run_shell_command use an absolute cwd. Enforced in `executor.ts` next to the plan-mode gate; inherited by delegate sub-agents.
 
 ### Security invariants
 
@@ -97,7 +101,9 @@ Three independent background-execution systems — don't conflate them:
 
 Both schedulers share one `ScheduledRunQueue` (`src/main/scheduling/run-queue.ts`: bounded concurrency of 2, key-deduped) so scheduled workflows and prompt tasks can't stampede providers.
 
-All headless generation funnels through the chat service: `generateForWorkflow` (one-shot — workflows, scheduled tasks, git commit-message suggestions) and `generateHeadless` (conversation reply — Telegram bridge). New headless callers should reuse these, not spawn their own adapter loops.
+All headless generation funnels through the chat service: `generateForWorkflow` (one-shot — workflows, scheduled tasks, git commit-message suggestions, arena candidates) and `generateHeadless` (conversation reply — Telegram bridge). New headless callers should reuse these, not spawn their own adapter loops. `generateForWorkflow`'s `economy: true` opt routes internal plumbing (commit messages, dreaming, compaction) to `AppSettings.economyProviderId/ModelId` when set; explicit ids and agent profiles always win.
+
+The **agent inbox** (Home) unifies finished background results — agent runs, workflow runs, scheduled-task runs — into one review queue: pure aggregation in `src/main/services/inbox.ts`, reviewed-state in the `inbox_state` table (v30, no FKs by design). The **Usage tab** (Settings) is a local estimate-only spend summary: `messages.usageSince` + `@shared/usage-summary.ts` against the static price list.
 
 ## Testing conventions
 
