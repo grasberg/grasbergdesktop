@@ -31,6 +31,7 @@ import type {
   WorkflowGraph,
   WorkflowInput,
   WorkflowsOverview,
+  WorkflowTriggerInfo,
   WorkspaceItemKind,
 } from '@shared/types'
 import { makeDryRunDeps, runWorkflow } from '../workflows/engine'
@@ -88,6 +89,10 @@ import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
 import type { ImBridgeManager } from '../im/manager'
 import type { ApprovalBroker } from '../services/approval-broker'
+import {
+  generateTriggerToken,
+  type WorkflowTriggerServer,
+} from '../workflows/trigger-server'
 import type { QuestionBroker } from '../services/question-broker'
 import { getAdapter, resolveAdapter } from '../providers/registry'
 import type { OpenAiOAuthManager } from '../providers/openai-oauth'
@@ -115,6 +120,8 @@ export interface RegisterIpcDeps {
   approvalBroker: ApprovalBroker
   /** Desktop notifier — the unread badge follows inbox review state. */
   notifier?: { refreshBadge(): void }
+  /** Local trigger endpoint, for its status/URL and token rotation. */
+  triggerServer?: WorkflowTriggerServer
   questionBroker: QuestionBroker
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
@@ -573,9 +580,24 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.settingsGet, () => db.settings.get())
 
-  register(CHANNELS.settingsUpdate, (patch) =>
-    db.settings.update(parseInput(settingsPatchSchema, patch))
-  )
+  register(CHANNELS.settingsUpdate, (patch) => {
+    const parsed = parseInput(settingsPatchSchema, patch)
+    // Switching the trigger endpoint on for the first time mints its secret.
+    // The renderer never supplies the token: it is generated here, so a
+    // compromised or replayed IPC payload cannot choose one.
+    if (parsed.workflowWebhookEnabled === true && !db.settings.get().workflowWebhookToken) {
+      parsed.workflowWebhookToken = generateTriggerToken()
+    }
+    const updated = db.settings.update(parsed)
+    if (
+      parsed.workflowWebhookEnabled !== undefined ||
+      parsed.workflowWebhookPort !== undefined ||
+      parsed.workflowWebhookToken !== undefined
+    ) {
+      deps.triggerServer?.sync()
+    }
+    return updated
+  })
 
   // -- providers ----------------------------------------------------------------
 
@@ -1371,6 +1393,32 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return db.toolRules.list()
   })
 
+  // -- activity log (the audit trail) -----------------------------------------
+  //
+  // Read-only plus a clear. There is deliberately no "delete this one entry":
+  // a log you can edit entry by entry is not evidence of anything.
+
+  register(CHANNELS.activityList, (query) => {
+    const parsed = parseInput(
+      z
+        .object({
+          limit: z.number().int().min(1).max(500).optional(),
+          before: z.number().int().positive().optional(),
+          decision: z.enum(['auto', 'rule', 'approved', 'declined', 'blocked']).optional(),
+          search: z.string().max(200).optional(),
+        })
+        .strict()
+        .optional(),
+      query ?? {}
+    )
+    return { entries: db.activity.list(parsed ?? {}), total: db.activity.count() }
+  })
+
+  register(CHANNELS.activityClear, () => {
+    db.activity.deleteAll()
+    return undefined
+  })
+
   // The renderer's answer to an ask_user_question dialog (null = dismissed).
   register(CHANNELS.toolsQuestionRespond, (requestId, answer) => {
     if (answer !== null && typeof answer !== 'string') {
@@ -1596,28 +1644,52 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   const workflowInputSchema = z.object({
     name: z.string().trim().min(1).max(200),
     graph: workflowGraphSchema,
-    schedule: z.object({ everyMinutes: z.number() }).nullish(),
+    schedule: z
+      .union([
+        // A pre-v33 client (or a saved graph round-tripped through a backup)
+        // may still send the untagged interval shape.
+        z.object({ everyMinutes: z.number() }),
+        z.object({ kind: z.literal('interval'), everyMinutes: z.number() }),
+        z.object({
+          kind: z.literal('calendar'),
+          days: z.array(z.number().int().min(0).max(6)).max(7),
+          time: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
+        }),
+      ])
+      .nullish(),
     scheduleEnabled: z.boolean().optional(),
+    webhookEnabled: z.boolean().optional(),
   })
 
   const asWorkflowInput = (value: unknown): WorkflowInput => {
     const parsed = parseInput(workflowInputSchema, value)
-    // Interval clamped to [1 minute, 7 days]; anything else = no schedule.
-    const every = parsed.schedule?.everyMinutes
-    const schedule: WorkflowInput['schedule'] =
-      typeof every === 'number' && Number.isFinite(every) && every >= 1
-        ? { everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
-        : null
+    let schedule: WorkflowInput['schedule'] = null
+    const raw = parsed.schedule
+    if (raw && 'kind' in raw && raw.kind === 'calendar') {
+      schedule = {
+        kind: 'calendar',
+        days: [...new Set(raw.days)].sort((a, b) => a - b),
+        time: raw.time,
+      }
+    } else if (raw && 'everyMinutes' in raw) {
+      // Interval clamped to [1 minute, 7 days]; anything else = no schedule.
+      const every = raw.everyMinutes
+      schedule =
+        Number.isFinite(every) && every >= 1
+          ? { kind: 'interval', everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
+          : null
+    }
     // Enabling the schedule with an invalid interval must fail loudly, not
     // save a workflow that silently never fires.
     if (parsed.scheduleEnabled === true && schedule === null) {
-      throw invalid('Schedule interval must be at least 1 minute.')
+      throw invalid('Set a valid interval or a time before turning the schedule on.')
     }
     return {
       name: parsed.name,
       graph: parsed.graph as WorkflowGraph,
       schedule,
       scheduleEnabled: parsed.scheduleEnabled === true,
+      webhookEnabled: parsed.webhookEnabled === true,
     }
   }
 
@@ -1677,6 +1749,31 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   // with a schedule (paused included) paired with its latest run, plus recent
   // runs across all workflows. Latest-run status comes from a dedicated
   // per-workflow query so a frequent workflow can't evict the others.
+  // -- local trigger endpoint --------------------------------------------------
+
+  const triggerInfo = (workflowId?: unknown): WorkflowTriggerInfo => {
+    const current = db.settings.get()
+    const id = typeof workflowId === 'string' && workflowId.length > 0 ? workflowId : undefined
+    return {
+      enabled: current.workflowWebhookEnabled,
+      running: deps.triggerServer?.running === true,
+      port: current.workflowWebhookPort,
+      // The token only ever travels to the desktop UI that displays it; it is
+      // never part of the settings payload the renderer holds.
+      url: deps.triggerServer?.url(id) ?? null,
+    }
+  }
+
+  register(CHANNELS.workflowsTriggerInfo, (workflowId) => triggerInfo(workflowId))
+
+  register(CHANNELS.workflowsTriggerRegenerate, () => {
+    // Rotating the token is the revoke button: every hook using the old URL
+    // stops working the moment this returns.
+    db.settings.update({ workflowWebhookToken: generateTriggerToken() })
+    deps.triggerServer?.sync()
+    return triggerInfo()
+  })
+
   register(CHANNELS.workflowsOverview, (): WorkflowsOverview => {
     const latestByWorkflow = new Map(
       db.workflows.latestRunsPerWorkflow().map((run) => [run.workflowId, run])
@@ -1759,6 +1856,9 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     deps.wakeScheduledTaskScheduler?.()
     return task
   })
+  register(CHANNELS.scheduledTaskRuns, (taskId) =>
+    db.scheduledTaskRuns.list(requireString(taskId, 'Scheduled task id'))
+  )
   register(CHANNELS.scheduledTasksDelete, (id) => {
     const taskId = requireString(id, 'Scheduled task id')
     db.scheduledTasks.remove(taskId)

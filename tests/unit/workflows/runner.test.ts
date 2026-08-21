@@ -39,10 +39,10 @@ describe('workflows repository (schedule + runs)', () => {
     const wf = db.workflows.create({
       name: 'Sched',
       graph: SIMPLE_GRAPH,
-      schedule: { everyMinutes: 30 },
+      schedule: { kind: 'interval' as const, everyMinutes: 30 },
       scheduleEnabled: true,
     })
-    expect(db.workflows.getById(wf.id)?.schedule).toEqual({ everyMinutes: 30 })
+    expect(db.workflows.getById(wf.id)?.schedule).toEqual({ kind: 'interval' as const, everyMinutes: 30 })
     expect(db.workflows.listScheduled().map((w) => w.id)).toEqual([wf.id])
 
     db.workflows.update(wf.id, { name: 'Sched', graph: SIMPLE_GRAPH, scheduleEnabled: false })
@@ -162,16 +162,17 @@ describe('scheduler due check + tick', () => {
     id: 'w',
     name: 'W',
     graph: SIMPLE_GRAPH,
+    webhookEnabled: false,
     createdAt: 0,
     updatedAt: 0,
   }
 
   it('isDue: never-run is due; interval must elapse; disabled never fires', () => {
     const now = 10 * 60_000
-    expect(isDue({ ...base, schedule: { everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: null }, now)).toBe(true)
-    expect(isDue({ ...base, schedule: { everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: now - 4 * 60_000 }, now)).toBe(false)
-    expect(isDue({ ...base, schedule: { everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: now - 5 * 60_000 }, now)).toBe(true)
-    expect(isDue({ ...base, schedule: { everyMinutes: 5 }, scheduleEnabled: false, lastRunAt: null }, now)).toBe(false)
+    expect(isDue({ ...base, schedule: { kind: 'interval' as const, everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: null }, now)).toBe(true)
+    expect(isDue({ ...base, schedule: { kind: 'interval' as const, everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: now - 4 * 60_000 }, now)).toBe(false)
+    expect(isDue({ ...base, schedule: { kind: 'interval' as const, everyMinutes: 5 }, scheduleEnabled: true, lastRunAt: now - 5 * 60_000 }, now)).toBe(true)
+    expect(isDue({ ...base, schedule: { kind: 'interval' as const, everyMinutes: 5 }, scheduleEnabled: false, lastRunAt: null }, now)).toBe(false)
     expect(isDue({ ...base, schedule: null, scheduleEnabled: true, lastRunAt: null }, now)).toBe(false)
   })
 
@@ -179,7 +180,7 @@ describe('scheduler due check + tick', () => {
     const wf = db.workflows.create({
       name: 'Tick',
       graph: SIMPLE_GRAPH,
-      schedule: { everyMinutes: 60 },
+      schedule: { kind: 'interval' as const, everyMinutes: 60 },
       scheduleEnabled: true,
     })
     const runner = createWorkflowRunner(db, { runAgent: async () => '' })
@@ -198,7 +199,7 @@ describe('scheduler due check + tick', () => {
     db.workflows.create({
       name: 'Tick',
       graph: SIMPLE_GRAPH,
-      schedule: { everyMinutes: 60 },
+      schedule: { kind: 'interval' as const, everyMinutes: 60 },
       scheduleEnabled: true,
     })
     const onRunRecorded = vi.fn()
@@ -218,13 +219,13 @@ describe('scheduler due check + tick', () => {
     const first = db.workflows.create({
       name: 'Slow',
       graph: AGENT_GRAPH,
-      schedule: { everyMinutes: 60 },
+      schedule: { kind: 'interval' as const, everyMinutes: 60 },
       scheduleEnabled: true,
     })
     const second = db.workflows.create({
       name: 'Second',
       graph: AGENT_GRAPH,
-      schedule: { everyMinutes: 60 },
+      schedule: { kind: 'interval' as const, everyMinutes: 60 },
       scheduleEnabled: true,
     })
     let release = (): void => undefined

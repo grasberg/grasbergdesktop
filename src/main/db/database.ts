@@ -34,6 +34,11 @@ import { createMemoriesRepository, type MemoriesRepository } from './repositorie
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
 import { createToolRulesRepository, type ToolRulesRepository } from './repositories/tool-rules'
+import { createActivityRepository, type ActivityRepository } from './repositories/activity'
+import {
+  createScheduledTaskRunsRepository,
+  type ScheduledTaskRunsRepository,
+} from './repositories/scheduled-task-runs'
 import {
   createScheduledTasksRepository,
   type ScheduledTasksRepository,
@@ -64,6 +69,10 @@ export interface AppDatabase {
   agents: AgentsRepository
   /** Standing approval rules ("always allow" / "always ask"). */
   toolRules: ToolRulesRepository
+  /** Every tool call, with why it was allowed (the Activity view). */
+  activity: ActivityRepository
+  /** Per-task run history for standalone scheduled tasks. */
+  scheduledTaskRuns: ScheduledTaskRunsRepository
   knowledge: KnowledgeRepository
   agentPlatform: AgentPlatformRepository
   scheduledTasks: ScheduledTasksRepository
@@ -211,6 +220,8 @@ export function openDatabase(filePath: string): AppDatabase {
     skills: createSkillsRepository(driver),
     agents: createAgentsRepository(driver),
     toolRules: createToolRulesRepository(driver),
+    activity: createActivityRepository(driver),
+    scheduledTaskRuns: createScheduledTaskRunsRepository(driver),
     knowledge: createKnowledgeRepository(driver),
     agentPlatform: createAgentPlatformRepository(driver),
     scheduledTasks: createScheduledTasksRepository(driver),

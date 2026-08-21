@@ -136,6 +136,11 @@ export default function App(): React.JSX.Element {
     const unsubscribeToolRules = window.uld.tools.onRulesChanged(() => {
       void useToolsStore.getState().loadRules()
     })
+    // Notices main raises with no request in flight (e.g. the trigger endpoint
+    // could not bind its port) — otherwise the failure would be invisible.
+    const unsubscribeNotices = window.uld.notices.onNotice((notice) => {
+      useUiStore.getState().toast(notice.message, notice.level)
+    })
     return () => {
       unsubscribeStream()
       unsubscribeApproval()
@@ -146,6 +151,7 @@ export default function App(): React.JSX.Element {
       unsubscribeRuns()
       unsubscribeScheduledTasks()
       unsubscribeToolRules()
+      unsubscribeNotices()
     }
   }, [])
 

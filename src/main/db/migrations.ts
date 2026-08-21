@@ -852,4 +852,80 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_memories_agent ON memories(agent_id)`,
     ],
   },
+  {
+    version: 33,
+    name: 'scheduled-task-runs',
+    // Per-task run history, mirroring workflow_runs. The task row only ever
+    // carries its LAST outcome, so a task that started failing three days ago
+    // was invisible unless someone happened to read the inbox that day.
+    // ON DELETE CASCADE: history is meaningless without its task.
+    // `catch_up` records that the run was already overdue when it started —
+    // the app had been closed — so the UI can say so instead of implying the
+    // schedule was honoured on time.
+    statements: [
+      `CREATE TABLE scheduled_task_runs (
+         id TEXT PRIMARY KEY,
+         task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+         status TEXT NOT NULL,
+         output TEXT NOT NULL DEFAULT '',
+         error TEXT,
+         started_at INTEGER NOT NULL,
+         finished_at INTEGER NOT NULL,
+         catch_up INTEGER NOT NULL DEFAULT 0
+       )`,
+      `CREATE INDEX idx_scheduled_task_runs ON scheduled_task_runs(task_id, started_at DESC)`,
+    ],
+  },
+  {
+    version: 34,
+    name: 'activity-log',
+    // Every tool call the app made, with the reason it was allowed to. No FKs
+    // by design: an entry has to outlive the conversation, project or change it
+    // refers to — a log that deletes itself when the evidence is deleted is not
+    // a log. Arguments and results are redacted and capped before insert.
+    statements: [
+      `CREATE TABLE activity_log (
+         id TEXT PRIMARY KEY,
+         at INTEGER NOT NULL,
+         conversation_id TEXT,
+         agent_name TEXT,
+         tool_id TEXT NOT NULL,
+         tool_name TEXT NOT NULL,
+         risk TEXT NOT NULL,
+         decision TEXT NOT NULL,
+         detail TEXT NOT NULL DEFAULT '',
+         arguments TEXT NOT NULL DEFAULT '',
+         result TEXT NOT NULL DEFAULT '',
+         change_id TEXT
+       )`,
+      `CREATE INDEX idx_activity_at ON activity_log(at DESC)`,
+    ],
+  },
+  {
+    version: 35,
+    name: 'workflow-webhook-trigger',
+    // Per-workflow opt-in for the local trigger endpoint, plus room for the
+    // 'webhook' trigger value in the run history. workflow_runs is rebuilt to
+    // DROP its trigger CHECK (the v13 pattern: zod validates at the boundary,
+    // so future trigger kinds need no migration). Safe as a plain transactional
+    // rebuild — workflow_runs is a leaf: it references workflows, and nothing
+    // references it, so no child rows can be cascaded away.
+    statements: [
+      `ALTER TABLE workflows ADD COLUMN webhook_enabled INTEGER NOT NULL DEFAULT 0`,
+      `CREATE TABLE workflow_runs_new (
+         id TEXT PRIMARY KEY,
+         workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+         trigger TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('ok','error')),
+         output TEXT NOT NULL DEFAULT '',
+         error TEXT,
+         started_at INTEGER NOT NULL,
+         finished_at INTEGER NOT NULL
+       )`,
+      `INSERT INTO workflow_runs_new SELECT * FROM workflow_runs`,
+      `DROP TABLE workflow_runs`,
+      `ALTER TABLE workflow_runs_new RENAME TO workflow_runs`,
+      `CREATE INDEX idx_workflow_runs ON workflow_runs(workflow_id, started_at DESC)`,
+    ],
+  },
 ]

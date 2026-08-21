@@ -90,14 +90,24 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-/** The token the bridge put in the Allow button of the last sendMessage. */
-function lastToken(): string {
+/**
+ * The token the bridge put in the buttons of the last sendMessage. The payload
+ * is "<choiceIndex>:<token>" — the token is a lookup key and the index selects
+ * from choices kept app-side, so nothing about the answers travels through
+ * Telegram beyond the button labels.
+ */
+function lastButtons(): Array<{ text: string; callback_data: string }> {
   const sent = [...calls].reverse().find((c) => c.method === 'sendMessage')
   const markup = sent?.body.reply_markup as
     | { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }
     | undefined
-  const allow = markup?.inline_keyboard[0].find((b) => b.text === 'Allow once')
-  return allow?.callback_data.slice(2) ?? ''
+  return markup?.inline_keyboard[0] ?? []
+}
+
+
+/** callback_data for the button with this label on the last message. */
+function payloadFor(label: string): string {
+  return lastButtons().find((b) => b.text === label)?.callback_data ?? ''
 }
 
 function tap(data: string, chatId = OWNER_CHAT): void {
@@ -147,7 +157,7 @@ describe('remote approvals — answering', () => {
     expect(sent?.body.chat_id).toBe(OWNER_CHAT)
     expect(String(sent?.body.text)).toContain('run_shell_command')
 
-    tap(`a:${lastToken()}`)
+    tap(payloadFor('Allow once'))
     await expect(pending).resolves.toBe(true)
     // The buttons are rewritten so a second tap cannot land on a spent token.
     expect(calls.some((c) => c.method === 'editMessageText')).toBe(true)
@@ -157,16 +167,16 @@ describe('remote approvals — answering', () => {
   it('resolves false on Deny', async () => {
     const pending = manager.requestApproval('req-1', { title: 't', detail: 'd' })
     await new Promise((r) => setTimeout(r, 0))
-    tap(`d:${lastToken()}`)
+    tap(payloadFor('Deny'))
     await expect(pending).resolves.toBe(false)
   })
 
   it('ignores a tap from any chat but the paired one', async () => {
     const pending = manager.requestApproval('req-1', { title: 't', detail: 'd' })
     await new Promise((r) => setTimeout(r, 0))
-    const token = lastToken()
+    const allow = payloadFor('Allow once')
 
-    tap(`a:${token}`, STRANGER_CHAT)
+    tap(allow, STRANGER_CHAT)
     await new Promise((r) => setTimeout(r, 10))
     // Still pending: a stranger's tap decided nothing…
     let settled = false
@@ -177,22 +187,22 @@ describe('remote approvals — answering', () => {
     expect(settled).toBe(false)
 
     // …and the owner's tap on the same token still works.
-    tap(`a:${token}`)
+    tap(allow)
     await expect(pending).resolves.toBe(true)
   })
 
   it('a spent token cannot be tapped a second time', async () => {
     const pending = manager.requestApproval('req-1', { title: 't', detail: 'd' })
     await new Promise((r) => setTimeout(r, 0))
-    const token = lastToken()
-    tap(`a:${token}`)
+    const allow = payloadFor('Allow once')
+    tap(allow)
     await pending
     // The ack + rewrite for the FIRST tap land after the promise resolves;
     // let them settle before the log is cleared for the second tap.
     await new Promise((r) => setTimeout(r, 20))
 
     calls.length = 0
-    tap(`a:${token}`)
+    tap(allow)
     await new Promise((r) => setTimeout(r, 10))
     const toast = calls.find((c) => c.method === 'answerCallbackQuery')?.body.text
     expect(String(toast)).toMatch(/no longer waiting/i)
@@ -232,5 +242,74 @@ describe('remote approvals — answering', () => {
     await new Promise((r) => setTimeout(r, 0))
     manager.stopAll()
     await expect(pending).resolves.toBeNull()
+  })
+})
+
+describe('remote questions — a background run raising its hand', () => {
+  beforeEach(() => {
+    db.settings.update({ remoteApprovalsEnabled: true })
+  })
+
+  it('sends one button per option and resolves with the chosen text', async () => {
+    const pending = manager.requestChoice('q-1', {
+      question: 'Which branch should I open the PR against?',
+      options: ['main', 'develop'],
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    const sent = calls.find((c) => c.method === 'sendMessage')
+    expect(String(sent?.body.text)).toContain('Which branch')
+    expect(lastButtons().map((b) => b.text)).toEqual(['main', 'develop'])
+
+    tap(payloadFor('develop'))
+    await expect(pending).resolves.toBe('develop')
+  })
+
+  it('keeps the options app-side: only an index travels through Telegram', async () => {
+    void manager.requestChoice('q-1', { question: 'Pick', options: ['alpha', 'beta'] })
+    await new Promise((r) => setTimeout(r, 0))
+    for (const button of lastButtons()) {
+      // "<index>:<token>" — nothing about the answer is derivable from it.
+      expect(button.callback_data).toMatch(/^\d+:[0-9a-f]+$/)
+      expect(button.callback_data).not.toContain('alpha')
+      expect(button.callback_data).not.toContain('beta')
+    }
+  })
+
+  it('ignores an out-of-range index rather than picking something', async () => {
+    const pending = manager.requestChoice('q-1', { question: 'Pick', options: ['alpha'] })
+    await new Promise((r) => setTimeout(r, 0))
+    const token = payloadFor('alpha').split(':')[1]
+
+    tap(`9:${token}`)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(String(calls.find((c) => c.method === 'answerCallbackQuery')?.body.text)).toMatch(
+      /unrecognized/i
+    )
+
+    // The request is still live and the real button still works.
+    tap(payloadFor('alpha'))
+    await expect(pending).resolves.toBe('alpha')
+  })
+
+  it('resolves to null with no options to offer', async () => {
+    await expect(manager.requestChoice('q-1', { question: 'Pick', options: [] })).resolves.toBeNull()
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0)
+  })
+
+  it('caps how many options become buttons', async () => {
+    void manager.requestChoice('q-1', {
+      question: 'Pick',
+      options: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(lastButtons().length).toBeLessThanOrEqual(6)
+  })
+
+  it('is unavailable — and so silent — while remote answering is off', async () => {
+    db.settings.update({ remoteApprovalsEnabled: false })
+    await expect(
+      manager.requestChoice('q-1', { question: 'Pick', options: ['a'] })
+    ).resolves.toBeNull()
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0)
   })
 })

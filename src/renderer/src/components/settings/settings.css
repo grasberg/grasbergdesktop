@@ -1153,3 +1153,103 @@
   gap: 2px;
   text-align: left;
 }
+
+/* Activity log: one scannable row per tool call. */
+.activity-filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.activity-filters .input {
+  flex: 1;
+}
+
+.activity-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.activity-row {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.activity-row.activity-approved { border-left-color: var(--accent); }
+.activity-row.activity-declined,
+.activity-row.activity-blocked { border-left-color: var(--danger, #b4413f); }
+
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-head:hover {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+
+.activity-time {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-tool {
+  font-weight: 600;
+}
+
+.activity-agent {
+  font-size: 0.8em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-3, rgba(127, 127, 127, 0.14));
+}
+
+.activity-detail {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.activity-body {
+  padding: 4px 10px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.activity-label {
+  display: block;
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin: 8px 0 2px;
+}
+
+.activity-pre {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+}

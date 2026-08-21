@@ -7,6 +7,8 @@ import { ScheduledRunQueue } from '../scheduling/run-queue'
 
 const MAX_WAKE_MS = 60_000
 const RESULT_LIMIT = 40_000
+/** Lateness below this is the tick granularity, not a missed slot. */
+const CATCH_UP_SLACK_MS = 60_000
 
 export interface ScheduledTaskSchedulerDeps {
   db: AppDatabase
@@ -97,38 +99,55 @@ export class ScheduledTaskScheduler {
         if (!task || !task.enabled || task.nextRunAt === null || task.nextRunAt > launchNow) return
         this.running.add(task.id)
         const startedAt = launchNow
+        // The slot was already in the past when we got to it: the app was
+        // closed (or the queue was busy). Recorded so the history can say
+        // "ran late" instead of implying the schedule was kept — Grasberg
+        // runs a missed occurrence once, it does not replay every slot.
+        const catchUp = task.nextRunAt !== null && startedAt - task.nextRunAt > CATCH_UP_SLACK_MS
         this.deps.db.scheduledTasks.markRunning(task.id, startedAt)
         const runningTask = this.deps.db.scheduledTasks.getById(task.id)
         if (runningTask) this.deps.onChanged?.({ type: 'upsert', task: runningTask })
+        let outcome: { status: 'ok' | 'error'; output: string; error: string | null } | null = null
         try {
           const output = await this.deps.run(task)
-          const finishedAt = Date.now()
-          const current = this.deps.db.scheduledTasks.getById(task.id)
-          if (!current) return
-          this.deps.db.scheduledTasks.finish(task.id, {
-            status: 'ok',
-            output: output.slice(0, RESULT_LIMIT),
-            error: null,
-            nextRunAt: nextOccurrence(task, finishedAt),
-            enabled: task.recurrence === 'once' ? false : current.enabled,
-            finishedAt,
-          })
+          outcome = { status: 'ok', output: output.slice(0, RESULT_LIMIT), error: null }
         } catch (error) {
-          const finishedAt = Date.now()
-          const current = this.deps.db.scheduledTasks.getById(task.id)
-          if (!current) return
-          this.deps.db.scheduledTasks.finish(task.id, {
+          outcome = {
             status: 'error',
             output: '',
             error: toNormalizedError(error).message.slice(0, 4_000),
-            nextRunAt: nextOccurrence(task, finishedAt),
-            enabled: task.recurrence === 'once' ? false : current.enabled,
-            finishedAt,
-          })
+          }
         } finally {
           this.running.delete(task.id)
-          const finished = this.deps.db.scheduledTasks.getById(task.id)
-          if (finished) this.deps.onChanged?.({ type: 'upsert', task: finished })
+          const finishedAt = Date.now()
+          // The task may have been deleted mid-run; then there is nothing to
+          // finish and no row a history entry could reference.
+          const current = this.deps.db.scheduledTasks.getById(task.id)
+          if (current && outcome) {
+            this.deps.db.scheduledTasks.finish(task.id, {
+              status: outcome.status,
+              output: outcome.output,
+              error: outcome.error,
+              nextRunAt: nextOccurrence(task, finishedAt),
+              enabled: task.recurrence === 'once' ? false : current.enabled,
+              finishedAt,
+            })
+            try {
+              this.deps.db.scheduledTaskRuns.insert({
+                taskId: task.id,
+                status: outcome.status,
+                output: outcome.output,
+                error: outcome.error,
+                startedAt,
+                finishedAt,
+                catchUp,
+              })
+            } catch {
+              // History is best-effort: never let it fail the run it describes.
+            }
+            const finished = this.deps.db.scheduledTasks.getById(task.id)
+            if (finished) this.deps.onChanged?.({ type: 'upsert', task: finished })
+          }
         }
       })
     )

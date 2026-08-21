@@ -29,9 +29,11 @@ import type {
   WorkflowNodeKind,
   WorkflowRun,
   WorkflowRunResult,
+  WorkflowSchedule,
 } from '@shared/types'
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from '@shared/workflow-templates'
 import { validateWorkflowGraph } from '@shared/workflow-validate'
+import { scheduleLabel } from '@shared/workflow-status'
 import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
 import './workflows.css'
@@ -52,6 +54,17 @@ const PALETTE: ReadonlyArray<{ kind: WorkflowNodeKind; label: string }> = [
   { kind: 'condition', label: 'Condition' },
   { kind: 'notify', label: 'Notify' },
   { kind: 'output', label: 'Output' },
+]
+
+/** Weekday chips, Monday-first (the ISO week most of Europe reads). */
+const WEEKDAYS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 1, label: 'Mon' },
+  { value: 2, label: 'Tue' },
+  { value: 3, label: 'Wed' },
+  { value: 4, label: 'Thu' },
+  { value: 5, label: 'Fri' },
+  { value: 6, label: 'Sat' },
+  { value: 0, label: 'Sun' },
 ]
 
 let idSeq = 0
@@ -123,6 +136,11 @@ export default function WorkflowsView(): ReactElement {
   const [wasDryRun, setWasDryRun] = useState(false)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [everyMinutes, setEveryMinutes] = useState('60')
+  const [scheduleKind, setScheduleKind] = useState<'interval' | 'calendar'>('interval')
+  const [scheduleTime, setScheduleTime] = useState('08:00')
+  const [scheduleDays, setScheduleDays] = useState<number[]>([])
+  const [webhookEnabled, setWebhookEnabled] = useState(false)
+  const [triggerUrl, setTriggerUrl] = useState<string | null>(null)
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [agents, setAgents] = useState<AgentProfile[]>([])
 
@@ -142,6 +160,18 @@ export default function WorkflowsView(): ReactElement {
       if (res.ok) setAgents(res.data.filter((a) => a.enabled))
     })
   }, [loadList])
+
+  // The URL carries the endpoint's token, so it comes from main rather than
+  // being assembled here from settings the renderer holds.
+  useEffect(() => {
+    if (!webhookEnabled || !workflowId) {
+      setTriggerUrl(null)
+      return
+    }
+    void window.uld.workflows.triggerInfo(workflowId).then((res) => {
+      if (res.ok) setTriggerUrl(res.data.url)
+    })
+  }, [webhookEnabled, workflowId])
 
   // Deep link from the sidebar's "Scheduled tasks" section: open that
   // workflow, then clear the pointer (openWorkflows without an id) so
@@ -252,7 +282,12 @@ export default function WorkflowsView(): ReactElement {
       setSelectedEdgeId(null)
       setResult(null)
       setScheduleEnabled(res.data.scheduleEnabled)
-      setEveryMinutes(String(res.data.schedule?.everyMinutes ?? 60))
+      setWebhookEnabled(res.data.webhookEnabled)
+      const saved = res.data.schedule
+      setScheduleKind(saved?.kind === 'calendar' ? 'calendar' : 'interval')
+      setEveryMinutes(String(saved?.kind === 'interval' ? saved.everyMinutes : 60))
+      setScheduleTime(saved?.kind === 'calendar' ? saved.time : '08:00')
+      setScheduleDays(saved?.kind === 'calendar' ? saved.days : [])
       await loadRuns(res.data.id)
     }
   }
@@ -260,11 +295,18 @@ export default function WorkflowsView(): ReactElement {
   /** Persists the workflow; returns its id (null on failure). */
   const save = async (silent = false): Promise<string | null> => {
     const minutes = Math.floor(Number(everyMinutes))
+    const schedule: WorkflowSchedule | null =
+      scheduleKind === 'calendar'
+        ? { kind: 'calendar', days: scheduleDays, time: scheduleTime }
+        : Number.isFinite(minutes) && minutes >= 1
+          ? { kind: 'interval', everyMinutes: minutes }
+          : null
     const input = {
       name: name.trim() || 'Untitled workflow',
       graph: toGraph(nodes, edges),
-      schedule: Number.isFinite(minutes) && minutes >= 1 ? { everyMinutes: minutes } : null,
+      schedule,
       scheduleEnabled,
+      webhookEnabled,
     }
     const res = workflowId
       ? await window.uld.workflows.update(workflowId, input)
@@ -371,7 +413,7 @@ export default function WorkflowsView(): ReactElement {
             {saved.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
-                {w.scheduleEnabled && w.schedule ? ` ⏰ ${w.schedule.everyMinutes}m` : ''}
+                {w.scheduleEnabled && w.schedule ? ` ⏰ ${scheduleLabel(w.schedule)}` : ''}
               </option>
             ))}
           </select>
@@ -660,17 +702,113 @@ export default function WorkflowsView(): ReactElement {
                 />
               </div>
               <label className="field">
-                <span className="field-label">Every (minutes)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  value={everyMinutes}
+                <span className="field-label">Trigger</span>
+                <select
+                  className="select"
+                  value={scheduleKind}
                   disabled={!scheduleEnabled}
-                  onChange={(e) => setEveryMinutes(e.target.value)}
-                />
-                <p className="field-hint">Save to apply. Add a Notify node to get the result.</p>
+                  onChange={(e) => setScheduleKind(e.target.value as 'interval' | 'calendar')}
+                >
+                  <option value="interval">Every N minutes</option>
+                  <option value="calendar">At a time of day</option>
+                </select>
               </label>
+              {scheduleKind === 'interval' ? (
+                <label className="field">
+                  <span className="field-label">Every (minutes)</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={everyMinutes}
+                    disabled={!scheduleEnabled}
+                    onChange={(e) => setEveryMinutes(e.target.value)}
+                  />
+                </label>
+              ) : (
+                <>
+                  <label className="field">
+                    <span className="field-label">Time (local)</span>
+                    <input
+                      className="input"
+                      type="time"
+                      value={scheduleTime}
+                      disabled={!scheduleEnabled}
+                      onChange={(e) => setScheduleTime(e.target.value)}
+                    />
+                  </label>
+                  <div className="field">
+                    <span className="field-label">Days</span>
+                    <div className="workflows-days">
+                      {WEEKDAYS.map((day) => (
+                        <button
+                          key={day.value}
+                          type="button"
+                          className={`workflows-day${scheduleDays.includes(day.value) ? ' selected' : ''}`}
+                          disabled={!scheduleEnabled}
+                          aria-pressed={scheduleDays.includes(day.value)}
+                          onClick={() =>
+                            setScheduleDays((days) =>
+                              days.includes(day.value)
+                                ? days.filter((d) => d !== day.value)
+                                : [...days, day.value].sort((a, b) => a - b)
+                            )
+                          }
+                        >
+                          {day.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="field-hint">
+                      {scheduleDays.length === 0
+                        ? 'No day picked means every day.'
+                        : `Runs ${scheduleLabel({ kind: 'calendar', days: scheduleDays, time: scheduleTime })}.`}
+                    </p>
+                  </div>
+                </>
+              )}
+              <p className="field-hint">
+                Save to apply. Add a Notify node to get the result. A run missed while Grasberg was
+                closed happens once at the next start — not once per slot it slept through.
+              </p>
+
+              <h4 className="section-subhead">Event trigger</h4>
+              <div className="field">
+                <Switch
+                  checked={webhookEnabled}
+                  onChange={setWebhookEnabled}
+                  label="Allow the local trigger endpoint to start this workflow"
+                />
+                <p className="field-hint">
+                  Lets an outside event — a git hook, a CI job, a script — start this workflow by
+                  POSTing to Grasberg. Turn the endpoint itself on in Settings → Bridges; it listens
+                  on 127.0.0.1 only, needs its token, and starts only workflows switched on here.
+                </p>
+                {webhookEnabled && workflowId ? (
+                  triggerUrl ? (
+                    <label className="field">
+                      <span className="field-label">POST to</span>
+                      {/* Read-only and select-on-focus: this carries the token,
+                          so it is meant to be copied, never typed. */}
+                      <input
+                        className="input mono"
+                        readOnly
+                        value={triggerUrl}
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                      <p className="field-hint">
+                        The request body becomes this workflow&apos;s Input node output.
+                      </p>
+                    </label>
+                  ) : (
+                    <p className="field-hint">
+                      The endpoint is off — turn it on in Settings → Bridges to get a URL.
+                    </p>
+                  )
+                ) : webhookEnabled ? (
+                  <p className="field-hint">Save the workflow to get its trigger URL.</p>
+                ) : null}
+              </div>
 
               <h4 className="section-subhead">Run history</h4>
               {runs.length === 0 ? (

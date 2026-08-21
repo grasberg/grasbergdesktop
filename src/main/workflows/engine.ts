@@ -58,6 +58,12 @@ export interface WorkflowEngineDeps {
   notify?: (text: string) => Promise<void>
   fetchImpl?: typeof fetch
   signal?: AbortSignal
+  /**
+   * Payload the run was triggered with (the trigger endpoint's request body).
+   * Input nodes emit it instead of their configured text, so an event-driven
+   * workflow can act on what the event carried. Plain text, never evaluated.
+   */
+  triggerPayload?: string
 }
 
 function str(config: Record<string, unknown>, key: string): string {
@@ -290,7 +296,9 @@ export async function runWorkflow(
     let output = ''
     switch (node.kind) {
         case 'manual':
-          output = str(node.config, 'text')
+          // A trigger payload overrides the node's configured text, so the same
+          // graph works both by hand and driven by an outside event.
+          output = runDeps.triggerPayload?.trim() ? runDeps.triggerPayload : str(node.config, 'text')
           break
         case 'template':
           output = interpolate(str(node.config, 'template'), input, outputs)

@@ -129,3 +129,33 @@
   border-color: color-mix(in srgb, var(--warning, #d90) 45%, var(--border));
   background: color-mix(in srgb, var(--warning, #d90) 7%, transparent);
 }
+
+/* Weekday chips for a calendar schedule. */
+.workflows-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.workflows-day {
+  min-width: 38px;
+  padding: 4px 8px;
+  font-size: 0.85em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.workflows-day.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(127, 127, 127, 0.16));
+  color: var(--text);
+}
+
+.workflows-day:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

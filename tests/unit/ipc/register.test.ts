@@ -258,7 +258,7 @@ describe('workflows:create', () => {
     expect(result.ok).toBe(true)
     const [saved] = db.workflows.list()
     expect(saved.name).toBe('Nightly')
-    expect(saved.schedule).toEqual({ everyMinutes: 7 * 24 * 60 })
+    expect(saved.schedule).toEqual({ kind: 'interval', everyMinutes: 7 * 24 * 60 })
   })
 })
 

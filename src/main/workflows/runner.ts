@@ -12,7 +12,12 @@ import { runWorkflow, type WorkflowEngineDeps } from './engine'
 
 export interface WorkflowRunner {
   /** Runs a saved workflow, persists the run, and returns the engine result. */
-  runById(workflowId: string, trigger: WorkflowRun['trigger']): Promise<WorkflowRunResult>
+  runById(
+    workflowId: string,
+    trigger: WorkflowRun['trigger'],
+    /** Body of the triggering event, fed to the graph's Input nodes. */
+    payload?: string
+  ): Promise<WorkflowRunResult>
   /** Aborts every in-flight run (app quit). */
   stopAll(): void
 }
@@ -50,7 +55,7 @@ export function createWorkflowRunner(
   const running = new Map<string, AbortController>()
 
   return {
-    async runById(workflowId, trigger) {
+    async runById(workflowId, trigger, payload) {
       const workflow = db.workflows.getById(workflowId)
       if (!workflow) throw new Error('Workflow not found.')
       if (running.has(workflowId)) throw new Error('This workflow is already running.')
@@ -62,7 +67,11 @@ export function createWorkflowRunner(
       // long-running workflow on the next tick.
       db.workflows.touchLastRun(workflowId, startedAt)
       try {
-        const result = await runWorkflow(workflow.graph, { ...deps, signal: controller.signal })
+        const result = await runWorkflow(workflow.graph, {
+          ...deps,
+          signal: controller.signal,
+          ...(payload ? { triggerPayload: payload } : {}),
+        })
         try {
           const run = db.workflows.insertRun({
             workflowId,

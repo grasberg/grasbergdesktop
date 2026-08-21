@@ -140,6 +140,8 @@ export function createToolSystem(
     mcpClient: options.mcp ?? null,
     shellEnabled: options.shellEnabled,
     shellAllowlist: options.shellAllowlist,
+    // The audit trail: one record per tool call, with why it was allowed.
+    activityLog: { record: (entry) => db.activity.record(entry) },
     // Standing approval rules live in the database, so "always allow" and
     // "always ask" survive a restart (see tools/tool-rules.ts).
     toolRules: {

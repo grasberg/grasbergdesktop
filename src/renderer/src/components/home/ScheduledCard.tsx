@@ -7,7 +7,7 @@
 
 import { useState } from 'react'
 import type { ScheduledWorkflowStatus } from '@shared/types'
-import { intervalLabel, isWorkflowRunning, nextRunLabel } from '@shared/workflow-status'
+import { isWorkflowRunning, nextRunLabel, scheduleLabel } from '@shared/workflow-status'
 import { useNow } from '@/hooks/useNow'
 import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
@@ -91,7 +91,7 @@ export default function ScheduledCard(): React.JSX.Element {
                   >
                     <span className="home-row-title">{w.name}</span>
                     <span className="home-row-meta">
-                      {intervalLabel(w.schedule?.everyMinutes ?? 60)}
+                      {w.schedule ? scheduleLabel(w.schedule) : 'no schedule'}
                       {' · '}
                       {running ? 'running…' : nextRunLabel(w, now)}
                     </span>

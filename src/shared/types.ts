@@ -740,6 +740,20 @@ export interface AppSettings {
    * paired; the pinned owner chat is the only one whose answer counts.
    */
   remoteApprovalsEnabled: boolean
+  /**
+   * Local trigger endpoint: a loopback-only HTTP listener that starts a
+   * workflow on an outside event (a git hook, a CI job, a shell script). Off
+   * by default. It binds 127.0.0.1 ONLY, requires the token below, and starts
+   * nothing but the workflows that individually opted in (Workflow.webhookEnabled).
+   */
+  workflowWebhookEnabled: boolean
+  /** Port for that listener. */
+  workflowWebhookPort: number
+  /**
+   * Shared secret for the endpoint, generated when it is first switched on.
+   * Local-only, but still a credential: never imported from a backup.
+   */
+  workflowWebhookToken: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -789,6 +803,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   paletteEverOpened: false,
   desktopNotificationsEnabled: true,
   remoteApprovalsEnabled: false,
+  workflowWebhookEnabled: false,
+  workflowWebhookPort: 8787,
+  workflowWebhookToken: null,
 }
 
 /**
@@ -812,6 +829,10 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   // Importing this would move approval authority to whatever chat the backup's
   // bridge settings point at.
   'remoteApprovalsEnabled',
+  // …and these would open a local port and hand over its key.
+  'workflowWebhookEnabled',
+  'workflowWebhookPort',
+  'workflowWebhookToken',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1257,55 @@ export interface ToolRuleInput {
   pattern?: string | null
 }
 
+/**
+ * How a tool call got past the approval gate — the activity log's "why".
+ * - 'auto': the tool's stored permission is always-allow and no rule objected.
+ * - 'rule': a standing approval rule covered it (an earlier "always allow").
+ * - 'approved': a human said yes to this specific call, here or on a phone.
+ * - 'declined': a human said no, or a headless run had nobody to ask.
+ * - 'blocked': policy refused before anyone was asked (deny, plan mode, the
+ *   read-only sandbox, a disabled tool).
+ */
+export type ActivityDecision = 'auto' | 'rule' | 'approved' | 'declined' | 'blocked'
+
+/**
+ * One tool call, as recorded for review (migration v34). This is the answer to
+ * "what did it actually do while I was away, and who let it?" — every field is
+ * observed by the executor rather than reported by the model, and the argument
+ * and result text is redacted and capped before it is stored.
+ */
+export interface ActivityEntry {
+  id: string
+  at: number
+  /** Conversation the call belonged to; null for a headless run. */
+  conversationId: string | null
+  /** Agent profile acting, when the call came from one. */
+  agentName: string | null
+  toolId: string
+  toolName: string
+  risk: ToolRiskLevel
+  decision: ActivityDecision
+  /** Short human reason: 'always allow', 'rule', 'plan mode', 'no channel'. */
+  detail: string
+  /** Redacted, capped call arguments. */
+  arguments: string
+  /** Redacted, capped result. */
+  result: string
+  /** code_changes row this call proposed, so the entry can link to its diff. */
+  changeId: string | null
+}
+
+export interface ActivityQuery {
+  /** Newest first; defaults to a page of 100. */
+  limit?: number
+  /** Only entries at or before this timestamp (cursor for "load older"). */
+  before?: number
+  /** Restrict to one decision, e.g. only what a human approved. */
+  decision?: ActivityDecision
+  /** Free-text over tool name, detail, arguments and result. */
+  search?: string
+}
+
 /** The renderer's answer to a ToolApprovalRequest. */
 export interface ToolApprovalAnswer {
   approved: boolean
@@ -1436,9 +1506,28 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[]
 }
 
-/** Recurring trigger for a workflow (interval-based). */
-export interface WorkflowSchedule {
+/**
+ * Recurring trigger for a workflow. 'interval' is the original "every N
+ * minutes"; 'calendar' is wall-clock ("08:00 on weekdays"), which is what
+ * people actually mean by a morning digest. Rows written before v33 carry the
+ * bare `{everyMinutes}` shape and are read back as 'interval'.
+ */
+export type WorkflowSchedule = WorkflowIntervalSchedule | WorkflowCalendarSchedule
+
+export interface WorkflowIntervalSchedule {
+  kind: 'interval'
   everyMinutes: number
+}
+
+export interface WorkflowCalendarSchedule {
+  kind: 'calendar'
+  /**
+   * Local weekdays it may run on, 0 = Sunday … 6 = Saturday. Empty means every
+   * day. Local, not UTC: "08:00 on weekdays" has to survive a DST change.
+   */
+  days: number[]
+  /** Local wall-clock time, "HH:MM" (24-hour). */
+  time: string
 }
 
 export interface Workflow {
@@ -1449,6 +1538,11 @@ export interface Workflow {
   schedule: WorkflowSchedule | null
   /** The schedule fires only while this is on. */
   scheduleEnabled: boolean
+  /**
+   * Whether the local trigger endpoint may start this workflow (v35). Opt-in
+   * PER WORKFLOW so switching the endpoint on never exposes the whole library.
+   */
+  webhookEnabled: boolean
   /** Last time a run started (any trigger), for the scheduler's due check. */
   lastRunAt: number | null
   createdAt: number
@@ -1460,13 +1554,32 @@ export interface WorkflowInput {
   graph: WorkflowGraph
   schedule?: WorkflowSchedule | null
   scheduleEnabled?: boolean
+  webhookEnabled?: boolean
+}
+
+/** How a run was started. 'webhook' = the local trigger endpoint (v35). */
+export type WorkflowRunTrigger = 'manual' | 'schedule' | 'webhook'
+
+/** State of the local trigger endpoint, for the settings + builder UI. */
+export interface WorkflowTriggerInfo {
+  /** The user's switch. */
+  enabled: boolean
+  /** Whether the listener is actually bound (a taken port leaves this false). */
+  running: boolean
+  port: number
+  /**
+   * The full URL to POST to, token included — shown only in the desktop UI, so
+   * the endpoint's key never has to be copied out of a settings file. Null
+   * while the endpoint is off or unbound.
+   */
+  url: string | null
 }
 
 /** A persisted execution of a saved workflow. */
 export interface WorkflowRun {
   id: string
   workflowId: string
-  trigger: 'manual' | 'schedule'
+  trigger: WorkflowRunTrigger
   status: 'ok' | 'error'
   /** The output node's text (or the last executed node's output). */
   output: string
@@ -1560,6 +1673,30 @@ export interface ScheduledTaskInput {
   approvedToolIds?: string[]
   projectId?: string | null
   agentId?: string | null
+}
+
+/**
+ * One recorded execution of a scheduled task (migration v33). Kept so a task
+ * that quietly started failing is visible without waiting for someone to catch
+ * the inbox item — the last-status column on the task itself only ever shows
+ * the most recent outcome.
+ */
+export interface ScheduledTaskRun {
+  id: string
+  taskId: string
+  status: 'ok' | 'error'
+  output: string
+  error: string | null
+  startedAt: number
+  finishedAt: number
+  /**
+   * True when the run was overdue at launch — the app was closed (or busy)
+   * when the slot came round. Grasberg runs a missed occurrence ONCE at the
+   * next opportunity rather than replaying every slot it slept through, and
+   * this flag is how the UI says so instead of quietly pretending it was on
+   * time.
+   */
+  catchUp: boolean
 }
 
 /** Incremental renderer update for the standalone scheduled-task list. */

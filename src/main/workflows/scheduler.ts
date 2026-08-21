@@ -1,11 +1,14 @@
 /**
- * Interval scheduler for workflows with a recurring trigger: once a minute it
- * runs every enabled scheduled workflow whose interval has elapsed since its
- * last run (lastRunAt survives restarts via the workflows table). Runs are
- * sequential within a tick; per-workflow concurrency is guarded by the runner.
+ * Scheduler for workflows with a recurring trigger. Two kinds (see nextDueAt):
+ * an INTERVAL schedule fires every N minutes since the last run, a CALENDAR one
+ * fires at a wall-clock time on chosen weekdays. lastRunAt survives restarts via
+ * the workflows table, so a slot missed while the app was closed runs ONCE at
+ * the next opportunity instead of being replayed for every occurrence slept
+ * through. Per-workflow concurrency is guarded by the runner.
  */
 
 import type { Workflow } from '@shared/types'
+import { nextRunAt } from '@shared/workflow-status'
 import type { AppDatabase } from '../db/database'
 import type { WorkflowRunner } from './runner'
 import { ScheduledRunQueue } from '../scheduling/run-queue'
@@ -19,11 +22,16 @@ export interface WorkflowSchedulerDeps {
   queue?: ScheduledRunQueue
 }
 
-/** Pure due check (exported for tests). Never-run schedules are due at once. */
+/**
+ * Pure due check (exported for tests). The "when" lives in @shared's
+ * `nextRunAt` so the scheduler and every UI label read from one definition —
+ * a workflow that says "in 25m" in the sidebar has to be the workflow that
+ * fires in 25 minutes. A missed slot runs ONCE at the next opportunity: the
+ * app catches up, it does not replay every occurrence it slept through.
+ */
 export function isDue(workflow: Workflow, now: number): boolean {
-  if (!workflow.scheduleEnabled || !workflow.schedule) return false
-  if (workflow.lastRunAt === null) return true
-  return now - workflow.lastRunAt >= workflow.schedule.everyMinutes * 60_000
+  const at = nextRunAt(workflow, now)
+  return at !== null && at <= now
 }
 
 export class WorkflowScheduler {
@@ -57,9 +65,8 @@ export class WorkflowScheduler {
           next = now
           break
         }
-        if (workflow.lastRunAt !== null && workflow.schedule) {
-          next = Math.min(next, workflow.lastRunAt + workflow.schedule.everyMinutes * 60_000)
-        }
+        const due = nextRunAt(workflow, now)
+        if (due !== null) next = Math.min(next, due)
       }
     } catch {
       // Retry on the fallback wake.

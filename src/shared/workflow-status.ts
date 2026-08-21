@@ -4,7 +4,13 @@
  * labels). No runtime deps — unit-tested in plain Node, like task-groups.ts.
  */
 
-import type { Workflow, WorkflowRun, WorkflowRunListItem } from './types'
+import type {
+  Workflow,
+  WorkflowCalendarSchedule,
+  WorkflowRun,
+  WorkflowRunListItem,
+  WorkflowSchedule,
+} from './types'
 
 /** Output/error cap on list surfaces (repo SQL substr + push payloads). */
 export const WORKFLOW_RUN_SNIPPET_MAX = 500
@@ -18,7 +24,15 @@ export const DUE_GRACE_MS = 90_000
 /** Wall-clock cap per run (the runner aborts past it). */
 export const WORKFLOW_RUN_TIMEOUT_MS = 10 * 60_000
 
-type ScheduleFields = Pick<Workflow, 'schedule' | 'scheduleEnabled' | 'lastRunAt'>
+type ScheduleFields = Pick<Workflow, 'schedule' | 'scheduleEnabled' | 'lastRunAt'> & {
+  /**
+   * Anchor for a calendar schedule that has never run — when the schedule was
+   * last edited. Omitted means "now", i.e. the next matching slot from here.
+   */
+  updatedAt?: number
+}
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 /** "every 45m" / "every 2h" / "every 1.5h" label for a schedule interval. */
 export function intervalLabel(everyMinutes: number): string {
@@ -42,14 +56,58 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Epoch ms of the next scheduled run, mirroring the scheduler's due check
- * (a never-run enabled schedule is due immediately). null when there is no
- * schedule or it is paused.
+ * The first wall-clock slot strictly after `after` that a calendar schedule
+ * matches. Local Date arithmetic, not fixed offsets, so "08:00 on weekdays"
+ * stays 08:00 across a daylight-saving change.
+ */
+export function nextCalendarSlot(schedule: WorkflowCalendarSchedule, after: number): number | null {
+  const [rawHours, rawMinutes] = schedule.time.split(':')
+  const hours = Number.parseInt(rawHours ?? '', 10)
+  const minutes = Number.parseInt(rawMinutes ?? '', 10)
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null
+  const slot = new Date(after)
+  slot.setHours(hours, minutes, 0, 0)
+  if (slot.getTime() <= after) slot.setDate(slot.getDate() + 1)
+  // Empty `days` means every day; otherwise walk forward to an allowed one.
+  // Bounded at 7 steps — one week contains every non-empty subset of weekdays.
+  if (schedule.days.length > 0) {
+    for (let step = 0; step < 7 && !schedule.days.includes(slot.getDay()); step++) {
+      slot.setDate(slot.getDate() + 1)
+    }
+    if (!schedule.days.includes(slot.getDay())) return null
+  }
+  return slot.getTime()
+}
+
+/**
+ * Epoch ms of the next scheduled run — the SINGLE definition of "due", shared
+ * by the scheduler and by every label the UI shows, so the two can never
+ * disagree about when something will happen. null when there is no schedule,
+ * it is paused, or it can never match.
+ *
+ * The two kinds anchor differently, deliberately. An INTERVAL schedule is
+ * relative ("every 30 minutes"), so a never-run one is due immediately. A
+ * CALENDAR schedule is absolute ("08:00 on weekdays"), so a never-run one is
+ * anchored on when it was last edited: saving an 08:00 digest at 14:00 waits
+ * for tomorrow morning rather than firing on the spot.
  */
 export function nextRunAt(w: ScheduleFields, now: number): number | null {
   if (!w.schedule || !w.scheduleEnabled) return null
+  if (w.schedule.kind === 'calendar') {
+    return nextCalendarSlot(w.schedule, w.lastRunAt ?? w.updatedAt ?? now)
+  }
   if (w.lastRunAt === null) return now
   return w.lastRunAt + w.schedule.everyMinutes * 60_000
+}
+
+/** "every 45m" / "08:00 daily" / "08:00 Mon–Fri" — one schedule, one line. */
+export function scheduleLabel(schedule: WorkflowSchedule): string {
+  if (schedule.kind === 'interval') return intervalLabel(schedule.everyMinutes)
+  if (schedule.days.length === 0 || schedule.days.length === 7) return `${schedule.time} daily`
+  const days = [...schedule.days].sort((a, b) => a - b)
+  const isWeekdays = days.length === 5 && days.every((d) => d >= 1 && d <= 5)
+  if (isWeekdays) return `${schedule.time} Mon–Fri`
+  return `${schedule.time} ${days.map((d) => WEEKDAY_NAMES[d]).join(', ')}`
 }
 
 /**

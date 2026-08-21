@@ -1,7 +1,12 @@
 /** Standalone clock-task popover beside Home (independent from Workflows). */
 
 import { useEffect, useRef, useState } from 'react'
-import type { AgentProfile, CodeProject, ScheduledTaskRecurrence } from '@shared/types'
+import type {
+  AgentProfile,
+  CodeProject,
+  ScheduledTaskRecurrence,
+  ScheduledTaskRun,
+} from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useNow } from '@/hooks/useNow'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
@@ -60,6 +65,8 @@ export default function ScheduledTasks(): React.JSX.Element {
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const [historyId, setHistoryId] = useState<string | null>(null)
+  const [history, setHistory] = useState<ScheduledTaskRun[]>([])
   const menuRef = useRef<HTMLDivElement>(null)
   const tools = useToolsStore((state) => state.tools)
   const permissions = useToolsStore((state) => state.permissions)
@@ -82,6 +89,21 @@ export default function ScheduledTasks(): React.JSX.Element {
     )
   }
 
+  /** Expands one task's recorded runs (collapsing whichever was open). */
+  const toggleHistory = (taskId: string): void => {
+    if (historyId === taskId) {
+      setHistoryId(null)
+      return
+    }
+    setHistoryId(taskId)
+    setHistory([])
+    void (async () => {
+      const res = await window.uld.scheduledTasks.runs(taskId)
+      // Guard against a slow response landing after the user moved on.
+      if (res.ok) setHistory(res.data)
+    })()
+  }
+
   const failed = tasks.some((task) => task.lastStatus === 'error')
 
   useEffect(() => {
@@ -91,6 +113,7 @@ export default function ScheduledTasks(): React.JSX.Element {
         setOpen(false)
         setCreating(false)
         setConfirmingId(null)
+        setHistoryId(null)
       }
     }
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -319,14 +342,20 @@ export default function ScheduledTasks(): React.JSX.Element {
                     title={task.lastError ?? (task.lastOutput || task.prompt)}
                   >
                     <span className={`run-dot ${dot}`} aria-hidden="true" />
-                    <div className="sched-popover-main">
+                    <button
+                      type="button"
+                      className="sched-popover-main"
+                      aria-expanded={historyId === task.id}
+                      title={historyId === task.id ? 'Hide run history' : 'Show run history'}
+                      onClick={() => toggleHistory(task.id)}
+                    >
                       <span className="sched-item-name">{task.title}</span>
                       <span className="sched-item-meta">
                         {completed
                           ? 'Completed'
                           : `${RECURRENCE_LABEL[task.recurrence]} · ${dateTimeLabel(task.nextRunAt)}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.enabled ? '' : ' · paused'}`}
                       </span>
-                    </div>
+                    </button>
                     {!completed ? (
                       <button
                         type="button"
@@ -373,6 +402,35 @@ export default function ScheduledTasks(): React.JSX.Element {
                         {TrashIcon}
                       </button>
                     )}
+                    {historyId === task.id ? (
+                      <ul className="sched-history">
+                        {history.length === 0 ? (
+                          <li className="sched-history-empty">No runs recorded yet.</li>
+                        ) : (
+                          history.map((run) => (
+                            <li key={run.id} className={`sched-history-run ${run.status}`}>
+                              <span className={`run-dot ${run.status}`} aria-hidden="true" />
+                              <span className="sched-history-time">
+                                {dateTimeLabel(run.startedAt)}
+                              </span>
+                              {/* The honest bit: a slot missed while Grasberg
+                                  was closed ran late, and says so. */}
+                              {run.catchUp ? (
+                                <span
+                                  className="sched-history-late"
+                                  title="Grasberg was closed when this was due — it ran once at the next start, not once per missed slot."
+                                >
+                                  ran late
+                                </span>
+                              ) : null}
+                              <span className="sched-history-text">
+                                {run.error ?? run.output ?? ''}
+                              </span>
+                            </li>
+                          ))
+                        )}
+                      </ul>
+                    ) : null}
                   </li>
                 )
               })}

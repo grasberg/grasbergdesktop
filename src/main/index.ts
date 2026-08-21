@@ -40,6 +40,7 @@ import { ImBridgeManager } from './im/manager'
 import { KnowledgeService } from './services/knowledge'
 import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
 import { WorkflowScheduler } from './workflows/scheduler'
+import { WorkflowTriggerServer } from './workflows/trigger-server'
 import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSession } from './browser/session'
 import { TerminalService } from './terminal/terminal-service'
@@ -67,6 +68,7 @@ let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let workflowScheduler: WorkflowScheduler | null = null
+let triggerServer: WorkflowTriggerServer | null = null
 let scheduledTaskScheduler: ScheduledTaskScheduler | null = null
 let dreamingService: DreamingService | null = null
 let workflowRunnerRef: WorkflowRunner | null = null
@@ -111,6 +113,7 @@ async function cleanup(): Promise<void> {
   questionBroker?.stopAll()
   imBridgeManager?.stopAll()
   workflowScheduler?.stop()
+  triggerServer?.stop()
   scheduledTaskScheduler?.stop()
   dreamingService?.stop()
   workflowRunnerRef?.stopAll()
@@ -503,6 +506,21 @@ function bootstrap(): void {
         detail: input.detail,
       })
     },
+    remoteChoice: (input) => {
+      const bridge = imBridgeManager
+      if (!bridge) return Promise.resolve(null)
+      if (input.signal) {
+        input.signal.addEventListener(
+          'abort',
+          () => bridge.cancelApproval(input.requestKey, 'The run was stopped.'),
+          { once: true }
+        )
+      }
+      return bridge.requestChoice(input.requestKey, {
+        question: input.question,
+        options: input.options,
+      })
+    },
     onBackgroundRunFinished: (info) => {
       notifier?.notify(
         resultNotification(
@@ -579,6 +597,29 @@ function bootstrap(): void {
     onSettled: (requestId) => imBridge.cancelApproval(requestId),
   })
 
+  // The same treatment for a question the assistant raised (ask_user_question):
+  // a background or scheduled run can put a genuine fork to the user rather
+  // than guessing, and the question follows them out of the app.
+  questions.setHooks({
+    onRequest: (request) => {
+      desktopNotifier.notify({
+        kind: 'question',
+        title: 'A task needs your input',
+        body: request.question,
+      })
+      void imBridge
+        .requestChoice(request.requestId, {
+          question: request.question,
+          options: request.options,
+        })
+        .then((answer) => {
+          if (answer === null) return
+          questions.respond(request.requestId, answer)
+        })
+    },
+    onSettled: (requestId) => imBridge.cancelApproval(requestId),
+  })
+
   // Saved-workflow execution (manual runs + the interval scheduler share it).
   const workflowRunner = createWorkflowRunner(
     database,
@@ -603,6 +644,24 @@ function bootstrap(): void {
       },
     }
   )
+  // The local trigger endpoint: an outside event (a git hook, a CI job) can
+  // start a workflow. Loopback-only, token-gated, off until switched on, and
+  // it starts only the workflows that individually opted in.
+  const triggers = new WorkflowTriggerServer({
+    settings: () => {
+      const current = database.settings.get()
+      return {
+        enabled: current.workflowWebhookEnabled,
+        port: current.workflowWebhookPort,
+        token: current.workflowWebhookToken,
+      }
+    },
+    isTriggerable: (workflowId) => database.workflows.getById(workflowId)?.webhookEnabled === true,
+    run: (workflowId, trigger, payload) => workflowRunner.runById(workflowId, trigger, payload),
+    onError: (message) => broadcast(CHANNELS.mainNotice, { message, level: 'error' }),
+  })
+  triggerServer = triggers
+
   const scheduledRunQueue = new ScheduledRunQueue(2)
   const scheduler = new WorkflowScheduler({
     db: database,
@@ -677,6 +736,7 @@ function bootstrap(): void {
     toolSystem,
     approvalBroker: broker,
     notifier: desktopNotifier,
+    triggerServer: triggers,
     questionBroker: questions,
     mcpManager: mcp,
     imBridgeManager: imBridge,
@@ -701,6 +761,8 @@ function bootstrap(): void {
     scheduler.start()
     clockScheduler.start()
     dreaming.start()
+    // Binds only when the endpoint is switched on (it re-reads settings).
+    triggers.sync()
   }
 
   createWindow()

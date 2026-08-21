@@ -439,6 +439,12 @@ export const settingsPatchSchema = z
     paletteEverOpened: z.boolean(),
     desktopNotificationsEnabled: z.boolean(),
     remoteApprovalsEnabled: z.boolean(),
+    workflowWebhookEnabled: z.boolean(),
+    // Unprivileged ports are refused: the endpoint must never need elevation.
+    workflowWebhookPort: z.number().int().min(1024).max(65_535),
+    // Present so main can mint one; the renderer never sends a token itself
+    // (the settings handler overwrites whatever arrives here on enable).
+    workflowWebhookToken: z.string().min(8).max(128).nullable(),
   })
   .partial()
   .strict()

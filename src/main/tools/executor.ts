@@ -27,6 +27,8 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
+  ActivityDecision,
+  ActivityEntry,
   Attachment,
   Conversation,
   GitStatus,
@@ -118,6 +120,12 @@ export interface ToolExecutorDeps {
     list(): ToolRule[]
     add(input: ToolRuleInput): void
   } | null
+  /**
+   * The activity log (wired to db.activity): one record per tool call the app
+   * actually considered, with the reason it was allowed to run. Absent => no
+   * recording, which is what tests and embedded uses want.
+   */
+  activityLog?: { record(entry: Omit<ActivityEntry, 'id'>): void } | null
   /**
    * Long-running shell jobs (run_shell_command background=true): start()
    * returns a model-readable note with the task id, pollable via task_output
@@ -268,6 +276,12 @@ export interface ToolExecuteContext {
   sandboxLevel?: SandboxLevel
   /** Auto-accept edits: edit_file/write_file skip the approval dialog. */
   autoAcceptEdits?: boolean
+  /**
+   * Agent profile acting, when the call comes from a sub-agent or a headless
+   * profile run. Recorded in the activity log so "who did this" has an answer
+   * more useful than "the app".
+   */
+  agentName?: string
   /** Receives live output chunks from long-running tools (shell commands). */
   onToolOutput?: (toolCallId: string, chunk: string) => void
   /**
@@ -279,6 +293,30 @@ export interface ToolExecuteContext {
 }
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
+
+/** Chars of arguments/result kept per activity entry. */
+const ACTIVITY_TEXT_MAX = 4000
+
+/** How an approval answer reads in the activity log. */
+const APPROVAL_SCOPE_DETAIL: Record<ToolApprovalScope, string> = {
+  once: 'approved once',
+  conversation: 'approved for this conversation',
+  always: 'approved everywhere',
+}
+
+/**
+ * What the executor observed about one call, filled in as it goes and written
+ * to the activity log on the way out. Passed down rather than returned so an
+ * early refusal is recorded with the same shape as a completed run.
+ */
+interface AuditDraft {
+  definition?: ToolDefinition
+  decision?: ActivityDecision
+  detail?: string
+  rawArguments?: string
+  /** Set by edit_file/write_file so the entry can link to its diff. */
+  changeId?: string
+}
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -1030,16 +1068,59 @@ export class ToolExecutor {
   /**
    * Executes one tool call. NEVER throws — every failure path resolves to a
    * human/model-readable string (capped at TOOL_RESULT_MAX_CHARS).
+   *
+   * Every call that got as far as a policy decision is recorded in the
+   * activity log on the way out, including the ones that were refused.
    */
   async execute(toolCall: ToolCallRecord, ctx: ToolExecuteContext): Promise<string> {
+    const audit: AuditDraft = {}
+    let result: string
     try {
-      return capToolResult(await this.executeInner(toolCall, ctx))
+      result = capToolResult(await this.executeInner(toolCall, ctx, audit))
     } catch (e) {
-      return capToolResult(redactSecrets(`Tool execution failed: ${errorMessage(e)}`))
+      result = capToolResult(redactSecrets(`Tool execution failed: ${errorMessage(e)}`))
+    }
+    this.recordActivity(ctx, audit, result)
+    return result
+  }
+
+  /**
+   * Appends one activity entry. Skipped when the call never reached a policy
+   * decision (an unknown tool or unparseable arguments is a model mistake, not
+   * an action). Never throws: an audit failure must not fail the tool call it
+   * describes — but it is also never silently skipped for a call that ran.
+   */
+  private recordActivity(ctx: ToolExecuteContext, audit: AuditDraft, result: string): void {
+    const log = this.deps.activityLog
+    if (!log || !audit.definition || !audit.decision) return
+    try {
+      log.record({
+        at: Date.now(),
+        // Headless runs use a synthetic conversation id; recording it would
+        // point the UI at a conversation that does not exist.
+        conversationId: ctx.conversation.id.length > 0 ? ctx.conversation.id : null,
+        agentName: ctx.agentName ?? null,
+        toolId: audit.definition.id,
+        toolName: audit.definition.name,
+        risk: audit.definition.risk,
+        decision: audit.decision,
+        detail: audit.detail ?? '',
+        // Redacted, then capped: a notification-centre-sized secret leak is
+        // just as bad in a log that is meant to be read later.
+        arguments: redactSecrets(audit.rawArguments ?? '').slice(0, ACTIVITY_TEXT_MAX),
+        result: redactSecrets(result).slice(0, ACTIVITY_TEXT_MAX),
+        changeId: audit.changeId ?? null,
+      })
+    } catch {
+      // Best-effort.
     }
   }
 
-  private async executeInner(toolCall: ToolCallRecord, ctx: ToolExecuteContext): Promise<string> {
+  private async executeInner(
+    toolCall: ToolCallRecord,
+    ctx: ToolExecuteContext,
+    audit: AuditDraft
+  ): Promise<string> {
     const definition = this.deps.registry.resolveForCall(toolCall.name)
     if (!definition) {
       return `Error: unknown tool '${toolCall.name}'. Available tools: ${this.deps.registry
@@ -1048,7 +1129,12 @@ export class ToolExecutor {
         .join(', ')}.`
     }
 
+    audit.definition = definition
+    audit.rawArguments = toolCall.arguments
+
     if (!definition.enabled) {
+      audit.decision = 'blocked'
+      audit.detail = 'tool disabled in settings'
       return `Error: the tool '${definition.name}' is disabled in this app's settings.`
     }
 
@@ -1070,12 +1156,16 @@ export class ToolExecutor {
 
     // `mutating` is declared where each tool is defined (see ToolDefinition).
     if (ctx.planMode && definition.mutating === true) {
+      audit.decision = 'blocked'
+      audit.detail = 'plan mode'
       return (
         'Plan mode is active: only read-only investigation is allowed. Present your plan to ' +
         "the user instead of calling '" + definition.name + "'; they can turn plan mode off to proceed."
       )
     }
     if (ctx.sandboxLevel === 'read-only' && definition.mutating === true) {
+      audit.decision = 'blocked'
+      audit.detail = 'read-only sandbox'
       return (
         "This conversation's sandbox level is read-only: only non-mutating tools may run. " +
         "Describe the change you want to make and ask the user to raise the sandbox level " +
@@ -1085,17 +1175,18 @@ export class ToolExecutor {
 
     const decision = this.deps.registry.getPermission(definition)
     if (decision === 'deny') {
+      audit.decision = 'blocked'
+      audit.detail = 'denied in settings'
       return `The user has denied the tool '${definition.name}' in this app's settings; it was not run.`
     }
     // Standing rules are consulted BEFORE the stored permission, because a
     // matching 'require_approval' rule outranks even 'always_allow' — that is
     // the whole point of being able to say "always ask me about this one".
     const ruleEffect = this.matchRules(definition, args, ctx)
+    const preGrant = ruleEffect === 'allow' ? null : this.preGrantReason(definition, args, ctx)
     const mustAsk =
       ruleEffect === 'require_approval' ||
-      (decision === 'ask' &&
-        ruleEffect !== 'allow' &&
-        !this.approvalPreGranted(definition, args, ctx))
+      (decision === 'ask' && ruleEffect !== 'allow' && preGrant === null)
     if (mustAsk) {
       const note = await this.approvalNoteFor(definition, args, ctx)
       const answer = await ctx.approval({
@@ -1105,11 +1196,23 @@ export class ToolExecutor {
         risk: definition.risk,
         ...(note ? { note } : {}),
       })
-      if (!answer.approved) return USER_DECLINED_RESULT
+      if (!answer.approved) {
+        audit.decision = 'declined'
+        audit.detail = 'declined at the approval prompt'
+        return USER_DECLINED_RESULT
+      }
+      audit.decision = 'approved'
+      audit.detail = APPROVAL_SCOPE_DETAIL[answer.scope]
       this.recordStandingApproval(definition, answer.scope, ctx)
+    } else if (ruleEffect === 'allow') {
+      audit.decision = 'rule'
+      audit.detail = 'covered by an approval rule'
+    } else {
+      audit.decision = 'auto'
+      audit.detail = preGrant ?? 'permission is always allow'
     }
 
-    return this.runTool(definition, args, ctx, toolCall)
+    return this.runTool(definition, args, ctx, toolCall, audit)
   }
 
   /**
@@ -1229,38 +1332,45 @@ export class ToolExecutor {
   }
 
   /**
-   * Standing grants that let an 'ask' tool run without the dialog:
+   * Standing grants that let an 'ask' tool run without the dialog, as a
+   * human-readable REASON (or null when none applies) — the activity log has
+   * to be able to say which one, not just that one existed:
    * - an earlier "allow for this conversation" answer for the same tool,
    * - auto-accept-edits mode for the file-editing tools,
    * - a shell command covered by the user's prefix allowlist.
    * Tools marked noStandingApproval get NO standing grant of any kind.
    */
-  private approvalPreGranted(
+  private preGrantReason(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
-  ): boolean {
-    if (definition.noStandingApproval === true) return false
-    if (this.conversationApprovals.get(ctx.conversation.id)?.has(definition.id)) return true
+  ): string | null {
+    if (definition.noStandingApproval === true) return null
+    if (this.conversationApprovals.get(ctx.conversation.id)?.has(definition.id)) {
+      return 'allowed for this conversation'
+    }
     if (
       ctx.autoAcceptEdits === true &&
       (definition.id === 'edit_file' || definition.id === 'write_file')
     ) {
-      return true
+      return 'auto-accept edits'
     }
     if (definition.id === 'run_shell_command') {
       const command = getString(args, 'command') ?? ''
       const allowlist = this.deps.shellAllowlist?.() ?? []
-      if (allowlist.length > 0 && commandMatchesAllowlist(command, allowlist)) return true
+      if (allowlist.length > 0 && commandMatchesAllowlist(command, allowlist)) {
+        return 'shell allowlist'
+      }
     }
-    return false
+    return null
   }
 
   private async runTool(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext,
-    toolCall: ToolCallRecord
+    toolCall: ToolCallRecord,
+    audit: AuditDraft
   ): Promise<string> {
     switch (definition.id) {
       case 'file_search':
@@ -1280,9 +1390,9 @@ export class ToolExecutor {
       case 'github':
         return this.runGitHubRead(args, ctx)
       case 'edit_file':
-        return this.runEditFile(args, ctx)
+        return this.runEditFile(args, ctx, audit)
       case 'write_file':
-        return this.runWriteFile(args, ctx)
+        return this.runWriteFile(args, ctx, audit)
       case 'task_output':
         return this.runTaskOutput(args)
       case 'task_stop':
@@ -1682,7 +1792,11 @@ export class ToolExecutor {
     return { conversationId: ctx.conversation.id, projectId: ctx.conversation.projectId, root }
   }
 
-  private async runEditFile(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+  private async runEditFile(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext,
+    audit?: AuditDraft
+  ): Promise<string> {
     const gate = this.requireCodeChanges(ctx)
     if (typeof gate === 'string') return gate
 
@@ -1726,6 +1840,8 @@ export class ToolExecutor {
 
     try {
       const change = await this.deps.codeChanges!.propose(gate.conversationId, relPath, 'edit', newContent)
+      // Stamped so the activity entry can link straight to this diff.
+      if (audit) audit.changeId = change.id
       await this.deps.codeChanges!.apply(change.id)
     } catch (e) {
       return redactSecrets("Error applying the edit to '" + relPath + "': " + errorMessage(e))
@@ -1734,7 +1850,11 @@ export class ToolExecutor {
     return 'Edited ' + relPath + ' (replaced ' + what + '). The change was applied and recorded in the Changes list.'
   }
 
-  private async runWriteFile(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+  private async runWriteFile(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext,
+    audit?: AuditDraft
+  ): Promise<string> {
     const gate = this.requireCodeChanges(ctx)
     if (typeof gate === 'string') return gate
 
@@ -1758,6 +1878,7 @@ export class ToolExecutor {
         exists ? 'edit' : 'create',
         content
       )
+      if (audit) audit.changeId = change.id
       await this.deps.codeChanges!.apply(change.id)
     } catch (e) {
       return redactSecrets("Error writing '" + relPath + "': " + errorMessage(e))

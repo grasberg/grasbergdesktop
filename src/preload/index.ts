@@ -189,6 +189,13 @@ const api: UldApi = {
     onQuestionRequest: subscribe<UserQuestionRequest>(CHANNELS.userQuestionRequest),
     onQuestionSettled: subscribe<string>(CHANNELS.userQuestionSettled),
   },
+  notices: {
+    onNotice: subscribe<{ message: string; level: 'info' | 'error' }>(CHANNELS.mainNotice),
+  },
+  activity: {
+    list: (query) => ipcRenderer.invoke(CHANNELS.activityList, query),
+    clear: () => ipcRenderer.invoke(CHANNELS.activityClear),
+  },
   prompts: {
     list: () => ipcRenderer.invoke(CHANNELS.promptsList),
     create: (input) => ipcRenderer.invoke(CHANNELS.promptsCreate, input),
@@ -239,6 +246,8 @@ const api: UldApi = {
     runs: (id) => ipcRenderer.invoke(CHANNELS.workflowsRuns, id),
     overview: () => ipcRenderer.invoke(CHANNELS.workflowsOverview),
     onRunFinished: subscribe<WorkflowRunFinishedEvent>(CHANNELS.workflowRunFinished),
+    triggerInfo: (workflowId) => ipcRenderer.invoke(CHANNELS.workflowsTriggerInfo, workflowId),
+    triggerRegenerate: () => ipcRenderer.invoke(CHANNELS.workflowsTriggerRegenerate),
   },
   scheduledTasks: {
     list: () => ipcRenderer.invoke(CHANNELS.scheduledTasksList),
@@ -247,6 +256,7 @@ const api: UldApi = {
       ipcRenderer.invoke(CHANNELS.scheduledTasksSetEnabled, id, enabled),
     delete: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksDelete, id),
       onChanged: subscribe(CHANNELS.scheduledTasksChanged),
+    runs: (taskId) => ipcRenderer.invoke(CHANNELS.scheduledTaskRuns, taskId),
   },
   agents: {
     list: () => ipcRenderer.invoke(CHANNELS.agentsList),

@@ -287,3 +287,85 @@ it('a run with no agent profile leaves agent memories untouched and unseen', asy
   expect(adapter.chatRequests[0].messages.some((m) => m.role === 'system')).toBe(false)
   expect(db.memories.listForAgent(watcher.id)).toHaveLength(1)
 })
+
+// ---------------------------------------------------------------------------
+// A headless run raising its hand (ask_user_question)
+// ---------------------------------------------------------------------------
+
+/** A run whose single tool call is a question to the user. */
+function questionFixture(keySuffix: string): HeadlessFixture {
+  const adapter = new ToolThenDoneAdapter('ask_user_question')
+  const tool: ToolDefinition = {
+    id: 'ask_user_question',
+    name: 'ask_user_question',
+    description: 'asks the user',
+    parameters: { type: 'object', properties: {} },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  }
+  // Mirrors the real tool: it forwards to ctx.askUser and reports the answer.
+  const execute = vi.fn(async (_toolCall, ctx: ToolExecuteContext) => {
+    if (!ctx.askUser) return 'Error: asking the user a question is unavailable here.'
+    const answer = await ctx.askUser('Which branch?', ['main', 'develop'])
+    return answer === null
+      ? 'The user dismissed the question without answering. Proceed with your best judgment.'
+      : `The user answered: ${answer}`
+  })
+  return {
+    providerId: providerWithKey(keySuffix),
+    adapter,
+    tools: {
+      registry: { listEnabledDefinitions: () => [tool] },
+      executor: { execute },
+      broker: { request: vi.fn(async () => ({ approved: false, scope: 'once' as const })) },
+    },
+  }
+}
+
+it('puts a question from a headless run to the user over the side channel', async () => {
+  const fixture = questionFixture('q1')
+  const remoteChoice = vi.fn(async (_input: { question: string; options: string[] }) => 'develop')
+  const service = new ChatService(db, () => undefined, {
+    tools: fixture.tools,
+    resolveAdapter: () => fixture.adapter,
+    remoteChoice,
+  })
+
+  await service.generateForWorkflow('open a PR', fixture.providerId, 'm', { useTools: true })
+
+  expect(remoteChoice).toHaveBeenCalledTimes(1)
+  expect(remoteChoice.mock.calls[0][0].options).toEqual(['main', 'develop'])
+  expect(toolResult(fixture.adapter)).toBe('The user answered: develop')
+})
+
+it('tells the model to use its own judgement when nobody could be reached', async () => {
+  // No channel at all, and a channel that answered nothing: a headless run
+  // must keep going rather than stalling on a question no one will see.
+  for (const [suffix, remoteChoice] of [
+    ['q2', undefined],
+    ['q3', vi.fn(async () => null)],
+  ] as const) {
+    const fixture = questionFixture(suffix)
+    const service = new ChatService(db, () => undefined, {
+      tools: fixture.tools,
+      resolveAdapter: () => fixture.adapter,
+      ...(remoteChoice ? { remoteChoice } : {}),
+    })
+    await service.generateForWorkflow('open a PR', fixture.providerId, 'm', { useTools: true })
+    expect(toolResult(fixture.adapter)).toContain('best judgment')
+  }
+})
+
+it('a broken question channel is a dismissal, not a crash', async () => {
+  const fixture = questionFixture('q4')
+  const service = new ChatService(db, () => undefined, {
+    tools: fixture.tools,
+    resolveAdapter: () => fixture.adapter,
+    remoteChoice: async () => {
+      throw new Error('bridge down')
+    },
+  })
+  await service.generateForWorkflow('open a PR', fixture.providerId, 'm', { useTools: true })
+  expect(toolResult(fixture.adapter)).toContain('best judgment')
+})

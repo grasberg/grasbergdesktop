@@ -70,8 +70,12 @@ import type {
   ProviderConfigPatch,
   ProviderTypeMeta,
   ResearchDepth,
+  ActivityEntry,
+  ActivityQuery,
   ScheduledTask,
+  ScheduledTaskRun,
   ScheduledTasksChangedEvent,
+  WorkflowTriggerInfo,
   ScheduledTaskInput,
   PromptTemplate,
   PromptTemplateInput,
@@ -232,6 +236,10 @@ export const CHANNELS = {
   toolsRuleCreate: 'tools:rules:create',
   toolsRuleDelete: 'tools:rules:delete',
 
+  // activity log (every tool call, with why it was allowed)
+  activityList: 'activity:list',
+  activityClear: 'activity:clear',
+
   // prompt library
   promptsList: 'prompts:list',
   promptsCreate: 'prompts:create',
@@ -281,12 +289,15 @@ export const CHANNELS = {
   workflowsRuns: 'workflows:runs',
   /** Scheduled workflows with latest-run status + recent runs across all workflows. */
   workflowsOverview: 'workflows:overview',
+  workflowsTriggerInfo: 'workflows:trigger:info',
+  workflowsTriggerRegenerate: 'workflows:trigger:regenerate',
 
   // Standalone scheduled tasks (clock menu; independent from workflows)
   scheduledTasksList: 'scheduledTasks:list',
   scheduledTasksCreate: 'scheduledTasks:create',
   scheduledTasksSetEnabled: 'scheduledTasks:setEnabled',
   scheduledTasksDelete: 'scheduledTasks:delete',
+  scheduledTaskRuns: 'scheduledTasks:runs',
 
   // agent profiles
   agentsList: 'agents:list',
@@ -351,6 +362,8 @@ export const CHANNELS = {
   scheduledTasksChanged: 'push:scheduledTasksChanged',
   /** Standing approval rules changed (an approval answer created one). */
   toolRulesChanged: 'push:toolRulesChanged',
+  /** A main-side notice for the user (e.g. the trigger endpoint failed to bind). */
+  mainNotice: 'push:mainNotice',
   /** Sent with { arena: ArenaState } on every arena/candidate state change. */
   arenaChanged: 'push:arenaChanged',
   /** Sent with TerminalDataEvent for every terminal output chunk. */
@@ -804,6 +817,15 @@ export interface UldApi {
     /** Fires when an approval answer (or another window) changed the rules. */
     onRulesChanged(cb: () => void): () => void
   }
+  /** Notices raised by main itself (no request in flight), shown as a toast. */
+  notices: {
+    onNotice(cb: (notice: { message: string; level: 'info' | 'error' }) => void): () => void
+  }
+  /** The audit trail: every tool call, newest first. */
+  activity: {
+    list(query?: ActivityQuery): Promise<IpcResult<{ entries: ActivityEntry[]; total: number }>>
+    clear(): Promise<IpcResult<void>>
+  }
   prompts: {
     list(): Promise<IpcResult<PromptTemplate[]>>
     create(input: PromptTemplateInput): Promise<IpcResult<PromptTemplate>>
@@ -869,6 +891,10 @@ export interface UldApi {
     overview(): Promise<IpcResult<WorkflowsOverview>>
     /** Fires whenever a saved-workflow run is persisted; returns unsubscribe. */
     onRunFinished(cb: (evt: WorkflowRunFinishedEvent) => void): () => void
+    /** State of the local trigger endpoint and the URL to point a hook at. */
+    triggerInfo(workflowId?: string): Promise<IpcResult<WorkflowTriggerInfo>>
+    /** Mints a fresh endpoint token, invalidating the previous one. */
+    triggerRegenerate(): Promise<IpcResult<WorkflowTriggerInfo>>
   }
   scheduledTasks: {
     list(): Promise<IpcResult<ScheduledTask[]>>
@@ -876,6 +902,8 @@ export interface UldApi {
     setEnabled(id: string, enabled: boolean): Promise<IpcResult<ScheduledTask>>
     delete(id: string): Promise<IpcResult<void>>
       onChanged(cb: (event: ScheduledTasksChangedEvent) => void): () => void
+    /** Recorded runs for one task, newest first. */
+    runs(taskId: string): Promise<IpcResult<ScheduledTaskRun[]>>
   }
   agents: {
     list(): Promise<IpcResult<AgentProfile[]>>

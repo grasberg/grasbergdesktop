@@ -27,6 +27,10 @@ const PAIRING_MAX_ATTEMPTS = 5
 const REMOTE_APPROVAL_TIMEOUT_MS = 3 * 60_000
 /** Chars of the proposed action shown in the chat message. */
 const REMOTE_APPROVAL_DETAIL_MAX = 900
+/** Buttons fit on a phone; more options than this are dropped. */
+const REMOTE_CHOICE_MAX_OPTIONS = 6
+/** Telegram truncates long button text anyway. */
+const REMOTE_BUTTON_LABEL_MAX = 40
 
 export interface ImBridgeManagerDeps {
   db: AppDatabase
@@ -52,11 +56,12 @@ export class ImBridgeManager {
    */
   private pairing: { expiresAt: number; attempts: number } | null = null
   /**
-   * Remote approvals waiting for a tap, keyed by the opaque token that travels
-   * through Telegram in callback_data. `requestKey` is the caller's own handle
-   * (the approval requestId) so a request answered in the app can cancel its
-   * Telegram twin. Nothing about the decision is derivable from the token — it
-   * is a lookup key into this map and nothing else.
+   * Remote prompts waiting for a tap — approvals (Allow/Deny) and questions
+   * (one button per option) — keyed by the opaque token that travels through
+   * Telegram in callback_data. `requestKey` is the caller's own handle (the
+   * broker's requestId) so a request answered in the app can cancel its
+   * Telegram twin. Nothing about the answer is derivable from the token: it is
+   * a lookup key into this map, and the CHOICES live only on this side.
    */
   private readonly remoteApprovals = new Map<
     string,
@@ -65,7 +70,9 @@ export class ImBridgeManager {
       chatId: number
       messageId: number | null
       summary: string
-      settle: (answer: boolean | null) => void
+      /** Values the buttons map to, by index. */
+      choices: unknown[]
+      settle: (answer: unknown) => void
     }
   >()
   private readonly remoteApprovalTokens = new Map<string, string>()
@@ -162,6 +169,57 @@ export class ImBridgeManager {
     requestKey: string,
     input: { title: string; detail: string }
   ): Promise<boolean | null> {
+    // The detail can be raw tool arguments, so it goes through redaction before
+    // it leaves the machine: a Telegram message is stored on their servers and
+    // in a phone's notification history long after the app forgot the call.
+    const summary =
+      `Approval needed\n\n${input.title}\n\n` +
+      redactSecrets(input.detail).slice(0, REMOTE_APPROVAL_DETAIL_MAX)
+    return this.askRemote<boolean>(requestKey, summary, [
+      { label: 'Allow once', value: true },
+      { label: 'Deny', value: false },
+    ])
+  }
+
+  /**
+   * Puts a multiple-choice question to the paired chat — how a background or
+   * scheduled run raises its hand instead of guessing. Resolves with the
+   * chosen option, or null when there is no channel or nobody answered.
+   */
+  async requestChoice(
+    requestKey: string,
+    input: { question: string; options: string[] }
+  ): Promise<string | null> {
+    const options = input.options
+      .map((option) => option.trim())
+      .filter((option) => option.length > 0)
+      .slice(0, REMOTE_CHOICE_MAX_OPTIONS)
+    if (options.length === 0) return null
+    const summary =
+      `A background task needs your input\n\n` +
+      redactSecrets(input.question).slice(0, REMOTE_APPROVAL_DETAIL_MAX)
+    return this.askRemote<string>(
+      requestKey,
+      summary,
+      options.map((option) => ({
+        // Telegram caps button text; the full option stays on this side.
+        label: option.slice(0, REMOTE_BUTTON_LABEL_MAX),
+        value: option,
+      }))
+    )
+  }
+
+  /**
+   * The shared machinery behind requestApproval/requestChoice: send a message
+   * with one button per choice and resolve with the chosen VALUE. The token in
+   * callback_data indexes into the choices kept here, so nothing about the
+   * possible answers travels through Telegram's servers beyond the labels.
+   */
+  private async askRemote<T>(
+    requestKey: string,
+    summary: string,
+    choices: Array<{ label: string; value: T }>
+  ): Promise<T | null> {
     if (!this.remoteApprovalsAvailable()) return null
     const bridge = this.bridge
     const chatId = this.deps.db.settings.get().telegramBridgeAllowedChatId
@@ -170,19 +228,14 @@ export class ImBridgeManager {
     if (this.remoteApprovalTokens.has(requestKey)) return null
 
     const token = randomUUID().replace(/-/g, '').slice(0, 24)
-    // The detail can be raw tool arguments, so it goes through redaction before
-    // it leaves the machine: a Telegram message is stored on their servers and
-    // in a phone's notification history long after the app forgot the call.
-    const summary =
-      `Approval needed\n\n${input.title}\n\n` +
-      redactSecrets(input.detail).slice(0, REMOTE_APPROVAL_DETAIL_MAX)
-    const messageId = await bridge.sendButtons(chatId, summary, [
-      { text: 'Allow once', data: `a:${token}` },
-      { text: 'Deny', data: `d:${token}` },
-    ])
+    const messageId = await bridge.sendButtons(
+      chatId,
+      summary,
+      choices.map((choice, index) => ({ text: choice.label, data: `${index}:${token}` }))
+    )
     if (messageId === null) return null
 
-    return new Promise<boolean | null>((resolve) => {
+    return new Promise<T | null>((resolve) => {
       const timer = setTimeout(() => this.settleRemote(token, null), REMOTE_APPROVAL_TIMEOUT_MS)
       timer.unref?.()
       this.remoteApprovals.set(token, {
@@ -190,17 +243,18 @@ export class ImBridgeManager {
         chatId,
         messageId,
         summary,
+        choices: choices.map((choice) => choice.value),
         settle: (answer) => {
           clearTimeout(timer)
-          resolve(answer)
+          resolve(answer as T | null)
         },
       })
       this.remoteApprovalTokens.set(requestKey, token)
     })
   }
 
-  /** Resolves one pending remote approval and forgets its token. */
-  private settleRemote(token: string, answer: boolean | null): boolean {
+  /** Resolves one pending remote prompt and forgets its token. */
+  private settleRemote(token: string, answer: unknown): boolean {
     const pending = this.remoteApprovals.get(token)
     if (!pending) return false
     this.remoteApprovals.delete(token)
@@ -234,16 +288,23 @@ export class ImBridgeManager {
     if (allowed === null || allowed !== chatId) {
       return { toast: 'This assistant only responds to its owner.' }
     }
-    const approved = data.startsWith('a:')
-    if (!approved && !data.startsWith('d:')) return { toast: 'Unrecognized action.' }
-    const token = data.slice(2)
+    const separator = data.indexOf(':')
+    if (separator <= 0) return { toast: 'Unrecognized action.' }
+    const index = Number.parseInt(data.slice(0, separator), 10)
+    const token = data.slice(separator + 1)
     const pending = this.remoteApprovals.get(token)
-    if (!pending || !this.settleRemote(token, approved)) {
-      return { toast: 'That request is no longer waiting.' }
+    if (!pending) return { toast: 'That request is no longer waiting.' }
+    // The index comes back from Telegram, so it is treated as untrusted input
+    // into the choices this side kept — never as an answer in its own right.
+    if (!Number.isInteger(index) || index < 0 || index >= pending.choices.length) {
+      return { toast: 'Unrecognized action.' }
     }
+    const value = pending.choices[index]
+    if (!this.settleRemote(token, value)) return { toast: 'That request is no longer waiting.' }
+    const chosen = typeof value === 'boolean' ? (value ? 'Allowed' : 'Denied') : String(value)
     return {
-      toast: approved ? 'Allowed.' : 'Denied.',
-      replaceText: `${pending.summary}\n\n${approved ? 'Allowed' : 'Denied'} from Telegram.`,
+      toast: chosen.slice(0, 100),
+      replaceText: `${pending.summary}\n\n${chosen} — answered from Telegram.`,
     }
   }
 

@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { WorkflowRun } from '@shared/types'
+import type { WorkflowRun, WorkflowSchedule } from '@shared/types'
 import {
   DUE_GRACE_MS,
   WORKFLOW_RUN_SNIPPET_MAX,
@@ -24,10 +24,14 @@ function sched(overrides: {
   everyMinutes?: number | null
   scheduleEnabled?: boolean
   lastRunAt?: number | null
-}): { schedule: { everyMinutes: number } | null; scheduleEnabled: boolean; lastRunAt: number | null } {
+}): {
+  schedule: WorkflowSchedule | null
+  scheduleEnabled: boolean
+  lastRunAt: number | null
+} {
   const everyMinutes = overrides.everyMinutes === undefined ? 30 : overrides.everyMinutes
   return {
-    schedule: everyMinutes === null ? null : { everyMinutes },
+    schedule: everyMinutes === null ? null : { kind: 'interval', everyMinutes },
     scheduleEnabled: overrides.scheduleEnabled ?? true,
     lastRunAt: overrides.lastRunAt === undefined ? null : overrides.lastRunAt,
   }

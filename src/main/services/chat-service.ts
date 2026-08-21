@@ -306,6 +306,18 @@ export interface ChatServiceOptions {
     signal?: AbortSignal
   }) => Promise<boolean | null>
   /**
+   * Puts a multiple-choice question from a headless run to the user over the
+   * same side channel. This is what lets a scheduled task or a background
+   * sub-agent raise its hand instead of guessing: null (no channel, no answer)
+   * simply means it has to proceed on its own judgement.
+   */
+  remoteChoice?: (input: {
+    requestKey: string
+    question: string
+    options: string[]
+    signal?: AbortSignal
+  }) => Promise<string | null>
+  /**
    * A background delegate run reached a terminal state. Wired to the desktop
    * notifier so a result that landed while the user was elsewhere announces
    * itself instead of waiting silently in the inbox.
@@ -512,12 +524,17 @@ const DELEGATE_TOOL_IDS = new Set([
   'fetch_url',
   'edit_file',
   'write_file',
+  // A sub-agent that hits a genuine fork in the road can ask instead of
+  // guessing; the question reaches the user wherever they are (dialog,
+  // notification, or the paired chat).
+  'ask_user_question',
 ])
 const DELEGATE_PERSONA =
   'You are a focused sub-agent working on a single delegated task. You do not see the parent ' +
   'conversation — work only from the task and context you are given. Use the available tools ' +
   'when they help (file edits still require the user’s approval), then return a concise, ' +
-  'self-contained result. Do not ask questions; make reasonable assumptions and state them.'
+  'self-contained result. Prefer reasonable assumptions and state them; use ask_user_question ' +
+  'only for a genuine fork you cannot resolve, where guessing wrong would waste the work.'
 
 // -- mixture of agents --------------------------------------------------------
 
@@ -1744,6 +1761,11 @@ export class ChatService {
             const approved = await this.askRemoteApproval(req, opts?.signal)
             return { approved, scope: 'once' as const }
           },
+          // A headless run has no dialog either, so ask_user_question goes to
+          // the same side channel. Without one it resolves to null and the
+          // tool tells the model to proceed on its own judgement.
+          askUser: (question, options) => this.askRemoteChoice(question, options, opts?.signal),
+          ...(agent ? { agentName: agent.name } : {}),
           ...(opts?.signal ? { signal: opts.signal } : {}),
         })
         messages.push({ role: 'tool', content: out, toolCallId: call.id })
@@ -1814,6 +1836,30 @@ export class ChatService {
       return answer === true
     } catch {
       return false
+    }
+  }
+
+  /**
+   * Side-channel question for a headless run (ask_user_question). null means
+   * nobody could be reached or nobody answered — the tool then tells the model
+   * to make a reasonable assumption rather than stalling the run.
+   */
+  private async askRemoteChoice(
+    question: string,
+    options: string[],
+    signal?: AbortSignal
+  ): Promise<string | null> {
+    const ask = this.options.remoteChoice
+    if (!ask || signal?.aborted) return null
+    try {
+      return await ask({
+        requestKey: randomUUID(),
+        question,
+        options,
+        ...(signal ? { signal } : {}),
+      })
+    } catch {
+      return null
     }
   }
 
@@ -2271,6 +2317,10 @@ export class ChatService {
                   // and the sandbox level travels into sub-agents unchanged.
                   planMode: ctx.planMode,
                   autoAcceptEdits: ctx.autoAcceptEdits,
+                  // The parent's question channel travels down too, so a
+                  // sub-agent's question reaches the same places.
+                  ...(ctx.askUser ? { askUser: ctx.askUser } : {}),
+                  ...(agentName ? { agentName } : {}),
                   ...(ctx.sandboxLevel ? { sandboxLevel: ctx.sandboxLevel } : {}),
                   ...(signal ? { signal } : {}),
                 })

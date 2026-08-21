@@ -20,6 +20,7 @@ const AgentsTab = lazy(() => import('./AgentsTab'))
 const KnowledgeTab = lazy(() => import('./KnowledgeTab'))
 const AgentPlatformTab = lazy(() => import('./AgentPlatformTab'))
 const UsageTab = lazy(() => import('./UsageTab'))
+const ActivityTab = lazy(() => import('./ActivityTab'))
 
 const TABS = [
   { id: 'providers', label: 'Providers' },
@@ -35,6 +36,7 @@ const TABS = [
   { id: 'skills', label: 'Skills' },
   { id: 'memory', label: 'Memory' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'activity', label: 'Activity' },
   { id: 'usage', label: 'Usage' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'about', label: 'About' },
@@ -141,6 +143,7 @@ export default function SettingsPanel() {
               {tab === 'skills' ? <SkillsTab /> : null}
               {tab === 'memory' ? <MemoryTab /> : null}
               {tab === 'appearance' ? <AppearanceTab /> : null}
+              {tab === 'activity' ? <ActivityTab /> : null}
               {tab === 'usage' ? <UsageTab /> : null}
               {tab === 'privacy' ? <PrivacyTab /> : null}
               {tab === 'about' ? <AboutTab /> : null}

@@ -60,6 +60,7 @@ interface WorkflowRow {
   graph_json: string
   schedule_json: string | null
   schedule_enabled: number
+  webhook_enabled: number
   last_run_at: number | null
   created_at: number
   updated_at: number
@@ -85,15 +86,34 @@ function parseGraph(text: string): WorkflowGraph {
   return { ...EMPTY_GRAPH }
 }
 
+/** "HH:MM", 24-hour. */
+const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+/**
+ * Reads a stored schedule. Rows written before v33 hold the bare
+ * `{everyMinutes}` shape with no `kind`, so an untagged object with a valid
+ * interval is read back as an interval schedule — an old workflow keeps firing
+ * exactly as it did, without a data migration.
+ */
 function parseSchedule(text: string | null): WorkflowSchedule | null {
   const v = parseJson<unknown>(text ?? null, undefined)
-  if (
-    v &&
-    typeof v === 'object' &&
-    typeof (v as WorkflowSchedule).everyMinutes === 'number' &&
-    (v as WorkflowSchedule).everyMinutes >= 1
-  ) {
-    return { everyMinutes: Math.floor((v as WorkflowSchedule).everyMinutes) }
+  if (!v || typeof v !== 'object') return null
+  const raw = v as Partial<WorkflowSchedule> & { everyMinutes?: unknown; kind?: unknown }
+
+  if (raw.kind === 'calendar') {
+    const time = typeof raw.time === 'string' && TIME_PATTERN.test(raw.time) ? raw.time : null
+    if (!time) return null
+    const days = Array.isArray(raw.days)
+      ? [...new Set(raw.days.filter((d): d is number => Number.isInteger(d) && d >= 0 && d <= 6))]
+          .sort((a, b) => a - b)
+      : []
+    return { kind: 'calendar', days, time }
+  }
+
+  // 'interval', or a pre-v33 row with no kind at all.
+  const every = raw.everyMinutes
+  if (typeof every === 'number' && Number.isFinite(every) && every >= 1) {
+    return { kind: 'interval', everyMinutes: Math.floor(every) }
   }
   return null
 }
@@ -105,6 +125,7 @@ function toWorkflow(row: WorkflowRow): Workflow {
     graph: parseGraph(row.graph_json),
     schedule: parseSchedule(row.schedule_json),
     scheduleEnabled: row.schedule_enabled === 1,
+    webhookEnabled: row.webhook_enabled === 1,
     lastRunAt: row.last_run_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -147,20 +168,23 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
         graph: input.graph ?? { ...EMPTY_GRAPH },
         schedule: input.schedule ?? null,
         scheduleEnabled: input.scheduleEnabled === true,
+        webhookEnabled: input.webhookEnabled === true,
         lastRunAt: null,
         createdAt: now,
         updatedAt: now,
       }
       driver.run(
         `INSERT INTO workflows
-           (id, name, graph_json, schedule_json, schedule_enabled, last_run_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, graph_json, schedule_json, schedule_enabled, webhook_enabled,
+            last_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           workflow.id,
           workflow.name,
           JSON.stringify(workflow.graph),
           workflow.schedule ? JSON.stringify(workflow.schedule) : null,
           workflow.scheduleEnabled ? 1 : 0,
+          workflow.webhookEnabled ? 1 : 0,
           null,
           now,
           now,
@@ -172,13 +196,15 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
     update(id, input) {
       driver.run(
         `UPDATE workflows
-           SET name = ?, graph_json = ?, schedule_json = ?, schedule_enabled = ?, updated_at = ?
+           SET name = ?, graph_json = ?, schedule_json = ?, schedule_enabled = ?,
+               webhook_enabled = ?, updated_at = ?
          WHERE id = ?`,
         [
           input.name,
           JSON.stringify(input.graph ?? EMPTY_GRAPH),
           input.schedule ? JSON.stringify(input.schedule) : null,
           input.scheduleEnabled === true ? 1 : 0,
+          input.webhookEnabled === true ? 1 : 0,
           Date.now(),
           id,
         ]

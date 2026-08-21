@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { ImBridgeStatus } from '@shared/types'
+import type { ImBridgeStatus, WorkflowTriggerInfo } from '@shared/types'
 import { errorMessage } from '@/api/uld'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useConversationsStore } from '@/stores/conversations'
@@ -26,6 +26,7 @@ export default function BridgesTab(): ReactElement {
   const [enabled, setEnabled] = useState(false)
   const [webhook, setWebhook] = useState('')
   const [busy, setBusy] = useState(false)
+  const [trigger, setTrigger] = useState<WorkflowTriggerInfo | null>(null)
 
   const applyStatus = (s: ImBridgeStatus): void => {
     setStatus(s)
@@ -40,6 +41,16 @@ export default function BridgesTab(): ReactElement {
       if (res.ok) applyStatus(res.data)
     })
   }, [convLoaded, loadConversations])
+
+  // Re-read whenever the endpoint's settings change: whether it actually bound
+  // (the port may be taken) is main's answer, not something the toggle knows.
+  const webhookEnabled = settings?.workflowWebhookEnabled
+  const webhookPort = settings?.workflowWebhookPort
+  useEffect(() => {
+    void window.uld.workflows.triggerInfo().then((res) => {
+      if (res.ok) setTrigger(res.data)
+    })
+  }, [webhookEnabled, webhookPort])
 
   const saveTelegram = async (): Promise<void> => {
     setBusy(true)
@@ -160,6 +171,81 @@ export default function BridgesTab(): ReactElement {
           ) : null}
         </span>
       </label>
+
+      <h4 className="section-subhead">Trigger endpoint (incoming)</h4>
+      <p className="field-hint">
+        The other direction: lets an outside event start a workflow — a git hook, a CI job, a
+        script. Off by default. It listens on 127.0.0.1 only (nothing on your network can reach
+        it), requires the token below, and starts only the workflows you switched on individually
+        in the workflow builder.
+      </p>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings?.workflowWebhookEnabled ?? false}
+          onChange={(e) => void persist({ workflowWebhookEnabled: e.target.checked })}
+        />
+        <span>
+          Accept workflow triggers on this machine
+          {trigger && settings?.workflowWebhookEnabled ? (
+            <span className="field-hint">
+              {trigger.running ? `Listening on 127.0.0.1:${trigger.port}.` : 'Not listening.'}
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {settings?.workflowWebhookEnabled ? (
+        <>
+          <label className="field">
+            <span className="field-label">Port</span>
+            <input
+              className="input"
+              type="number"
+              min={1024}
+              max={65535}
+              value={settings.workflowWebhookPort}
+              onChange={(e) => {
+                const port = Number.parseInt(e.target.value, 10)
+                if (Number.isInteger(port) && port >= 1024 && port <= 65535) {
+                  void persist({ workflowWebhookPort: port })
+                }
+              }}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">URL to POST to</span>
+            {/* Read-only: the token is shown here and nowhere else, so it never
+                has to be copied out of a settings file or a backup. */}
+            <input
+              className="input mono"
+              readOnly
+              value={trigger?.url ?? 'Not listening.'}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <p className="field-hint">
+              Replace <code>&lt;workflow-id&gt;</code> with the id shown in the workflow builder.
+              The request body is handed to the workflow&apos;s Input node.
+            </p>
+          </label>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void (async () => {
+                const res = await window.uld.workflows.triggerRegenerate()
+                if (res.ok) {
+                  setTrigger(res.data)
+                  toast('New token issued — old URLs stopped working.', 'success')
+                } else {
+                  toast(errorMessage(res.error), 'error')
+                }
+              })()
+            }}
+          >
+            Issue a new token
+          </button>
+        </>
+      ) : null}
 
       <h4 className="section-subhead">Outbound webhook</h4>
       <p className="field-hint">
