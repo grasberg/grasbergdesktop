@@ -1,48 +1,20 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
-import type { ModelInfo, ProviderConfig } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
-import { providerUsable } from '@/lib/providers'
+import ModelPickList, { modelPickKey } from './ModelPickList'
 import './chat.css'
-
-function formatContext(n: number | undefined): string | null {
-  if (!n) return null
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000
-    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
-  }
-  return `${Math.round(n / 1000)}k`
-}
-
-function CapabilityBadges({ model }: { model: ModelInfo }): ReactElement {
-  const ctx = formatContext(model.contextLength)
-  return (
-    <span className="ms-badges">
-      {ctx && <span className="badge ms-badge">{ctx}</span>}
-      {model.capabilities.tools && <span className="badge ms-badge">tools</span>}
-      {model.capabilities.vision && <span className="badge ms-badge">vision</span>}
-      {model.capabilities.reasoning && <span className="badge ms-badge">reasoning</span>}
-    </span>
-  )
-}
 
 export default function ModelSelector({ placement = 'header' }: { placement?: 'header' | 'composer' }): ReactElement {
   const conversation = useChatStore((s) => s.conversation)
   const updateConversation = useChatStore((s) => s.updateConversation)
   const providers = useProvidersStore((s) => s.providers)
-  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
-  const loadModels = useProvidersStore((s) => s.loadModels)
   const settings = useSettingsStore((s) => s.settings)
 
   const [open, setOpen] = useState(false)
-  const [failed, setFailed] = useState<Record<string, boolean>>({})
-  const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({})
   const rootRef = useRef<HTMLDivElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-
-  const usableProviders = providers.filter(providerUsable)
 
   const isOverride = !!conversation && (conversation.providerId !== null || conversation.modelId !== null)
   const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null
@@ -58,18 +30,6 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
     ? `${effectiveProvider.label} · ${effectiveModelId || '?'}${isOverride ? '' : ' (default)'}`
     : 'Select model'
   const compactLabel = effectiveModelId || effectiveProvider?.label || 'Select model'
-
-  // Fetch (cached) model lists for usable providers when the popover opens.
-  useEffect(() => {
-    if (!open) return
-    for (const p of usableProviders) {
-      if (modelsByProvider[p.id]) continue
-      loadModels(p.id).catch(() => {
-        setFailed((prev) => ({ ...prev, [p.id]: true }))
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
 
   // Close on outside click.
   useEffect(() => {
@@ -119,12 +79,6 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
     close()
   }
 
-  const applyCustom = (p: ProviderConfig): void => {
-    const id = (customDrafts[p.id] ?? '').trim()
-    if (!id) return
-    selectModel(p.id, id)
-  }
-
   return (
     <div className={`model-selector${placement === 'composer' ? ' model-selector-composer' : ''}`} ref={rootRef}>
       <button
@@ -169,75 +123,14 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
             )}
           </button>
 
-          {usableProviders.length === 0 && (
-            <div className="ms-empty">No enabled providers with an API key.</div>
-          )}
-
-          {usableProviders.map((p) => {
-            const models = modelsByProvider[p.id]
-            return (
-              <div key={p.id} className="ms-group">
-                <div className="ms-group-header">{p.label}</div>
-                {!models && !failed[p.id] && <div className="ms-loading">Loading models…</div>}
-                {failed[p.id] && !models && (
-                  <div className="ms-loading">Could not load models — use a custom id below.</div>
-                )}
-                {models?.map((m) => {
-                  const selected =
-                    isOverride && conversation?.providerId === p.id && conversation?.modelId === m.id
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      data-nav-row
-                      role="option"
-                      aria-selected={selected}
-                      className={`ms-row${selected ? ' ms-row-selected' : ''}`}
-                      onClick={() => selectModel(p.id, m.id)}
-                    >
-                      <span className="ms-row-label" title={m.id}>
-                        {m.label ?? m.id}
-                      </span>
-                      <CapabilityBadges model={m} />
-                      {selected && (
-                        <span className="ms-check" aria-hidden>
-                          ✓
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
-                <div className="ms-custom">
-                  <input
-                    className="input ms-custom-input"
-                    placeholder="Custom model id…"
-                    aria-label={`Custom model id for ${p.label}`}
-                    value={customDrafts[p.id] ?? ''}
-                    onChange={(e) =>
-                      setCustomDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        applyCustom(p)
-                      }
-                      // Let Escape bubble to close; stop arrow nav from stealing focus while typing.
-                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') e.stopPropagation()
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-ghost ms-custom-apply"
-                    aria-label={`Use custom model for ${p.label}`}
-                    disabled={!(customDrafts[p.id] ?? '').trim()}
-                    onClick={() => applyCustom(p)}
-                  >
-                    Apply
-                  </button>
-                </div>
-              </div>
-            )
-          })}
+          <ModelPickList
+            onPick={(providerId, modelId) => selectModel(providerId, modelId)}
+            selectedKey={
+              isOverride && conversation
+                ? modelPickKey(conversation.providerId, conversation.modelId)
+                : null
+            }
+          />
         </div>
       )}
     </div>

@@ -182,7 +182,13 @@ function skillsSection(
 /** Cap on the total characters of memory entries listed in the prompt. */
 const MEMORY_PROMPT_CHAR_BUDGET = 6000
 
-function memorySection(memories: { title: string; content: string }[]): string {
+/**
+ * The memory section of a system prompt: how to write a memory block, plus the
+ * memories this run may see. Exported because agent-profile runs (headless,
+ * no conversation mode) build their prompt from the profile persona and this
+ * section alone.
+ */
+export function buildMemorySection(memories: { title: string; content: string }[]): string {
   const instructions = `You have a persistent memory: durable facts about the user, stored locally and shared across ALL conversations in this app. To save or update a memory, emit a fenced block in this format:
 
 \`\`\`uld-memory
@@ -250,7 +256,7 @@ export function buildModeSystemPrompt(
     sections.push(skillsSection(opts.skills, opts.toolsAvailable === true))
   }
   if (opts.memoryEnabled) {
-    sections.push(memorySection(opts.memories ?? []))
+    sections.push(buildMemorySection(opts.memories ?? []))
   }
   return sections.join('\n\n')
 }

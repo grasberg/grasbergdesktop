@@ -13,6 +13,16 @@
 /** Shell metacharacters that can smuggle a second command past the prefix. */
 const CHAINING_CHARS = /[;&|`$<>\n\r]/
 
+/**
+ * True when the command contains chaining/substitution metacharacters, i.e.
+ * when prefix matching cannot say what it will actually run. The allowlist
+ * treats that as "no match"; approval RULES treat it as un-evaluable, so an
+ * "always ask" rule still fires on it (see tool-rules.ts).
+ */
+export function hasShellChaining(command: string): boolean {
+  return CHAINING_CHARS.test(command)
+}
+
 /** Collapses runs of whitespace so spacing differences don't defeat matching. */
 function normalize(command: string): string {
   return command.trim().replace(/\s+/g, ' ')

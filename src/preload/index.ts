@@ -55,6 +55,7 @@ const api: UldApi = {
     test: (id) => ipcRenderer.invoke(CHANNELS.providersTest, id),
     listModels: (id) => ipcRenderer.invoke(CHANNELS.providersListModels, id),
     previewModels: (input) => ipcRenderer.invoke(CHANNELS.providersPreviewModels, input),
+    detectLocal: () => ipcRenderer.invoke(CHANNELS.providersDetectLocal),
     oauthStart: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStart, id),
     oauthLogout: (id) => ipcRenderer.invoke(CHANNELS.providersOauthLogout, id),
     oauthStatus: (id) => ipcRenderer.invoke(CHANNELS.providersOauthStatus, id),
@@ -139,6 +140,7 @@ const api: UldApi = {
       ipcRenderer.invoke(CHANNELS.codeCheckpointsList, conversationId),
     checkpointRestore: (checkpointId) =>
       ipcRenderer.invoke(CHANNELS.codeCheckpointRestore, checkpointId),
+    revertTurn: (req) => ipcRenderer.invoke(CHANNELS.codeTurnRevert, req),
   },
   usage: {
     summary: (days) => ipcRenderer.invoke(CHANNELS.usageSummary, days),
@@ -176,6 +178,10 @@ const api: UldApi = {
     customCreate: (input) => ipcRenderer.invoke(CHANNELS.toolsCustomCreate, input),
     customUpdate: (toolId, patch) => ipcRenderer.invoke(CHANNELS.toolsCustomUpdate, toolId, patch),
     customDelete: (toolId) => ipcRenderer.invoke(CHANNELS.toolsCustomDelete, toolId),
+    rulesList: () => ipcRenderer.invoke(CHANNELS.toolsRulesList),
+    ruleCreate: (input) => ipcRenderer.invoke(CHANNELS.toolsRuleCreate, input),
+    ruleDelete: (ruleId) => ipcRenderer.invoke(CHANNELS.toolsRuleDelete, ruleId),
+    onRulesChanged: subscribe<void>(CHANNELS.toolRulesChanged),
     onApprovalRequest: subscribe<ToolApprovalRequest>(CHANNELS.toolApprovalRequest),
     onApprovalSettled: subscribe<string>(CHANNELS.toolApprovalSettled),
     questionRespond: (requestId, answer) =>
@@ -228,7 +234,7 @@ const api: UldApi = {
     create: (input) => ipcRenderer.invoke(CHANNELS.workflowsCreate, input),
     update: (id, input) => ipcRenderer.invoke(CHANNELS.workflowsUpdate, id, input),
     delete: (id) => ipcRenderer.invoke(CHANNELS.workflowsDelete, id),
-    run: (graph) => ipcRenderer.invoke(CHANNELS.workflowsRun, graph),
+    run: (graph, opts) => ipcRenderer.invoke(CHANNELS.workflowsRun, graph, opts),
     runById: (id) => ipcRenderer.invoke(CHANNELS.workflowsRunById, id),
     runs: (id) => ipcRenderer.invoke(CHANNELS.workflowsRuns, id),
     overview: () => ipcRenderer.invoke(CHANNELS.workflowsOverview),

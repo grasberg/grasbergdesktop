@@ -8,6 +8,7 @@ import { useTestConnection } from '@/hooks/useTestConnection'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
 import { ProviderAddForm, validateBaseUrl } from './ProviderAddForm'
+import LocalServerCard from './LocalServerCard'
 
 function ProviderRow({ provider }: { provider: ProviderConfig }) {
   const types = useProvidersStore((s) => s.types)
@@ -371,6 +372,7 @@ export default function ProvidersTab() {
       {providers.length === 0 && !adding ? (
         <div className="empty-state card">
           <p>No providers configured yet.</p>
+          <LocalServerCard showFallback />
           <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>
             Add your first provider
           </button>

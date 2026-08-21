@@ -152,7 +152,12 @@ export class DreamingService {
   async dreamNow(force: boolean): Promise<DreamResult> {
     const { db } = this.deps
     const now = this.deps.now?.() ?? Date.now()
-    const memories = db.memories.list()
+    // SHARED memories only. Consolidation merges and rewrites entries, so
+    // feeding it several agents' private recollections at once would let one
+    // agent's fact be rewritten into another's — the very separation an
+    // agent-owned memory exists to provide. Agent memories are few by nature
+    // and are left alone.
+    const memories = db.memories.listForAgent(null)
 
     if (this.running) return skipped(memories.length)
     // Nothing to consolidate against — even a forced run needs two entries.

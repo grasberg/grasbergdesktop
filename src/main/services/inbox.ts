@@ -26,6 +26,38 @@ export interface InboxSources {
   scheduledTasks: ScheduledTask[]
 }
 
+/**
+ * Structural view of the database the inbox reads. Declared here (rather than
+ * importing AppDatabase) so this module stays runtime-dependency-free and
+ * trivially fake-able in tests.
+ */
+export interface InboxDatabase {
+  agentPlatform: { runsList(): AgentRun[] }
+  workflows: { listRecentRunsWithNames(limit: number): WorkflowRunListItem[] }
+  scheduledTasks: { list(): ScheduledTask[] }
+  inbox: { reviewedByKey(): Map<string, number> }
+}
+
+/** How many workflow runs the inbox looks back over. */
+const WORKFLOW_RUN_LOOKBACK = 30
+
+/** The inbox as the Home view and the unread badge both see it. */
+export function collectInboxItems(db: InboxDatabase): InboxItem[] {
+  return buildInboxItems(
+    {
+      agentRuns: db.agentPlatform.runsList(),
+      workflowRuns: db.workflows.listRecentRunsWithNames(WORKFLOW_RUN_LOOKBACK),
+      scheduledTasks: db.scheduledTasks.list(),
+    },
+    db.inbox.reviewedByKey()
+  )
+}
+
+/** Badge count: results that landed and have not been reviewed yet. */
+export function countUnreviewed(items: readonly InboxItem[]): number {
+  return items.reduce((total, item) => (item.reviewedAt === null ? total + 1 : total), 0)
+}
+
 export function buildInboxItems(
   sources: InboxSources,
   reviewedByKey: Map<string, number>

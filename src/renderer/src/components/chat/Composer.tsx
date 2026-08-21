@@ -122,6 +122,16 @@ export default function Composer(): ReactElement {
     textareaRef.current?.focus()
   }
 
+  // Starter-prompt cards (ChatView's empty state) seed the draft through the
+  // ui store; consume the one-shot value and focus so the user can edit/send.
+  const composerSeed = useUiStore((s) => s.composerSeed)
+  useEffect(() => {
+    if (composerSeed === null) return
+    setValue((cur) => (cur.trim().length > 0 ? `${cur}\n\n${composerSeed}` : composerSeed))
+    useUiStore.getState().clearComposerSeed()
+    textareaRef.current?.focus()
+  }, [composerSeed])
+
   const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null
   const effectiveProvider =
     (effectiveProviderId ? providers.find((p) => p.id === effectiveProviderId) : undefined) ??

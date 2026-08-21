@@ -20,6 +20,8 @@ import type {
   ToolDefinition,
   ToolPermissionDecision,
   ToolRiskLevel,
+  ToolRule,
+  ToolRuleInput,
   UserQuestionRequest,
 } from '@shared/types'
 import { unwrap } from '@/api/uld'
@@ -48,6 +50,8 @@ export interface ToolsStoreState {
   permissions: Record<string, ToolPermissionDecision>
   /** FIFO queue of pending requests; the dialog renders the head. */
   approvalQueue: ToolApprovalRequest[]
+  /** Standing approval rules, newest first (Settings -> Tools). */
+  rules: ToolRule[]
   loaded: boolean
   load(): Promise<void>
   setEnabled(id: string, enabled: boolean): Promise<void>
@@ -56,6 +60,10 @@ export interface ToolsStoreState {
   customCreate(input: CustomToolInput): Promise<void>
   customUpdate(toolId: string, patch: CustomToolPatch): Promise<void>
   customDelete(toolId: string): Promise<void>
+  /** Refreshes the standing approval rules (an answer may have added one). */
+  loadRules(): Promise<void>
+  ruleCreate(input: ToolRuleInput): Promise<void>
+  ruleDelete(ruleId: string): Promise<void>
   /** Enqueues an approval request pushed from main (deduped by requestId). */
   setPendingApproval(req: ToolApprovalRequest): void
   /**
@@ -97,6 +105,7 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
     customInfos: [],
     permissions: {},
     approvalQueue: [],
+    rules: [],
     loaded: false,
 
     async load() {
@@ -109,9 +118,34 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
         const permissions: Record<string, ToolPermissionDecision> = {}
         for (const p of permissionList) permissions[p.toolId] = p.decision
         set({ tools, permissions, customInfos, loaded: true })
+        void get().loadRules()
       } catch (e) {
         set({ loaded: true })
         toastError('Failed to load tools', e)
+      }
+    },
+
+    async loadRules() {
+      try {
+        set({ rules: await unwrap(window.uld.tools.rulesList()) })
+      } catch {
+        // The rules list is supplementary; a failure must not blank the tab.
+      }
+    },
+
+    async ruleCreate(input) {
+      try {
+        set({ rules: await unwrap(window.uld.tools.ruleCreate(input)) })
+      } catch (e) {
+        toastError('Could not save the approval rule', e)
+      }
+    },
+
+    async ruleDelete(ruleId) {
+      try {
+        set({ rules: await unwrap(window.uld.tools.ruleDelete(ruleId)) })
+      } catch (e) {
+        toastError('Could not remove the approval rule', e)
       }
     },
 
@@ -168,6 +202,8 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
       }))
       try {
         await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved, scope))
+        // A wider scope persisted a rule main-side; keep the list in step.
+        if (scope && scope !== 'once') void get().loadRules()
       } catch (e) {
         toastError('Could not deliver the approval response', e)
       }

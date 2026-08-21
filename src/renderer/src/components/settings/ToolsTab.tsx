@@ -15,7 +15,9 @@ import type {
   CustomToolPatch,
   ToolDefinition,
   ToolPermissionDecision,
+  ToolRuleEffect,
 } from '@shared/types'
+import { toolRulePatternHint } from '@shared/tool-rules'
 import { RiskBadge } from '@/components/ToolApprovalDialog'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
@@ -33,6 +35,125 @@ const PERMISSION_OPTIONS: ReadonlyArray<{ value: ToolPermissionDecision; label: 
 ]
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
+
+// ---------------------------------------------------------------------------
+// Standing approval rules
+// ---------------------------------------------------------------------------
+
+const RULE_EFFECT_LABEL: Record<ToolRuleEffect, string> = {
+  allow: 'Run without asking',
+  require_approval: 'Always ask',
+}
+
+/**
+ * Settings → Tools → Approval rules: what "Always allow" / "Allow in this
+ * chat" saved, plus a form for the other direction — pinning a tool (or one
+ * command prefix, host or path) to always ask, which outranks every allow.
+ */
+function ApprovalRulesSection(): ReactElement {
+  const rules = useToolsStore((s) => s.rules)
+  const tools = useToolsStore((s) => s.tools)
+  const ruleCreate = useToolsStore((s) => s.ruleCreate)
+  const ruleDelete = useToolsStore((s) => s.ruleDelete)
+  const [effect, setEffect] = useState<ToolRuleEffect>('require_approval')
+  const [toolId, setToolId] = useState('')
+  const [pattern, setPattern] = useState('')
+
+  // 'Always ask' can be pinned on anything; 'run without asking' can never
+  // cover a tool whose contract is a fresh approval per call.
+  const selectable = tools.filter(
+    (tool) => tool.enabled && (effect === 'require_approval' || tool.noStandingApproval !== true)
+  )
+  const selected = toolId || selectable[0]?.id || ''
+  const patternHint = toolRulePatternHint(selected)
+  const toolName = (id: string): string => tools.find((t) => t.id === id)?.name ?? id
+
+  const submit = (): void => {
+    if (!selected) return
+    void ruleCreate({
+      toolId: selected,
+      effect,
+      scope: 'global',
+      pattern: pattern.trim() || null,
+    })
+    setPattern('')
+  }
+
+  return (
+    <>
+      <h4 className="section-subhead">Approval rules</h4>
+      <p className="field-hint">
+        Standing decisions, kept until you remove them here. An <em>always ask</em> rule wins over
+        everything — including a tool set to “Always allow” above — so it is the way to carve one
+        risky command back out of a broad permission.
+      </p>
+
+      {rules.length === 0 ? (
+        <p className="field-hint">
+          No rules yet. “Always allow” in an approval dialog saves one here.
+        </p>
+      ) : (
+        <ul className="tools-rule-list">
+          {rules.map((rule) => (
+            <li key={rule.id} className="tools-rule">
+              <span className={`badge tools-rule-effect tools-rule-${rule.effect}`}>
+                {RULE_EFFECT_LABEL[rule.effect]}
+              </span>
+              <span className="mono tools-rule-tool">{toolName(rule.toolId)}</span>
+              {rule.pattern ? <code className="tools-rule-pattern">{rule.pattern}</code> : null}
+              <span className="field-hint tools-rule-scope">
+                {rule.scope === 'global' ? 'everywhere' : `this ${rule.scope} only`}
+              </span>
+              <button
+                type="button"
+                className="btn-link"
+                onClick={() => void ruleDelete(rule.id)}
+                aria-label={`Remove rule for ${toolName(rule.toolId)}`}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="tools-rule-form">
+        <select
+          className="select"
+          value={effect}
+          aria-label="Rule effect"
+          onChange={(e) => setEffect(e.target.value as ToolRuleEffect)}
+        >
+          <option value="require_approval">Always ask about</option>
+          <option value="allow">Run without asking</option>
+        </select>
+        <select
+          className="select"
+          value={selected}
+          aria-label="Tool"
+          onChange={(e) => setToolId(e.target.value)}
+        >
+          {selectable.map((tool) => (
+            <option key={tool.id} value={tool.id}>
+              {tool.name}
+            </option>
+          ))}
+        </select>
+        <input
+          className="input"
+          value={pattern}
+          disabled={patternHint === null}
+          placeholder={patternHint ?? 'Every call of this tool'}
+          aria-label="Pattern"
+          onChange={(e) => setPattern(e.target.value)}
+        />
+        <button type="button" className="btn" disabled={!selected} onClick={submit}>
+          Add rule
+        </button>
+      </div>
+    </>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Built-in tool table
@@ -436,6 +557,8 @@ export default function ToolsTab(): ReactElement {
       ) : (
         <ToolTable tools={builtins} />
       )}
+
+      <ApprovalRulesSection />
 
       <h4 className="section-subhead">Shell execution</h4>
       <label className="field-checkbox">

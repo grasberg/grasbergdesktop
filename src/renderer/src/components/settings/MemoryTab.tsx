@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { Memory } from '@shared/types'
+import type { AgentProfile, Memory } from '@shared/types'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
@@ -110,6 +110,19 @@ export default function MemoryTab(): ReactElement {
     void load()
   }, [load])
 
+  // Agent-owned memories are labelled with their owner's name; a profile that
+  // was deleted leaves its memories listed under a neutral label rather than
+  // vanishing from the review list.
+  const [agents, setAgents] = useState<AgentProfile[]>([])
+  useEffect(() => {
+    void (async () => {
+      const result = await window.uld.agents.list()
+      if (result.ok) setAgents(result.data)
+    })()
+  }, [])
+  const agentName = (id: string): string =>
+    agents.find((agent) => agent.id === id)?.name ?? 'agent'
+
   if (!settings) {
     return <p className="field-hint">Loading settings…</p>
   }
@@ -184,7 +197,16 @@ export default function MemoryTab(): ReactElement {
           {memories.map((m) => (
             <li key={m.id} className="prompt-item card">
               <div className="prompt-item-main">
-                <strong className="prompt-item-title">{m.title}</strong>
+                <strong className="prompt-item-title">
+                  {m.title}
+                  {/* An agent-owned memory is private to that agent's runs and
+                      is never injected into an ordinary conversation. */}
+                  {m.agentId ? (
+                    <span className="badge" title="Only this agent profile sees this memory">
+                      {agentName(m.agentId)}
+                    </span>
+                  ) : null}
+                </strong>
                 <p className="prompt-item-body">{m.content}</p>
               </div>
               <div className="prompt-item-actions">

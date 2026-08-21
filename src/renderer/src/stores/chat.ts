@@ -274,13 +274,18 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       }
     },
 
-    async regenerate(messageId) {
+    async regenerate(messageId, opts) {
       const { conversation, streaming } = get()
       if (!conversation || streaming) return
       set({ error: null })
       try {
         const result = await unwrap(
-          window.uld.chat.regenerate({ conversationId: conversation.id, messageId })
+          window.uld.chat.regenerate({
+            conversationId: conversation.id,
+            messageId,
+            ...(opts?.overrides ? { overrides: opts.overrides } : {}),
+            ...(opts?.mode ? { mode: opts.mode } : {}),
+          })
         )
         beginReplacementStream(conversation.id, messageId, result)
       } catch (e) {

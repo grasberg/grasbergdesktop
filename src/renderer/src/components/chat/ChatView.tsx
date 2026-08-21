@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import type { KnowledgeBase, ProviderErrorCode } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
 import { usePromptsStore } from '@/stores/prompts'
+import { useUiStore } from '@/stores/ui'
+import { STARTER_PROMPTS } from '@/lib/starter-prompts'
 import MessageItem from './MessageItem'
 import Composer from './Composer'
 import './chat.css'
@@ -306,7 +308,20 @@ export default function ChatView(): ReactElement {
             <div className="chat-empty">
               <div className="chat-empty-title">Start the conversation</div>
               <div className="chat-empty-hint">
-                Type a message below — Enter sends, Shift+Enter adds a new line.
+                Type a message below — or pick a starter to see what Grasberg can do.
+              </div>
+              <div className="chat-starters">
+                {STARTER_PROMPTS[conversation.mode].map((starter) => (
+                  <button
+                    key={starter.id}
+                    type="button"
+                    className="card chat-starter"
+                    onClick={() => useUiStore.getState().seedComposer(starter.prompt)}
+                  >
+                    <strong>{starter.title}</strong>
+                    <span className="chat-starter-preview">{starter.prompt}</span>
+                  </button>
+                ))}
               </div>
             </div>
           )}

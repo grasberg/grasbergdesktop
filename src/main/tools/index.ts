@@ -104,6 +104,8 @@ export interface CreateToolSystemOptions {
    * push CHANNELS.scheduledTasksChanged to the renderer.
    */
   onScheduledTasksChanged?: () => void
+  /** Called after an approval answer persisted a new standing rule. */
+  onToolRulesChanged?: () => void
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
 }
@@ -138,6 +140,15 @@ export function createToolSystem(
     mcpClient: options.mcp ?? null,
     shellEnabled: options.shellEnabled,
     shellAllowlist: options.shellAllowlist,
+    // Standing approval rules live in the database, so "always allow" and
+    // "always ask" survive a restart (see tools/tool-rules.ts).
+    toolRules: {
+      list: () => db.toolRules.list(),
+      add: (input) => {
+        db.toolRules.create(input)
+        options.onToolRulesChanged?.()
+      },
+    },
     shellBackground: options.shellBackground ?? null,
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
@@ -184,6 +195,11 @@ export function createToolSystem(
       conversationProjectId: (conversationId) =>
         db.conversations.getById(conversationId)?.projectId ?? null,
       projectPath: (projectId) => db.code.projectGetById(projectId)?.path ?? null,
+    },
+    // schedule_task's optional `agent`: names an agent profile to own the task.
+    agents: {
+      getByName: (name) => db.agents.getByName(name),
+      listEnabledNames: () => db.agents.listEnabled().map((agent) => agent.name),
     },
     skills: {
       getEnabledByName: (name) => {

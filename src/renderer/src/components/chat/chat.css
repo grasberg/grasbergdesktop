@@ -293,6 +293,40 @@
   color: var(--text-muted);
 }
 
+/* "Regenerate with…" split-button menu in the message toolbar. */
+.msg-regen-menu {
+  position: relative;
+}
+
+/* Opens UPWARD: the message list sits scrolled to the bottom, so a downward
+   menu on the last message would render below the fold and look dead. */
+.msg-regen-popover {
+  top: auto;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: auto;
+}
+
+.msg-regen-keep {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.msg-regen-keep:hover {
+  color: var(--text);
+}
+
+/* Keep the toolbar visible while one of its popovers/confirms is open. */
+.msg-actions:has([aria-expanded='true']) {
+  opacity: 1;
+}
+
 .msg-action:hover:not(:disabled) {
   color: var(--text);
 }
@@ -1865,4 +1899,39 @@
 
 .msg-compare-use {
   width: 100%;
+}
+
+/* ------------------------------------------------------- starter prompts */
+
+.chat-starters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 240px));
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+  max-width: 780px;
+}
+
+.chat-starter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 13px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.chat-starter:hover {
+  border-color: var(--accent);
+}
+
+.chat-starter-preview {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }

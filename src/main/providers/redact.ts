@@ -3,6 +3,8 @@
  * an error message, log line or the renderer must pass through redactSecrets.
  */
 
+import { KEYLESS_API_KEY } from '@shared/schemas'
+
 const REDACTED = '[redacted]'
 
 /** Minimum length for a caller-provided secret to be worth replacing. */
@@ -35,8 +37,12 @@ const HAS_DIGIT = /[0-9]/
 export function redactKnownSecrets(text: string, secrets: string[] = []): string {
   let out = text
   // Longest secrets first so overlapping/nested values are fully removed.
+  // The keyless-loopback placeholder is not a secret — redacting it would
+  // mangle every error that mentions "localhost".
   const known = secrets
-    .filter((s) => typeof s === 'string' && s.length >= MIN_SECRET_LENGTH)
+    .filter(
+      (s) => typeof s === 'string' && s.length >= MIN_SECRET_LENGTH && s !== KEYLESS_API_KEY
+    )
     .sort((a, b) => b.length - a.length)
   for (const secret of known) {
     out = out.split(secret).join(REDACTED)

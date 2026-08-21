@@ -32,6 +32,7 @@ interface CheckpointLiteRow {
   id: string
   conversation_id: string
   label: string
+  message_seq: number
   created_at: number
   paths_json: string
 }
@@ -100,6 +101,8 @@ export interface AgentPlatformRepository {
   /** Listing without the file snapshots — restore reads them via checkpointGet. */
   checkpointsListLite(conversationId: string): CheckpointLite[]
   checkpointGet(id: string): Checkpoint | null
+  /** One assistant turn's checkpoints, newest first (the bulk-undo unit). */
+  checkpointsBySeq(conversationId: string, messageSeq: number): Checkpoint[]
 }
 
 export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatformRepository {
@@ -171,7 +174,7 @@ export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatfo
     checkpointsListLite(conversationId) {
       return driver
         .all<CheckpointLiteRow>(
-          `SELECT id, conversation_id, label, created_at,
+          `SELECT id, conversation_id, label, message_seq, created_at,
              CASE WHEN json_valid(files_json)
                THEN (SELECT json_group_array(json_extract(value, '$.relPath'))
                      FROM json_each(checkpoints.files_json))
@@ -184,10 +187,22 @@ export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatfo
           id: row.id,
           conversationId: row.conversation_id,
           label: row.label,
+          messageSeq: row.message_seq,
           createdAt: row.created_at,
           filePaths: parsePaths(row.paths_json),
         }))
     },
     checkpointGet,
+    checkpointsBySeq(conversationId, messageSeq) {
+      // rowid breaks same-millisecond created_at ties so overlapping edits to
+      // one file always unwind newest-first (revertTurn's ordering contract).
+      return driver
+        .all<CheckpointRow>(
+          `SELECT * FROM checkpoints WHERE conversation_id = ? AND message_seq = ?
+           ORDER BY created_at DESC, rowid DESC`,
+          [conversationId, messageSeq]
+        )
+        .map(toCheckpoint)
+    },
   }
 }

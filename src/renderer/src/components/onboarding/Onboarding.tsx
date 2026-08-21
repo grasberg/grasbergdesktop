@@ -10,6 +10,7 @@ import { useProvidersStore } from '@/stores/providers'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
 import { ProviderAddForm } from '../settings/ProviderAddForm'
+import LocalServerCard from '../settings/LocalServerCard'
 import appIcon from '@/assets/icon.png'
 import '../settings/settings.css'
 
@@ -230,6 +231,13 @@ export default function Onboarding() {
               Pick a provider family and paste an API key. You can add more providers any time in
               Settings.
             </p>
+            <LocalServerCard
+              showFallback
+              onCreated={(p) => {
+                setCreatedProviderId(p.id)
+                setStep(2)
+              }}
+            />
             <ProviderAddForm
               submitLabel="Create provider & continue"
               onCreated={(p) => {

@@ -818,6 +818,13 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
             'always-allowed tools. Tools requiring a fresh approval per call (git_write) ' +
             'cannot be pre-approved.',
         },
+        agent: {
+          type: 'string',
+          description:
+            'For "create": the name of an agent profile to run this task as. The agent ' +
+            'brings its own persona, model, toolset and its OWN memories, which persist ' +
+            'between runs — use it for a recurring job that should build up context.',
+        },
         id: {
           type: 'string',
           description: 'For "cancel": the task id (from "list" or a create result).',

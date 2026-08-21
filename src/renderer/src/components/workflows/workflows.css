@@ -9,7 +9,7 @@
 .workflows-body { display: grid; grid-template-columns: 180px 1fr 300px; flex: 1; min-height: 0; }
 .workflows-palette { border-right: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
 .workflows-palette-btn { justify-content: flex-start; }
-.workflows-canvas { min-width: 0; min-height: 0; background: var(--bg); }
+.workflows-canvas { position: relative; min-width: 0; min-height: 0; background: var(--bg); }
 .workflows-canvas .react-flow__attribution { display: none; }
 .workflows-inspector { border-left: 1px solid var(--border); padding: 12px; overflow-y: auto; background: var(--bg-panel); }
 .workflows-output {
@@ -32,4 +32,100 @@
 .workflows-run-output {
   margin-top: 4px; white-space: pre-wrap; word-break: break-word;
   max-height: 96px; overflow: hidden; color: var(--text);
+}
+
+/* --------------------------------------------------- template gallery */
+
+.workflows-gallery {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.workflows-gallery > * {
+  pointer-events: auto;
+}
+
+.workflows-gallery-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.workflows-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 260px));
+  justify-content: center;
+  gap: 10px;
+  max-width: 860px;
+}
+
+.workflows-gallery-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.workflows-gallery-card:hover {
+  border-color: var(--accent);
+}
+
+/* ------------------------------------------------------ dry run + checks */
+
+.workflows-dryrun-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+}
+
+.workflows-node-invalid {
+  outline: 2px solid color-mix(in srgb, var(--danger, #d33) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.workflows-issues {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workflows-issue {
+  font-size: 0.76rem;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.workflows-issue-error {
+  border-color: color-mix(in srgb, var(--danger, #d33) 50%, var(--border));
+  background: color-mix(in srgb, var(--danger, #d33) 8%, transparent);
+}
+
+.workflows-issue-warning {
+  border-color: color-mix(in srgb, var(--warning, #d90) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning, #d90) 7%, transparent);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useMemo, useState, type ReactElement } from 'react'
 import type { CheckpointLite, CodeChange } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useUiStore } from '@/stores/ui'
@@ -13,6 +13,9 @@ const TYPE_LABEL: Record<CodeChange['changeType'], string> = {
   edit: 'edit',
   delete: 'delete',
 }
+
+/** Stable empty list so the ownership guard doesn't churn memo identities. */
+const NO_CHECKPOINTS: CheckpointLite[] = []
 
 function ChangeItem({
   change,
@@ -169,6 +172,107 @@ function ChangeItem({
 }
 
 /**
+ * One assistant turn's checkpoints: the individual restore rows plus a
+ * "Restore all from this turn" bulk undo (with the same two-step confirm
+ * pattern the change items use).
+ */
+function CheckpointTurnGroup({
+  conversationId,
+  seq,
+  checkpoints,
+}: {
+  conversationId: string
+  seq: number
+  checkpoints: CheckpointLite[]
+}): ReactElement {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const files = [...new Set(checkpoints.flatMap((c) => c.filePaths))]
+
+  return (
+    <div className="code-change card code-change-past">
+      <div className="code-change-head">
+        <span className="code-change-path" title={files.join('\n')}>
+          Turn {seq}
+        </span>
+        <span className="badge">
+          {files.length} file{files.length === 1 ? '' : 's'}
+        </span>
+      </div>
+      {checkpoints.map((checkpoint) => (
+        <div className="code-change-head" key={checkpoint.id}>
+          <span className="code-change-path" title={checkpoint.filePaths.join('\n')}>
+            {checkpoint.label}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost code-change-btn"
+            disabled={busy}
+            onClick={() => void unwrap(window.uld.code.checkpointRestore(checkpoint.id))
+              .then(() => {
+                void useCodeStore.getState().loadChanges()
+                void useCodeStore.getState().loadCheckpoints(conversationId)
+              })
+              .catch((error: unknown) => useUiStore.getState().toast(
+                error instanceof Error ? error.message : 'Could not restore checkpoint.',
+                'error'
+              ))}
+          >
+            Restore
+          </button>
+        </div>
+      ))}
+      {checkpoints.length > 1 && !confirming && (
+        <div className="code-change-actions">
+          <button
+            type="button"
+            className="btn btn-ghost code-change-btn"
+            title="Revert every change applied during this turn (files changed since are skipped)"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
+            Restore all from this turn
+          </button>
+        </div>
+      )}
+      {checkpoints.length > 1 && confirming && (
+        <div className="code-change-confirm" role="alertdialog" aria-label="Confirm turn revert">
+          <span className="code-change-confirm-text">
+            Restore {files.length} file{files.length === 1 ? '' : 's'} (
+            {files.join(', ')}) to their pre-turn content?
+          </span>
+          <div className="code-change-actions">
+            <button
+              type="button"
+              className="btn btn-primary code-change-btn"
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false)
+                setBusy(true)
+                void useCodeStore
+                  .getState()
+                  .revertTurn(conversationId, seq)
+                  .finally(() => setBusy(false))
+              }}
+            >
+              {busy ? 'Reverting…' : 'Yes, restore all'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost code-change-btn"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * Right-hand pane: proposed changes first, applied/rejected collapsed under
  * "History", scoped to this conversation or the whole project ("All chats" —
  * the cross-conversation review queue), with the git commit bar at the
@@ -181,19 +285,29 @@ export default function ChangesPanel(): ReactElement {
   const setScope = useCodeStore((s) => s.setChangesScope)
   const loading = useCodeStore((s) => s.loadingChanges)
   const conversationId = useChatStore((s) => s.conversation?.id ?? null)
+  const storeCheckpoints = useCodeStore((s) => s.checkpoints)
+  const checkpointsConversationId = useCodeStore((s) => s.checkpointsConversationId)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [checkpoints, setCheckpoints] = useState<CheckpointLite[]>([])
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
 
-  useEffect(() => {
-    if (!conversationId) {
-      setCheckpoints([])
-      return
+  // Only trust checkpoints loaded for THIS conversation — the singleton code
+  // store can briefly hold another conversation's list around a switch.
+  const checkpoints =
+    conversationId !== null && checkpointsConversationId === conversationId
+      ? storeCheckpoints
+      : NO_CHECKPOINTS
+
+  // Group the conversation's checkpoints by the assistant turn that applied
+  // them (newest turn first — the list is already newest-checkpoint first).
+  const checkpointTurns = useMemo(() => {
+    const bySeq = new Map<number, CheckpointLite[]>()
+    for (const checkpoint of checkpoints) {
+      const group = bySeq.get(checkpoint.messageSeq)
+      if (group) group.push(checkpoint)
+      else bySeq.set(checkpoint.messageSeq, [checkpoint])
     }
-    void window.uld.code.checkpointsList(conversationId).then((result) => {
-      if (result.ok) setCheckpoints(result.data)
-    })
-  }, [conversationId, changes])
+    return [...bySeq.entries()]
+  }, [checkpoints])
 
   const all = scope === 'all'
   const scoped = all
@@ -233,7 +347,7 @@ export default function ChangesPanel(): ReactElement {
       </div>
 
       <div className="code-changes-scroll">
-        {checkpoints.length > 0 ? (
+        {checkpoints.length > 0 && conversationId ? (
           <div className="code-changes-history">
             <button
               type="button"
@@ -244,31 +358,13 @@ export default function ChangesPanel(): ReactElement {
               <span className={`code-change-chevron ${checkpointsOpen ? 'open' : ''}`} aria-hidden>▸</span>
               Checkpoints ({checkpoints.length})
             </button>
-            {checkpointsOpen ? checkpoints.map((checkpoint) => (
-              <div className="code-change card code-change-past" key={checkpoint.id}>
-                <div className="code-change-head">
-                  <span className="code-change-path" title={checkpoint.filePaths.join('\n')}>
-                    {checkpoint.label}
-                  </span>
-                  <span className="badge">
-                    {checkpoint.filePaths.length} file{checkpoint.filePaths.length === 1 ? '' : 's'}
-                  </span>
-                </div>
-                <div className="code-change-actions">
-                  <button
-                    type="button"
-                    className="btn btn-ghost code-change-btn"
-                    onClick={() => void unwrap(window.uld.code.checkpointRestore(checkpoint.id))
-                      .then(() => useCodeStore.getState().loadChanges())
-                      .catch((error: unknown) => useUiStore.getState().toast(
-                        error instanceof Error ? error.message : 'Could not restore checkpoint.',
-                        'error'
-                      ))}
-                  >
-                    Restore
-                  </button>
-                </div>
-              </div>
+            {checkpointsOpen ? checkpointTurns.map(([seq, group]) => (
+              <CheckpointTurnGroup
+                key={seq}
+                conversationId={conversationId}
+                seq={seq}
+                checkpoints={group}
+              />
             )) : null}
           </div>
         ) : null}

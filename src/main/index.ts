@@ -7,7 +7,17 @@
 import { mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserWindow, Menu, Tray, app, dialog, globalShortcut, session, shell } from 'electron'
+import {
+  BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
+  app,
+  dialog,
+  globalShortcut,
+  session,
+  shell,
+} from 'electron'
 import { CHANNELS } from '@shared/ipc'
 import { toRunSnippet } from '@shared/workflow-status'
 import { openDatabase, type AppDatabase } from './db/database'
@@ -38,6 +48,12 @@ import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
 import { ProjectHookService } from './services/project-hooks'
 import { ScheduledRunQueue } from './scheduling/run-queue'
+import {
+  DesktopNotifier,
+  approvalNotification,
+  resultNotification,
+} from './services/notify'
+import { collectInboxItems, countUnreviewed } from './services/inbox'
 
 const PRODUCTION_CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
@@ -64,6 +80,7 @@ let browserSession: BrowserSession | null = null
 let terminalService: TerminalService | null = null
 let arenaService: ArenaService | null = null
 let oauthManager: OpenAiOAuthManager | null = null
+let notifier: DesktopNotifier | null = null
 let cleanedUp = false
 let quitting = false
 
@@ -160,6 +177,8 @@ function summonWindow(): void {
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()
+  // The user is here now — stop the taskbar flashing.
+  notifier?.clearAttention()
 }
 
 /** Dev + packaged icon path; absent in packaged builds (exe icon applies). */
@@ -221,6 +240,11 @@ function createWindow(): BrowserWindow {
   })
 
   mainWindow = win
+  // Back in the app: stop the taskbar flashing and re-read the unread count.
+  win.on('focus', () => {
+    notifier?.clearAttention()
+    notifier?.refreshBadge()
+  })
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
     // The hidden browser-tool window is a BrowserWindow too, so leaving it open
@@ -430,6 +454,7 @@ function bootstrap(): void {
     // Work tasks without a folder get their own workspace on first write.
     ensureWorkspaceRoot: (conversationId) => workspaceRoots.ensure(conversationId),
     onScheduledTasksChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
+    onToolRulesChanged: () => broadcast(CHANNELS.toolRulesChanged, undefined),
     resolveSecretHeaders: (toolId) => {
       const out: Record<string, string> = {}
       for (const cipher of database.secrets.listCiphers('custom_tool', customToolDbId(toolId))) {
@@ -460,6 +485,34 @@ function bootstrap(): void {
     imageDir: attachmentsDir,
     browser,
     getAccessToken: (providerId, signal) => oauth.getAccessToken(providerId, signal),
+    // Headless runs (scheduled tasks, workflows) have no dialog to pop. With
+    // remote approvals configured they ask the paired chat instead of silently
+    // auto-declining. Resolved lazily: the bridge is constructed below.
+    remoteApproval: (input) => {
+      const bridge = imBridgeManager
+      if (!bridge) return Promise.resolve(null)
+      if (input.signal) {
+        input.signal.addEventListener(
+          'abort',
+          () => bridge.cancelApproval(input.requestKey, 'The run was stopped.'),
+          { once: true }
+        )
+      }
+      return bridge.requestApproval(input.requestKey, {
+        title: input.title,
+        detail: input.detail,
+      })
+    },
+    onBackgroundRunFinished: (info) => {
+      notifier?.notify(
+        resultNotification(
+          info.label,
+          info.status === 'done' ? 'ok' : 'error',
+          info.result || info.task,
+          () => undefined
+        )
+      )
+    },
   })
 
   const imBridge = new ImBridgeManager({
@@ -468,6 +521,63 @@ function bootstrap(): void {
     generateReply: (conversationId, text) => chatService!.generateHeadless(conversationId, text),
   })
   imBridgeManager = imBridge
+
+  // Desktop notifications + the unread badge. Every OS touchpoint is injected
+  // so the routing rules stay testable in plain Node (services/notify.ts).
+  const desktopNotifier = new DesktopNotifier({
+    enabled: () =>
+      process.env.SMOKE_TEST !== '1' &&
+      Notification.isSupported() &&
+      database.settings.get().desktopNotificationsEnabled,
+    windowFocused: () =>
+      mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.isFocused(),
+    show: ({ title, body, onClick }) => {
+      const notification = new Notification({ title, body })
+      notification.on('click', () => {
+        summonWindow()
+        onClick()
+      })
+      notification.show()
+    },
+    setBadge: (count) => {
+      // Dock/Unity badge where the platform has one; the tray tooltip carries
+      // the count everywhere else (Windows has no dock badge).
+      app.setBadgeCount(count)
+      tray?.setToolTip(count > 0 ? `Grasberg — ${count} to review` : 'Grasberg')
+    },
+    flash: (on) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) {
+        mainWindow.flashFrame(on)
+      }
+    },
+    unreadCount: () => countUnreviewed(collectInboxItems(database)),
+  })
+  notifier = desktopNotifier
+
+  // A pending approval is also pushed to the desktop and (when enabled) to the
+  // paired Telegram chat. Both channels stay live at once and the first answer
+  // wins — respond() ignores a requestId that already settled — so the user can
+  // allow from the dialog or from their phone, whichever they reach first.
+  broker.setHooks({
+    onRequest: (request) => {
+      desktopNotifier.notify(
+        approvalNotification(request.toolCall.name, request.note, () => undefined)
+      )
+      void imBridge
+        .requestApproval(request.requestId, {
+          title: `${request.toolCall.name} (${request.risk})`,
+          detail: request.note
+            ? `${request.note}\n\n${request.toolCall.arguments}`
+            : request.toolCall.arguments,
+        })
+        .then((answer) => {
+          // null = no channel / nobody answered: leave the in-app dialog alone.
+          if (answer === null) return
+          broker.respond(request.requestId, { approved: answer, scope: 'once' })
+        })
+    },
+    onSettled: (requestId) => imBridge.cancelApproval(requestId),
+  })
 
   // Saved-workflow execution (manual runs + the interval scheduler share it).
   const workflowRunner = createWorkflowRunner(
@@ -480,8 +590,17 @@ function bootstrap(): void {
     {
       // Keeps the Home overview / sidebar Scheduled section live the moment a
       // run lands (scheduled runs happen with no renderer request in flight).
-      onRunRecorded: (run, workflow) =>
-        broadcast(CHANNELS.workflowRunFinished, { run: toRunSnippet(run, workflow.name) }),
+      onRunRecorded: (run, workflow) => {
+        broadcast(CHANNELS.workflowRunFinished, { run: toRunSnippet(run, workflow.name) })
+        desktopNotifier.notify(
+          resultNotification(
+            workflow.name,
+            run.status === 'ok' ? 'ok' : 'error',
+            run.error ?? run.output ?? '',
+            () => undefined
+          )
+        )
+      },
     }
   )
   const scheduledRunQueue = new ScheduledRunQueue(2)
@@ -500,8 +619,28 @@ function bootstrap(): void {
         useTools: true,
         approvedToolIds: task.approvedToolIds,
         projectId: task.projectId,
+        // The task's owning agent profile: persona, model, toolset and its own
+        // memories, so a recurring job accumulates context between runs.
+        ...(task.agentId ? { agentId: task.agentId } : {}),
       }),
-    onChanged: (event) => broadcast(CHANNELS.scheduledTasksChanged, event),
+    onChanged: (event) => {
+      broadcast(CHANNELS.scheduledTasksChanged, event)
+      // Only a FINISHED run is worth a notification: the scheduler also emits
+      // an upsert when a task starts (lastStatus 'running').
+      if (
+        event.type === 'upsert' &&
+        (event.task.lastStatus === 'ok' || event.task.lastStatus === 'error')
+      ) {
+        desktopNotifier.notify(
+          resultNotification(
+            event.task.title,
+            event.task.lastStatus,
+            event.task.lastError ?? event.task.lastOutput,
+            () => undefined
+          )
+        )
+      }
+    },
     queue: scheduledRunQueue,
   })
   scheduledTaskScheduler = clockScheduler
@@ -537,6 +676,7 @@ function bootstrap(): void {
     keystore,
     toolSystem,
     approvalBroker: broker,
+    notifier: desktopNotifier,
     questionBroker: questions,
     mcpManager: mcp,
     imBridgeManager: imBridge,
@@ -565,6 +705,8 @@ function bootstrap(): void {
 
   createWindow()
   installQuickAccess()
+  // The tray exists now, so the badge/tooltip can show the startup count.
+  desktopNotifier.refreshBadge()
 
   app.on('activate', () => {
     // Counting windows would count the hidden browser-tool one (see mainWindow).

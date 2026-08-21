@@ -93,6 +93,8 @@ import type {
   ToolDefinition,
   ToolPermission,
   ToolPermissionDecision,
+  ToolRule,
+  ToolRuleInput,
   Workspace,
   WorkspaceItem,
   WorkspaceItemKind,
@@ -137,6 +139,7 @@ export const CHANNELS = {
   providersTest: 'providers:test',
   providersListModels: 'providers:listModels',
   providersPreviewModels: 'providers:previewModels',
+  providersDetectLocal: 'providers:detectLocal',
   providersOauthStart: 'providers:oauthStart',
   providersOauthLogout: 'providers:oauthLogout',
   providersOauthStatus: 'providers:oauthStatus',
@@ -212,6 +215,7 @@ export const CHANNELS = {
   codeOpenInIde: 'code:ide:open',
   codeCheckpointsList: 'code:checkpoints:list',
   codeCheckpointRestore: 'code:checkpoints:restore',
+  codeTurnRevert: 'code:turn:revert',
 
   // tools
   toolsList: 'tools:list',
@@ -224,6 +228,9 @@ export const CHANNELS = {
   toolsCustomCreate: 'tools:custom:create',
   toolsCustomUpdate: 'tools:custom:update',
   toolsCustomDelete: 'tools:custom:delete',
+  toolsRulesList: 'tools:rules:list',
+  toolsRuleCreate: 'tools:rules:create',
+  toolsRuleDelete: 'tools:rules:delete',
 
   // prompt library
   promptsList: 'prompts:list',
@@ -342,6 +349,8 @@ export const CHANNELS = {
    */
   workflowRunFinished: 'push:workflowRunFinished',
   scheduledTasksChanged: 'push:scheduledTasksChanged',
+  /** Standing approval rules changed (an approval answer created one). */
+  toolRulesChanged: 'push:toolRulesChanged',
   /** Sent with { arena: ArenaState } on every arena/candidate state change. */
   arenaChanged: 'push:arenaChanged',
   /** Sent with TerminalDataEvent for every terminal output chunk. */
@@ -464,6 +473,22 @@ export interface ChatRegenerateRequest {
   conversationId: string
   /** The assistant message to regenerate (it is replaced). */
   messageId: string
+  /**
+   * One-off provider/model for THIS regeneration only ("try again with…").
+   * The conversation's own model choice is untouched, and a MoA preset is
+   * bypassed — the user explicitly asked this one model to retry.
+   */
+  overrides?: {
+    providerId?: string
+    modelId?: string
+  }
+  /**
+   * 'replace' (default) deletes the answer and re-runs. 'second-opinion'
+   * keeps it: the message becomes a compare message with the original answer
+   * as block 0 and the override model streaming beside it as block 1
+   * (requires `overrides`; resolved via the existing pickCompareWinner).
+   */
+  mode?: 'replace' | 'second-opinion'
 }
 
 export interface ChatEditAndRerunRequest {
@@ -514,9 +539,32 @@ export interface CodeReadFileResult {
   sizeBytes: number
 }
 
+/** An OpenAI-compatible model server found running on localhost. */
+export interface LocalServerInfo {
+  kind: 'ollama' | 'lmstudio' | 'jan' | 'llamacpp'
+  /** Display name, e.g. "Ollama". */
+  name: string
+  /** Loopback base URL including /v1, e.g. "http://localhost:11434/v1". */
+  baseUrl: string
+  /** Model ids the server reported (may be empty). */
+  models: string[]
+}
+
 /** A code change joined with its conversation's title (the review queue). */
 export interface CodeChangeWithContext extends CodeChange {
   conversationTitle: string | null
+}
+
+export interface CodeTurnRevertRequest {
+  conversationId: string
+  /** The turn to undo: the message seq stamped on the turn's checkpoints. */
+  messageSeq: number
+}
+
+/** Bulk-undo outcome: reverts that succeeded plus honest per-file refusals. */
+export interface CodeTurnRevertResult {
+  reverted: CodeChange[]
+  skipped: { filePath: string; reason: string }[]
 }
 
 export interface PickFilesResult {
@@ -566,6 +614,8 @@ export interface UldApi {
     listModels(id: string): Promise<IpcResult<ModelInfo[]>>
     /** Live model list for a not-yet-created provider (Add form). Key not stored. */
     previewModels(input: PreviewModelsRequest): Promise<IpcResult<ModelInfo[]>>
+    /** Probes localhost for running model servers (Ollama, LM Studio, …). */
+    detectLocal(): Promise<IpcResult<LocalServerInfo[]>>
     /** Start the "Sign in with ChatGPT" OAuth flow (opens the system browser). */
     oauthStart(id: string): Promise<IpcResult<OAuthStatus>>
     /** Sign out / forget the stored OAuth session. */
@@ -684,6 +734,8 @@ export interface UldApi {
     /** Metadata only — the file snapshots stay in main until a restore. */
     checkpointsList(conversationId: string): Promise<IpcResult<CheckpointLite[]>>
     checkpointRestore(checkpointId: string): Promise<IpcResult<CodeChange>>
+    /** Reverts every change applied during one assistant turn (explicit click). */
+    revertTurn(req: CodeTurnRevertRequest): Promise<IpcResult<CodeTurnRevertResult>>
   }
   usage: {
     /** Local, estimate-only usage summary over the last `days` days (default 30). */
@@ -745,6 +797,12 @@ export interface UldApi {
     customCreate(input: CustomToolInput): Promise<IpcResult<CustomToolInfo[]>>
     customUpdate(toolId: string, patch: CustomToolPatch): Promise<IpcResult<CustomToolInfo[]>>
     customDelete(toolId: string): Promise<IpcResult<CustomToolInfo[]>>
+    /** Standing approval rules ("always allow" / "always ask"), newest first. */
+    rulesList(): Promise<IpcResult<ToolRule[]>>
+    ruleCreate(input: ToolRuleInput): Promise<IpcResult<ToolRule[]>>
+    ruleDelete(ruleId: string): Promise<IpcResult<ToolRule[]>>
+    /** Fires when an approval answer (or another window) changed the rules. */
+    onRulesChanged(cb: () => void): () => void
   }
   prompts: {
     list(): Promise<IpcResult<PromptTemplate[]>>
@@ -797,8 +855,12 @@ export interface UldApi {
     create(input: WorkflowInput): Promise<IpcResult<Workflow>>
     update(id: string, input: WorkflowInput): Promise<IpcResult<Workflow>>
     delete(id: string): Promise<IpcResult<void>>
-    /** Runs the given graph (the live editor state) and returns per-node output. */
-    run(graph: WorkflowGraph): Promise<IpcResult<WorkflowRunResult>>
+    /**
+     * Runs the given graph (the live editor state) and returns per-node
+     * output. `dryRun` stubs side effects: HTTP requests report what they
+     * would send, notifications are swallowed, AI routes to the economy model.
+     */
+    run(graph: WorkflowGraph, opts?: { dryRun?: boolean }): Promise<IpcResult<WorkflowRunResult>>
     /** Runs a SAVED workflow and records the execution in its run history. */
     runById(id: string): Promise<IpcResult<WorkflowRunResult>>
     /** Recent persisted executions, newest first. */

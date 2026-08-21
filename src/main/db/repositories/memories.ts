@@ -3,6 +3,12 @@
  * assistant persists across conversations via ```uld-memory blocks (parsed in
  * services/mode-artifacts.ts, saved by the memory completion hook). Users
  * review, edit and delete them in Settings → Memory.
+ *
+ * Since v32 a memory has an OWNER: `agentId` null means shared (every ordinary
+ * conversation sees it), a non-null one means the memory belongs to that agent
+ * profile and only its runs ever see it. Titles are unique per owner, so two
+ * agents can each keep a "last-seen" without overwriting one another — every
+ * title-keyed operation below is therefore owner-scoped.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -11,8 +17,14 @@ import type { SqliteDriver } from '../driver'
 import { updateById } from './util'
 
 export interface MemoriesRepository {
-  /** Ordered by updated_at DESC (most recently touched first). */
+  /** EVERY memory regardless of owner, updated_at DESC (Settings → Memory). */
   list(): Memory[]
+  /**
+   * One owner's view: the shared memories for `null`, or exactly that agent's
+   * memories for an id. Deliberately NOT shared+agent — an agent profile is a
+   * separate recollection, not an overlay on the global pile.
+   */
+  listForAgent(agentId: string | null): Memory[]
   getById(id: string): Memory | null
   create(input: MemoryInput): Memory
   update(id: string, patch: MemoryPatch): Memory | null
@@ -24,8 +36,11 @@ export interface MemoriesRepository {
    * by re-emitting a block under the same title.
    */
   upsertByTitle(input: MemoryInput): Memory
-  /** Case-insensitive delete by title; returns whether a row was removed. */
-  removeByTitle(title: string): boolean
+  /**
+   * Case-insensitive delete by title WITHIN one owner; returns whether a row
+   * was removed. An agent can only forget its own memories.
+   */
+  removeByTitle(title: string, agentId?: string | null): boolean
 }
 
 interface MemoryRow {
@@ -33,6 +48,7 @@ interface MemoryRow {
   title: string
   content: string
   source_conversation_id: string | null
+  agent_id: string | null
   created_at: number
   updated_at: number
 }
@@ -43,6 +59,7 @@ function toMemory(row: MemoryRow): Memory {
     title: row.title,
     content: row.content,
     sourceConversationId: row.source_conversation_id,
+    agentId: row.agent_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -61,20 +78,45 @@ export function createMemoriesRepository(driver: SqliteDriver): MemoriesReposito
       title: input.title,
       content: input.content,
       sourceConversationId: input.sourceConversationId ?? null,
+      agentId: input.agentId ?? null,
       createdAt: now,
       updatedAt: now,
     }
     driver.run(
-      `INSERT INTO memories (id, title, content, source_conversation_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [memory.id, memory.title, memory.content, memory.sourceConversationId, now, now]
+      `INSERT INTO memories
+         (id, title, content, source_conversation_id, agent_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        memory.id,
+        memory.title,
+        memory.content,
+        memory.sourceConversationId,
+        memory.agentId,
+        now,
+        now,
+      ]
     )
     return memory
   }
 
+  // A null owner has to be compared with `IS NULL`, not `= ?` — the latter is
+  // never true in SQL, which would silently give every shared memory its own
+  // duplicate on upsert.
+  const ownerClause = (agentId: string | null): string =>
+    agentId === null ? 'agent_id IS NULL' : 'agent_id = ?'
+  const ownerParams = (agentId: string | null): string[] => (agentId === null ? [] : [agentId])
+
   return {
     list() {
       const rows = driver.all<MemoryRow>('SELECT * FROM memories ORDER BY updated_at DESC')
+      return rows.map(toMemory)
+    },
+
+    listForAgent(agentId) {
+      const rows = driver.all<MemoryRow>(
+        `SELECT * FROM memories WHERE ${ownerClause(agentId)} ORDER BY updated_at DESC`,
+        ownerParams(agentId)
+      )
       return rows.map(toMemory)
     },
 
@@ -98,11 +140,12 @@ export function createMemoriesRepository(driver: SqliteDriver): MemoriesReposito
     },
 
     upsertByTitle(input) {
+      const agentId = input.agentId ?? null
       const row = driver.get<MemoryRow>(
         `SELECT * FROM memories
-         WHERE title = ? COLLATE NOCASE
+         WHERE title = ? COLLATE NOCASE AND ${ownerClause(agentId)}
          ORDER BY created_at ASC LIMIT 1`,
-        [input.title]
+        [input.title, ...ownerParams(agentId)]
       )
       if (!row) return create(input)
       driver.run(
@@ -113,8 +156,11 @@ export function createMemoriesRepository(driver: SqliteDriver): MemoriesReposito
       return getById(row.id) as Memory
     },
 
-    removeByTitle(title) {
-      const result = driver.run('DELETE FROM memories WHERE title = ? COLLATE NOCASE', [title])
+    removeByTitle(title, agentId = null) {
+      const result = driver.run(
+        `DELETE FROM memories WHERE title = ? COLLATE NOCASE AND ${ownerClause(agentId)}`,
+        [title, ...ownerParams(agentId)]
+      )
       return result.changes > 0
     },
   }

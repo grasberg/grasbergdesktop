@@ -76,6 +76,22 @@ export default function AppearanceTab() {
           ))}
         </div>
       </fieldset>
+
+      <h4 className="section-subhead">Notifications</h4>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings.desktopNotificationsEnabled}
+          onChange={(e) => void persist({ desktopNotificationsEnabled: e.target.checked })}
+        />
+        <span>
+          Notify me when a background result lands or a tool needs approval
+          <span className="field-hint">
+            Only while this window is in the background — nothing pops up over work you are
+            already looking at. The unread count on the tray icon is shown either way.
+          </span>
+        </span>
+      </label>
     </section>
   )
 }

@@ -1,13 +1,23 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
+} from 'react'
 import type { Attachment, Message, MoaReferenceOutput } from '@shared/types'
 import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
 import { useCopied } from '@/hooks/useCopied'
 import { formatBytes } from '@/lib/format'
 import { useChatStore } from '@/stores/chat'
+import { useCodeStore } from '@/stores/code'
 import { useProvidersStore } from '@/stores/providers'
 import GeneratedImage from './GeneratedImage'
 import Markdown from './Markdown'
+import ModelPickList from './ModelPickList'
 import ResearchProgress from './ResearchProgress'
 import ToolCallCard from './ToolCallCard'
 import './chat.css'
@@ -259,6 +269,200 @@ function CompareColumns({
   )
 }
 
+/**
+ * The chevron half of the Regenerate split button: opens the shared
+ * provider/model list and re-runs the answer with the picked model as a
+ * ONE-OFF override — the conversation's own model choice stays untouched.
+ */
+function RegenerateWithMenu({ message }: { message: Message }): ReactElement {
+  const regenerate = useChatStore((s) => s.regenerate)
+  const streaming = useChatStore((s) => s.streaming)
+  const [open, setOpen] = useState(false)
+  const [keepOriginal, setKeepOriginal] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+
+  // Second opinion converts the message into a compare message — only offer
+  // it for a plain completed answer (the backend guards the same way).
+  const canSecondOpinion =
+    message.status === 'complete' &&
+    !message.compare &&
+    (message.moaReferences?.length ?? 0) === 0 &&
+    message.content.trim().length > 0
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  // Move focus into the popover on open (like ModelSelector) so Escape and
+  // arrow-key navigation work immediately instead of landing on the trigger.
+  useEffect(() => {
+    if (!open) return
+    const pop = popRef.current
+    const first =
+      pop?.querySelector<HTMLElement>('input[type="checkbox"]') ??
+      pop?.querySelector<HTMLElement>('[data-nav-row]')
+    first?.focus()
+  }, [open])
+
+  const onPopoverKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      setOpen(false)
+      return
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    const pop = popRef.current
+    if (!pop) return
+    const rows = Array.from(pop.querySelectorAll<HTMLElement>('[data-nav-row]'))
+    if (rows.length === 0) return
+    e.preventDefault()
+    const current = rows.indexOf(document.activeElement as HTMLElement)
+    const delta = e.key === 'ArrowDown' ? 1 : -1
+    const next = current === -1 ? 0 : (current + delta + rows.length) % rows.length
+    rows[next]?.focus()
+  }
+
+  return (
+    <div className="msg-regen-menu" ref={rootRef}>
+      <button
+        type="button"
+        className="btn-icon msg-action"
+        aria-label="Regenerate with another model"
+        title="Regenerate with another model…"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={streaming !== null}
+        onClick={() => setOpen((o) => !o)}
+      >
+        ▾
+      </button>
+      {open && (
+        <div
+          className="ms-popover msg-regen-popover"
+          ref={popRef}
+          role="listbox"
+          aria-label="Regenerate with model"
+          onKeyDown={onPopoverKeyDown}
+        >
+          <div className="ms-group-header">
+            {keepOriginal && canSecondOpinion ? 'Second opinion from…' : 'Regenerate with…'}
+          </div>
+          {canSecondOpinion && (
+            <label className="msg-regen-keep">
+              <input
+                type="checkbox"
+                checked={keepOriginal}
+                onChange={(e) => setKeepOriginal(e.target.checked)}
+              />
+              Keep this answer — show the new one beside it
+            </label>
+          )}
+          <ModelPickList
+            onPick={(providerId, modelId) => {
+              setOpen(false)
+              void regenerate(message.id, {
+                overrides: { providerId, modelId },
+                ...(keepOriginal && canSecondOpinion
+                  ? { mode: 'second-opinion' as const }
+                  : {}),
+              })
+            }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Undo file changes (n files)" for an assistant turn that applied changes:
+ * shown when the conversation's checkpoints contain entries stamped with this
+ * message's seq. Two-step confirm; the store reports partial outcomes honestly.
+ */
+function UndoTurnAction({ message }: { message: Message }): ReactElement | null {
+  const conversationId = useChatStore((s) => s.conversation?.id ?? null)
+  const streaming = useChatStore((s) => s.streaming)
+  const checkpoints = useCodeStore((s) => s.checkpoints)
+  const checkpointsConversationId = useCodeStore((s) => s.checkpointsConversationId)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  // The code store is a singleton that outlives WorkView: after switching to
+  // a chat-mode conversation it can still hold ANOTHER conversation's
+  // checkpoints, and per-conversation seqs collide across conversations —
+  // only trust checkpoints that belong to the open conversation.
+  const ownCheckpoints =
+    conversationId !== null && checkpointsConversationId === conversationId
+
+  const files = useMemo(() => {
+    if (!ownCheckpoints) return []
+    const paths = new Set<string>()
+    for (const checkpoint of checkpoints) {
+      if (checkpoint.messageSeq === message.seq) {
+        for (const path of checkpoint.filePaths) paths.add(path)
+      }
+    }
+    return [...paths]
+  }, [ownCheckpoints, checkpoints, message.seq])
+
+  if (!conversationId || files.length === 0) return null
+
+  if (confirming) {
+    return (
+      <>
+        <button
+          type="button"
+          className="btn-icon msg-action"
+          aria-label={`Confirm: revert ${files.length} file${files.length === 1 ? '' : 's'}`}
+          title={`Yes, revert ${files.join(', ')}`}
+          disabled={busy}
+          onClick={() => {
+            setConfirming(false)
+            setBusy(true)
+            void useCodeStore
+              .getState()
+              .revertTurn(conversationId, message.seq)
+              .finally(() => setBusy(false))
+          }}
+        >
+          ✓
+        </button>
+        <button
+          type="button"
+          className="btn-icon msg-action"
+          aria-label="Cancel undo"
+          title="Cancel"
+          disabled={busy}
+          onClick={() => setConfirming(false)}
+        >
+          ✕
+        </button>
+      </>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn-icon msg-action"
+      aria-label={`Undo file changes (${files.length} file${files.length === 1 ? '' : 's'})`}
+      title={`Undo file changes (${files.length} file${files.length === 1 ? '' : 's'})`}
+      disabled={busy || streaming !== null}
+      onClick={() => setConfirming(true)}
+    >
+      ⎌
+    </button>
+  )
+}
+
 function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   const regenerate = useChatStore((s) => s.regenerate)
   const streaming = useChatStore((s) => s.streaming)
@@ -404,17 +608,21 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
             {copied ? '✓' : '⧉'}
           </button>
           {isLast && (
-            <button
-              type="button"
-              className="btn-icon msg-action"
-              aria-label="Regenerate response"
-              title="Regenerate"
-              onClick={() => void regenerate(message.id)}
-              disabled={streaming !== null}
-            >
-              ↺
-            </button>
+            <>
+              <button
+                type="button"
+                className="btn-icon msg-action"
+                aria-label="Regenerate response"
+                title="Regenerate"
+                onClick={() => void regenerate(message.id)}
+                disabled={streaming !== null}
+              >
+                ↺
+              </button>
+              <RegenerateWithMenu message={message} />
+            </>
           )}
+          <UndoTurnAction message={message} />
         </div>
       )}
     </div>

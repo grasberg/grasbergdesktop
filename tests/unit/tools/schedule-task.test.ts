@@ -230,6 +230,47 @@ describe('schedule_task execution', () => {
     expect(db.scheduledTasks.list()).toEqual([])
   })
 
+  it('binds the task to a named agent profile so its runs use that memory', async () => {
+    const { executor } = createToolSystem(db)
+    const ctx = { conversation, approval: vi.fn(async () => APPROVE) }
+    const agent = db.agents.create({ name: 'Watcher', systemPrompt: 'You watch.' })
+
+    const result = await executor.execute(
+      call({ action: 'create', title: 'T', prompt: 'P', recurrence: 'hourly', agent: 'watcher' }),
+      ctx
+    )
+    expect(result).toContain('created')
+    expect(db.scheduledTasks.list()[0].agentId).toBe(agent.id)
+  })
+
+  it('refuses an unknown or disabled agent and names the ones that exist', async () => {
+    const { executor } = createToolSystem(db)
+    const ctx = { conversation, approval: vi.fn(async () => APPROVE) }
+    db.agents.create({ name: 'Watcher', systemPrompt: 'You watch.' })
+    const retired = db.agents.create({ name: 'Retired', systemPrompt: 'x' })
+    db.agents.update(retired.id, { enabled: false })
+    const base = { action: 'create', title: 'T', prompt: 'P', recurrence: 'hourly' }
+
+    const unknown = await executor.execute(call({ ...base, agent: 'nope' }), ctx)
+    expect(unknown).toContain('no enabled agent profile')
+    expect(unknown).toContain('Watcher')
+
+    expect(await executor.execute(call({ ...base, agent: 'Retired' }), ctx)).toContain(
+      'no enabled agent profile'
+    )
+    expect(db.scheduledTasks.list()).toEqual([])
+  })
+
+  it('leaves the task on the default model when no agent is named', async () => {
+    const { executor } = createToolSystem(db)
+    const ctx = { conversation, approval: vi.fn(async () => APPROVE) }
+    await executor.execute(
+      call({ action: 'create', title: 'T', prompt: 'P', recurrence: 'hourly' }),
+      ctx
+    )
+    expect(db.scheduledTasks.list()[0].agentId).toBeNull()
+  })
+
   it('reports unavailable when built without the dep', async () => {
     const executor = new ToolExecutor({
       registry: createToolSystem(db).registry,

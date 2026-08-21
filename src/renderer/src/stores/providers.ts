@@ -81,6 +81,15 @@ export const useProvidersStore = create<ProvidersStoreState>()((set) => {
       return models
     },
 
+    async detectLocal() {
+      try {
+        return await unwrap(window.uld.providers.detectLocal())
+      } catch {
+        // Detection is best-effort decoration — never toast about it.
+        return []
+      }
+    },
+
     async oauthStart(id) {
       return oauthThenRefresh(window.uld.providers.oauthStart(id))
     },

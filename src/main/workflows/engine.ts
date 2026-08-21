@@ -42,6 +42,8 @@ export interface RunAgentOptions {
   json?: boolean
   /** Aborts in-flight provider calls when the run is cancelled/timed out. */
   signal?: AbortSignal
+  /** Route to the configured economy model (dry runs; explicit ids still win). */
+  economy?: boolean
 }
 
 export interface WorkflowEngineDeps {
@@ -61,6 +63,49 @@ export interface WorkflowEngineDeps {
 function str(config: Record<string, unknown>, key: string): string {
   const v = config[key]
   return typeof v === 'string' ? v : ''
+}
+
+/**
+ * Wraps live engine deps for a DRY RUN: http_request nodes report the exact
+ * request they would have sent (method, URL, body) without sending it,
+ * notify nodes swallow delivery (their output still shows the message text)
+ * but still fail when NO channel is configured — the exact error a real run
+ * would hit — and ai_agent generations run WITHOUT tools (a dry run must
+ * never fire always-allow tools' real side effects) and route to the economy
+ * model when one is configured. Everything else — interpolation, branching,
+ * ordering — runs exactly like a real execution.
+ */
+export function makeDryRunDeps(
+  real: WorkflowEngineDeps,
+  opts: {
+    /** Preflight for notify nodes (no sends); absent = assume configured. */
+    notifyConfigured?: () => boolean
+  } = {}
+): WorkflowEngineDeps {
+  const stubFetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const method = (init?.method ?? 'GET').toUpperCase()
+    const body =
+      typeof init?.body === 'string' && init.body.length > 0
+        ? `\nbody: ${init.body.slice(0, 2000)}`
+        : ''
+    return new Response(
+      `[dry run] Would send ${method} ${String(input)} — nothing was sent.${body}`,
+      { status: 200 }
+    )
+  }) as typeof fetch
+  return {
+    ...real,
+    runAgent: (prompt, providerId, modelId, agentOpts) =>
+      real.runAgent(prompt, providerId, modelId, { ...agentOpts, useTools: false, economy: true }),
+    notify: async () => {
+      if (opts.notifyConfigured && !opts.notifyConfigured()) {
+        throw new Error(
+          'No delivery channel available — connect the Telegram bridge or configure a webhook.'
+        )
+      }
+    },
+    fetchImpl: stubFetch,
+  }
 }
 
 /** Topological order of node ids, or null if the graph has a cycle. */

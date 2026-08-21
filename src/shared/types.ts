@@ -716,6 +716,30 @@ export interface AppSettings {
   projectHooks: ProjectHook[]
   /** Preferred editor command for the IDE bridge. */
   ideCommand: 'auto' | 'code' | 'cursor' | 'zed'
+  /**
+   * Home "Getting started"/Discover card: when the user hid it ("Hide tips"),
+   * the unix-ms timestamp; null keeps the card visible.
+   */
+  gettingStartedDismissedAt: number | null
+  /** Discover-card feature tips the user acknowledged ("Got it"). */
+  dismissedTipIds: string[]
+  /** Set once the command palette has been opened (Getting-started check). */
+  paletteEverOpened: boolean
+  /**
+   * OS notifications when a background result lands or a tool call needs
+   * approval. Only fire while the main window is unfocused — the app is not
+   * going to notify you about something you are looking at. On by default;
+   * the unread badge is independent of this toggle.
+   */
+  desktopNotificationsEnabled: boolean
+  /**
+   * Let a pending tool approval also be answered from the paired Telegram
+   * chat, so a background/scheduled run can ask instead of failing while the
+   * user is away. Off by default and security-sensitive: it moves an approval
+   * decision onto a phone. Requires the Telegram bridge to be connected AND
+   * paired; the pinned owner chat is the only one whose answer counts.
+   */
+  remoteApprovalsEnabled: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -760,6 +784,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoRoutingMaxCostUsd: null,
   projectHooks: [],
   ideCommand: 'auto',
+  gettingStartedDismissedAt: null,
+  dismissedTipIds: [],
+  paletteEverOpened: false,
+  desktopNotificationsEnabled: true,
+  remoteApprovalsEnabled: false,
 }
 
 /**
@@ -780,6 +809,9 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'telegramBridgeAllowedChatId',
   'telegramBridgePairingCode',
   'projectHooks',
+  // Importing this would move approval authority to whatever chat the backup's
+  // bridge settings point at.
+  'remoteApprovalsEnabled',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
@@ -1154,11 +1186,55 @@ export interface ToolApprovalRequest {
 }
 
 /**
- * How far an approval reaches. 'once' approves this single call;
- * 'conversation' also auto-approves future calls of the same tool in the same
- * conversation (in-memory only — resets on app restart).
+ * How far an approval reaches. 'once' approves this single call; the wider
+ * scopes persist a matching ToolRule (see below), so they survive a restart:
+ * 'conversation' auto-approves the tool's future calls in the same
+ * conversation, 'always' anywhere. Tools marked noStandingApproval only ever
+ * accept 'once'.
  */
-export type ToolApprovalScope = 'once' | 'conversation'
+export type ToolApprovalScope = 'once' | 'conversation' | 'always'
+
+/**
+ * A standing approval rule (migration v31, table `tool_rules`) — the
+ * persistent form of "always allow"/"always ask".
+ *
+ * Precedence is deliberate and non-negotiable: a matching 'require_approval'
+ * rule ALWAYS wins, over another rule, over a standing grant, and over an
+ * 'always_allow' tool permission. An 'allow' rule only ever removes a dialog,
+ * never adds capability — 'deny', plan mode, the read-only sandbox and
+ * noStandingApproval tools all still refuse first.
+ */
+export type ToolRuleEffect = 'allow' | 'require_approval'
+
+/** Where a rule applies. 'conversation'/'project' need a matching scopeId. */
+export type ToolRuleScope = 'global' | 'conversation' | 'project'
+
+export interface ToolRule {
+  id: string
+  /** Tool definition id ('run_shell_command', 'custom:<uuid>', 'mcp__…'). */
+  toolId: string
+  effect: ToolRuleEffect
+  scope: ToolRuleScope
+  /** Conversation/project id for the scoped kinds; null when global. */
+  scopeId: string | null
+  /**
+   * Optional narrowing of WHICH calls the rule covers, matched against the
+   * call's subject: the command for run_shell_command, the URL host for
+   * fetch_url/browser, the relative path for the file tools. Null = every
+   * call of the tool. A pattern on a tool with no subject is fail-safe: it
+   * never grants, and always stops.
+   */
+  pattern: string | null
+  createdAt: number
+}
+
+export interface ToolRuleInput {
+  toolId: string
+  effect: ToolRuleEffect
+  scope: ToolRuleScope
+  scopeId?: string | null
+  pattern?: string | null
+}
 
 /** The renderer's answer to a ToolApprovalRequest. */
 export interface ToolApprovalAnswer {
@@ -1463,6 +1539,11 @@ export interface ScheduledTask {
   approvedToolIds: string[]
   /** Working folder (code_projects row) for file/shell tools, or null. */
   projectId: string | null
+  /**
+   * Agent profile that owns this task: its persona, model, toolset and own
+   * memories are used for the run. Null = the default model, no persona.
+   */
+  agentId: string | null
   lastRunAt: number | null
   lastStatus: ScheduledTaskStatus
   lastOutput: string
@@ -1478,6 +1559,7 @@ export interface ScheduledTaskInput {
   runAt: number
   approvedToolIds?: string[]
   projectId?: string | null
+  agentId?: string | null
 }
 
 /** Incremental renderer update for the standalone scheduled-task list. */
@@ -1584,6 +1666,14 @@ export interface Memory {
   content: string
   /** Conversation the assistant saved it from; null when user-created/edited. */
   sourceConversationId: string | null
+  /**
+   * Agent profile that owns this memory (migration v32). Null = a shared
+   * memory every conversation sees. An agent-owned memory is visible ONLY to
+   * that agent's runs, so "Watcher" and "Release notes" keep separate
+   * recollections instead of one global pile. Titles are unique per owner,
+   * so both can hold a memory called "last-seen".
+   */
+  agentId: string | null
   createdAt: number
   updatedAt: number
 }
@@ -1592,6 +1682,7 @@ export interface MemoryInput {
   title: string
   content: string
   sourceConversationId?: string | null
+  agentId?: string | null
 }
 
 export interface MemoryPatch {
@@ -1646,6 +1737,8 @@ export interface CheckpointLite {
   id: string
   conversationId: string
   label: string
+  /** Turn grouping: seq of the assistant message whose apply created it. */
+  messageSeq: number
   createdAt: number
   filePaths: string[]
 }

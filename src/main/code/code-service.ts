@@ -27,7 +27,7 @@ import {
 } from 'node:fs'
 import { basename, isAbsolute, join, resolve, sep } from 'node:path'
 import type { CodeChange, CodeProject, FileTreeNode } from '@shared/types'
-import type { CodeChangeWithContext, CodeReadFileResult } from '@shared/ipc'
+import type { CodeChangeWithContext, CodeReadFileResult, CodeTurnRevertResult } from '@shared/ipc'
 import type { AppDatabase } from '../db/database'
 import { ProviderError } from '../providers/errors'
 import { diffLines, isProbablyBinary } from '../utils/diff'
@@ -390,6 +390,38 @@ export class CodeService {
     const checkpoint = this.db.agentPlatform.checkpointGet(checkpointId)
     if (!checkpoint || !checkpoint.changeId) throw invalid('Checkpoint not found.')
     return this.revertChange(checkpoint.changeId)
+  }
+
+  /**
+   * Reverts every change applied during one assistant turn (all checkpoints
+   * stamped with that message seq), newest first so overlapping edits to the
+   * same file unwind in order. Each revert keeps revertChange's own safety
+   * rules (applied-only, refuse-on-divergence); refusals are collected per
+   * file instead of failing the whole turn, so the caller can report
+   * "reverted 4 of 5" honestly.
+   */
+  revertTurn(conversationId: string, messageSeq: number): CodeTurnRevertResult {
+    const checkpoints = this.db.agentPlatform.checkpointsBySeq(conversationId, messageSeq)
+    if (checkpoints.length === 0) throw invalid('No checkpoints recorded for this turn.')
+
+    const reverted: CodeChange[] = []
+    const skipped: { filePath: string; reason: string }[] = []
+    const seenChangeIds = new Set<string>()
+    for (const checkpoint of checkpoints) {
+      const changeId = checkpoint.changeId
+      if (!changeId || seenChangeIds.has(changeId)) continue
+      seenChangeIds.add(changeId)
+      const filePath =
+        this.db.code.changeGet(changeId)?.filePath ??
+        checkpoint.files[0]?.relPath ??
+        checkpoint.label
+      try {
+        reverted.push(this.revertChange(changeId))
+      } catch (e) {
+        skipped.push({ filePath, reason: e instanceof Error ? e.message : 'Revert failed.' })
+      }
+    }
+    return { reverted, skipped }
   }
 
   /**

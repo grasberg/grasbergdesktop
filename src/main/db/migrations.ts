@@ -813,4 +813,43 @@ export const MIGRATIONS: Migration[] = [
        )`,
     ],
   },
+  {
+    version: 31,
+    name: 'tool-rules',
+    // Standing approval rules: the persistent form of "always allow" (and its
+    // counterweight, "always ask"). Replaces the in-memory conversation grant
+    // that used to die with the process. No FKs by design — scope_id points at
+    // a conversation or project that may be deleted, and a dangling rule is
+    // inert (it can only ever match calls made in that scope, which no longer
+    // happen). Nothing is enforced by a CHECK: effect/scope are validated by
+    // zod at the IPC boundary (the v13 pattern), so new values need no
+    // migration.
+    statements: [
+      `CREATE TABLE tool_rules (
+         id TEXT PRIMARY KEY,
+         tool_id TEXT NOT NULL,
+         effect TEXT NOT NULL,
+         scope TEXT NOT NULL,
+         scope_id TEXT,
+         pattern TEXT,
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_tool_rules_tool ON tool_rules(tool_id)`,
+    ],
+  },
+  {
+    version: 32,
+    name: 'agent-owned-memory',
+    // Agent profiles become owners rather than just personas: a memory can
+    // belong to one agent (invisible to everyone else), and a scheduled task
+    // can name the agent that runs it. Both columns are nullable with no FK —
+    // a deleted profile leaves its memories as shared ones and its tasks on
+    // the default model, which is strictly better than cascade-deleting the
+    // user's remembered facts.
+    statements: [
+      `ALTER TABLE memories ADD COLUMN agent_id TEXT`,
+      `ALTER TABLE scheduled_tasks ADD COLUMN agent_id TEXT`,
+      `CREATE INDEX idx_memories_agent ON memories(agent_id)`,
+    ],
+  },
 ]

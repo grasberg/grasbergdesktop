@@ -13,6 +13,7 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   view: 'home',
   workflowsInitialId: null,
   artifactPreview: null,
+  composerSeed: null,
   toasts: [],
 
   setResolvedTheme(t) {
@@ -45,6 +46,14 @@ export const useUiStore = create<UiStoreState>()((set) => ({
 
   openArtifactPreview(preview) {
     set({ artifactPreview: preview })
+  },
+
+  seedComposer(text) {
+    set({ composerSeed: text })
+  },
+
+  clearComposerSeed() {
+    set({ composerSeed: null })
   },
 
   toast(message, kind = 'info') {

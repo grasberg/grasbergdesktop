@@ -416,6 +416,124 @@ describe('CodeService.revertChange', () => {
   })
 })
 
+describe('CodeService.revertTurn', () => {
+  /** Bumps the conversation's lastSeq so subsequent applies stamp this turn. */
+  function insertAssistantMessage(conversationId: string, seq: number): void {
+    db.messages.insert({
+      id: `msg-${seq}`,
+      conversationId,
+      role: 'assistant',
+      content: `turn ${seq}`,
+      status: 'complete',
+      seq,
+      createdAt: Date.now(),
+    })
+  }
+
+  it('reverts every change applied during one turn', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    insertAssistantMessage(conversation.id, 1)
+    const changes = service.registerProposedChanges(conversation.id, assistantContent)
+    for (const change of changes) service.applyChange(change.id)
+
+    expect(db.agentPlatform.checkpointsListLite(conversation.id).map((c) => c.messageSeq)).toEqual([
+      1, 1, 1,
+    ])
+
+    const result = service.revertTurn(conversation.id, 1)
+    expect(result.reverted).toHaveLength(3)
+    expect(result.skipped).toEqual([])
+    expect(result.reverted.every((c) => c.status === 'reverted')).toBe(true)
+
+    // The disk is back to its pre-turn state.
+    expect(existsSync(join(projectDir, 'notes', 'new.txt'))).toBe(false)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nold line\n')
+    expect(readFileSync(join(projectDir, 'src', 'app.ts'), 'utf8')).toBe('console.log(1)\n')
+  })
+
+  it('collects per-file refusals instead of failing the whole turn', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    insertAssistantMessage(conversation.id, 1)
+    const changes = service.registerProposedChanges(conversation.id, assistantContent)
+    const create = changes.find((c) => c.changeType === 'create')!
+    const edit = changes.find((c) => c.changeType === 'edit')!
+    service.applyChange(create.id)
+    service.applyChange(edit.id)
+
+    // README diverges after the apply — its revert must refuse, not clobber.
+    writeFileSync(join(projectDir, 'README.md'), '# Readme\neven newer\n', 'utf8')
+
+    const result = service.revertTurn(conversation.id, 1)
+    expect(result.reverted.map((c) => c.filePath)).toEqual(['notes/new.txt'])
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]!.filePath).toBe('README.md')
+    expect(result.skipped[0]!.reason).toContain('changed on disk')
+    expect(existsSync(join(projectDir, 'notes', 'new.txt'))).toBe(false)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\neven newer\n')
+  })
+
+  it('skips changes already reverted individually', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    insertAssistantMessage(conversation.id, 1)
+    const edit = service
+      .registerProposedChanges(conversation.id, assistantContent)
+      .find((c) => c.changeType === 'edit')!
+    service.applyChange(edit.id)
+    service.revertChange(edit.id)
+
+    const result = service.revertTurn(conversation.id, 1)
+    expect(result.reverted).toEqual([])
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]!.reason).toContain('Only applied')
+  })
+
+  it('unwinds overlapping edits to ONE file newest-first, back to the original', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    insertAssistantMessage(conversation.id, 1)
+    // Two sequential applied edits to the same file within one turn (the
+    // agentic edit_file-twice pattern) — their checkpoints can share one
+    // created_at millisecond, so the unwind order must not depend on it.
+    const first = service.proposeChange(conversation.id, 'README.md', 'edit', '# Readme\nfirst\n')
+    service.applyChange(first.id)
+    const second = service.proposeChange(conversation.id, 'README.md', 'edit', '# Readme\nsecond\n')
+    service.applyChange(second.id)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nsecond\n')
+
+    const result = service.revertTurn(conversation.id, 1)
+    expect(result.skipped).toEqual([])
+    expect(result.reverted).toHaveLength(2)
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nold line\n')
+  })
+
+  it('only touches the requested turn', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    insertAssistantMessage(conversation.id, 1)
+    const changes = service.registerProposedChanges(conversation.id, assistantContent)
+    const edit = changes.find((c) => c.changeType === 'edit')!
+    const create = changes.find((c) => c.changeType === 'create')!
+    service.applyChange(edit.id) // turn 1
+
+    insertAssistantMessage(conversation.id, 2)
+    service.applyChange(create.id) // turn 2
+
+    const result = service.revertTurn(conversation.id, 2)
+    expect(result.reverted.map((c) => c.filePath)).toEqual(['notes/new.txt'])
+    // Turn 1's edit stays applied.
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nnew line\n')
+  })
+
+  it('throws when the turn has no checkpoints', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    expectInvalid(() => service.revertTurn(conversation.id, 7), 'No checkpoints')
+  })
+})
+
 describe('CodeService write jail (symlinks)', () => {
   /** Windows without the symlink privilege cannot create one — skip there. */
   function trySymlink(target: string, path: string, type: 'file' | 'junction'): boolean {

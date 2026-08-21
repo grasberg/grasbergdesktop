@@ -29,6 +29,7 @@ import type {
   WorkflowRunFinishedEvent,
   WorkflowRunListItem,
 } from '@shared/types'
+import type { LocalServerInfo } from '@shared/ipc'
 
 export interface SettingsStoreState {
   settings: AppSettings | null
@@ -51,6 +52,8 @@ export interface ProvidersStoreState {
   deleteKey(id: string): Promise<void>
   test(id: string): Promise<TestConnectionResult>
   loadModels(id: string): Promise<ModelInfo[]>
+  /** Probes localhost for running model servers (Ollama, LM Studio, …). */
+  detectLocal(): Promise<LocalServerInfo[]>
   /** Start "Sign in with ChatGPT" (opens the system browser); refreshes state. */
   oauthStart(id: string): Promise<OAuthStatus>
   /** Sign out of a provider's OAuth session; refreshes state. */
@@ -130,7 +133,19 @@ export interface ChatStoreState {
     }
   ): Promise<void>
   stop(): Promise<void>
-  regenerate(messageId: string): Promise<void>
+  /**
+   * Re-runs the last assistant message. `opts.overrides` regenerates with a
+   * one-off provider/model without changing the conversation's model choice;
+   * mode 'second-opinion' keeps the answer and streams the override model
+   * beside it as compare columns (resolved via pickCompareWinner).
+   */
+  regenerate(
+    messageId: string,
+    opts?: {
+      overrides?: { providerId?: string; modelId?: string }
+      mode?: 'replace' | 'second-opinion'
+    }
+  ): Promise<void>
   /** Promote one advisor of a compare run to the message's answer. */
   pickCompareWinner(messageId: string, referenceIndex: number): Promise<void>
   editAndRerun(messageId: string, newContent: string): Promise<void>
@@ -187,12 +202,19 @@ export interface UiStoreState {
   workflowsInitialId: string | null
   /** Non-null shows the sandboxed artifact preview drawer over the chat. */
   artifactPreview: ArtifactPreview | null
+  /**
+   * One-shot text for the composer (starter-prompt cards). The Composer
+   * consumes it into the draft, focuses the textarea, and clears it.
+   */
+  composerSeed: string | null
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
   setView(view: AppView): void
   openSettings(open: boolean): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
+  seedComposer(text: string): void
+  clearComposerSeed(): void
   /** Enters/leaves the Workflows surface ('workflows' ↔ 'conversation'). */
   openWorkflows(open: boolean, workflowId?: string | null): void
   openArtifactPreview(preview: ArtifactPreview | null): void

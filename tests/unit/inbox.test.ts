@@ -67,6 +67,7 @@ function scheduledTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     enabled: true,
     approvedToolIds: [],
     projectId: null,
+    agentId: null,
     lastRunAt: 5_000,
     lastStatus: 'ok',
     lastOutput: 'All quiet.',

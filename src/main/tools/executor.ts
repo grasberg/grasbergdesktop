@@ -39,8 +39,12 @@ import type {
   ScheduledTaskRecurrence,
   ToolApprovalAnswer,
   ToolApprovalRequest,
+  ToolApprovalScope,
   ToolCallRecord,
   ToolDefinition,
+  ToolRule,
+  ToolRuleEffect,
+  ToolRuleInput,
 } from '@shared/types'
 import type { CodeReadFileResult } from '@shared/ipc'
 import { encodeTaskList, type TaskListItem } from '@shared/tasklist'
@@ -51,6 +55,7 @@ import { customToolHeaders } from './custom-tools'
 import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
 import { commandMatchesAllowlist } from './shell-allowlist'
+import { matchToolRules } from './tool-rules'
 import { runGitQuery } from './git'
 import { formatLocalRunTime, resolveFirstRun } from '../scheduled-tasks/resolve'
 import type { ToolRegistry } from './registry'
@@ -103,6 +108,16 @@ export interface ToolExecutorDeps {
    * shellEnabled; a 'deny' permission still wins). See shell-allowlist.ts.
    */
   shellAllowlist?: () => string[]
+  /**
+   * Persistent standing approval rules ("always allow" / "always ask"), wired
+   * to db.toolRules. Absent => wider approval scopes degrade to an in-memory,
+   * session-only conversation grant. See tools/tool-rules.ts for the matching
+   * rules and their precedence.
+   */
+  toolRules?: {
+    list(): ToolRule[]
+    add(input: ToolRuleInput): void
+  } | null
   /**
    * Long-running shell jobs (run_shell_command background=true): start()
    * returns a model-readable note with the task id, pollable via task_output
@@ -199,6 +214,14 @@ export interface ToolExecutorDeps {
    * folder. Absent => the tools require an explicitly granted folder.
    */
   ensureWorkspaceRoot?: ((conversationId: string) => { projectId: string; root: string }) | null
+  /**
+   * Agent-profile lookup for schedule_task's optional `agent` argument (wired
+   * to db.agents). Absent => tasks always run on the default model.
+   */
+  agents?: {
+    getByName(name: string): { id: string; name: string; enabled: boolean } | null
+    listEnabledNames(): string[]
+  } | null
   /** Skill lookup for the 'use_skill' tool (wired to db.skills). */
   skills?: {
     getEnabledByName(name: string): { name: string; content: string } | null
@@ -995,9 +1018,10 @@ export function parseDuckDuckGoHtml(html: string, maxResults: number): WebSearch
 
 export class ToolExecutor {
   /**
-   * Tools the user approved with scope 'conversation':
-   * conversationId -> tool ids that skip the approval dialog there.
-   * In-memory only — grants die with the app session, never persisted.
+   * Fallback for deployments without a rules store (tests, embedded use):
+   * conversationId -> tool ids the user approved with scope 'conversation'.
+   * In production `deps.toolRules` persists these as rules instead, so the
+   * grant survives a restart; this map is then never written to.
    */
   private readonly conversationApprovals = new Map<string, Set<string>>()
 
@@ -1063,7 +1087,16 @@ export class ToolExecutor {
     if (decision === 'deny') {
       return `The user has denied the tool '${definition.name}' in this app's settings; it was not run.`
     }
-    if (decision === 'ask' && !this.approvalPreGranted(definition, args, ctx)) {
+    // Standing rules are consulted BEFORE the stored permission, because a
+    // matching 'require_approval' rule outranks even 'always_allow' — that is
+    // the whole point of being able to say "always ask me about this one".
+    const ruleEffect = this.matchRules(definition, args, ctx)
+    const mustAsk =
+      ruleEffect === 'require_approval' ||
+      (decision === 'ask' &&
+        ruleEffect !== 'allow' &&
+        !this.approvalPreGranted(definition, args, ctx))
+    if (mustAsk) {
       const note = await this.approvalNoteFor(definition, args, ctx)
       const answer = await ctx.approval({
         streamId: ctx.streamId ?? '',
@@ -1073,16 +1106,7 @@ export class ToolExecutor {
         ...(note ? { note } : {}),
       })
       if (!answer.approved) return USER_DECLINED_RESULT
-      // A conversation-wide grant can never cover a noStandingApproval tool:
-      // each of its calls is individually consequential (e.g. a git commit).
-      if (answer.scope === 'conversation' && definition.noStandingApproval !== true) {
-        let allowed = this.conversationApprovals.get(ctx.conversation.id)
-        if (!allowed) {
-          allowed = new Set()
-          this.conversationApprovals.set(ctx.conversation.id, allowed)
-        }
-        allowed.add(definition.id)
-      }
+      this.recordStandingApproval(definition, answer.scope, ctx)
     }
 
     return this.runTool(definition, args, ctx, toolCall)
@@ -1148,6 +1172,60 @@ export class ToolExecutor {
       // The dialog still shows the raw arguments.
     }
     return undefined
+  }
+
+  /**
+   * The user's persistent rules as they apply to THIS call. A rule can never
+   * wave through a noStandingApproval tool (each of its calls is individually
+   * consequential, e.g. a git commit) — but it can still force one to ask.
+   */
+  private matchRules(
+    definition: ToolDefinition,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): ToolRuleEffect | null {
+    const rules = this.deps.toolRules?.list() ?? []
+    if (rules.length === 0) return null
+    const effect = matchToolRules(rules, {
+      toolId: definition.id,
+      conversationId: ctx.conversation.id,
+      projectId: ctx.conversation.projectId,
+      args,
+    })
+    if (effect === 'allow' && definition.noStandingApproval === true) return null
+    return effect
+  }
+
+  /**
+   * Persists a wider-than-once approval as a rule, so "allow for this
+   * conversation" and "always allow" still mean that after a restart. Falls
+   * back to the in-memory map when no rules store is wired.
+   */
+  private recordStandingApproval(
+    definition: ToolDefinition,
+    scope: ToolApprovalScope,
+    ctx: ToolExecuteContext
+  ): void {
+    if (scope === 'once') return
+    // Same invariant as matchRules: never a standing grant for these.
+    if (definition.noStandingApproval === true) return
+    if (this.deps.toolRules) {
+      this.deps.toolRules.add({
+        toolId: definition.id,
+        effect: 'allow',
+        scope: scope === 'always' ? 'global' : 'conversation',
+        scopeId: scope === 'always' ? null : ctx.conversation.id,
+      })
+      return
+    }
+    // No store: only the session-scoped meaning can be honoured.
+    if (scope !== 'conversation') return
+    let allowed = this.conversationApprovals.get(ctx.conversation.id)
+    if (!allowed) {
+      allowed = new Set()
+      this.conversationApprovals.set(ctx.conversation.id, allowed)
+    }
+    allowed.add(definition.id)
   }
 
   /**
@@ -1743,7 +1821,9 @@ export class ToolExecutor {
         const recurrence = getString(args, 'recurrence') ?? ''
         const cadence = recurrence === 'once' ? 'one-time' : recurrence
         const grants = parseScheduleGrantArgs(args)
+        const agentName = getString(args, 'agent')?.trim() ?? ''
         let note = `Creates a ${cadence} scheduled task "${title}" that runs its prompt automatically`
+        if (agentName.length > 0) note += ` as the agent "${agentName}" (its own memories)`
         if (grants.length > 0) {
           note += ` — pre-approves for its runs: ${grants.join(', ')}`
           const projectId = this.deps.scheduledTasks?.conversationProjectId(ctx.conversation.id)
@@ -1845,6 +1925,23 @@ export class ToolExecutor {
       }
     }
 
+    // Optional owning agent profile: its persona, model, toolset and its own
+    // memories are used for every run, so a recurring task accumulates context
+    // instead of starting cold each time.
+    const agentName = getString(args, 'agent')?.trim() ?? ''
+    let agentId: string | null = null
+    if (agentName.length > 0) {
+      const agent = this.deps.agents?.getByName(agentName)
+      if (!agent || !agent.enabled) {
+        const known = this.deps.agents?.listEnabledNames() ?? []
+        return (
+          `Error: no enabled agent profile named '${agentName}'.` +
+          (known.length > 0 ? ` Available: ${known.join(', ')}.` : ' None are configured.')
+        )
+      }
+      agentId = agent.id
+    }
+
     const resolved = resolveFirstRun(
       {
         recurrence,
@@ -1862,6 +1959,7 @@ export class ToolExecutor {
       runAt: resolved.runAt,
       approvedToolIds: grantIds,
       projectId,
+      agentId,
     })
     const cadence = recurrence === 'once' ? 'It runs once' : `It repeats ${recurrence}`
     let grantNote = ''

@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type {
+  AgentProfile,
   AppSettings,
   Attachment,
   AuthMode,
@@ -65,15 +66,16 @@ import type {
 import { resolveAdapter as resolveAdapterForProvider } from '../providers/registry'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { decryptKey } from '../keys/keystore'
-import { buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
+import { buildMemorySection, buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
 import type { ToolExecuteContext } from '../tools/executor'
 import { USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
 import { redactSecrets } from '../providers/redact'
-import { isValidStorageKey } from '@shared/schemas'
+import { KEYLESS_API_KEY, isLoopbackBaseUrl, isValidStorageKey } from '@shared/schemas'
 import { formatSourcesSection } from '@shared/citations'
 import { storeGeneratedImage } from '../ipc/attachments'
 import { runCompletionHooks } from './completion-hooks'
+import { extractMemoryDirectives } from './mode-artifacts'
 import { findPricing } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
 import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
@@ -289,6 +291,32 @@ export interface ChatServiceOptions {
   imageDir?: string
   /** Embedded browser — a computer-use screenshot is injected after each round. */
   browser?: { consumePendingScreenshot(): string | null }
+  /**
+   * Asks the user to approve one tool call over a side channel (the paired
+   * Telegram chat). Headless runs have no dialog to pop, so without this they
+   * can only auto-decline; with it, a scheduled task can ask instead of
+   * failing. Resolves true/false, or null when no channel is available or
+   * nobody answered — null is always treated as a decline.
+   */
+  remoteApproval?: (input: {
+    requestKey: string
+    title: string
+    detail: string
+    /** Aborting the run cancels the outstanding remote question. */
+    signal?: AbortSignal
+  }) => Promise<boolean | null>
+  /**
+   * A background delegate run reached a terminal state. Wired to the desktop
+   * notifier so a result that landed while the user was elsewhere announces
+   * itself instead of waiting silently in the inbox.
+   */
+  onBackgroundRunFinished?: (info: {
+    label: string
+    status: 'done' | 'error'
+    task: string
+    result: string
+    conversationId: string
+  }) => void
 }
 
 interface ResolvedTarget {
@@ -616,15 +644,115 @@ export class ChatService {
         )
       }
       const settings = this.db.settings.get()
-      const moa = this.resolveMoaPreset(conversation, settings, undefined)
+      if (req.mode === 'second-opinion') {
+        return this.startSecondOpinion(conversation, settings, target, req.overrides)
+      }
+      // A one-off model override ("regenerate with X") bypasses the
+      // conversation's MoA preset — the user explicitly asked THIS model.
+      const hasOverride = !!(req.overrides?.providerId || req.overrides?.modelId)
+      const moa = hasOverride ? null : this.resolveMoaPreset(conversation, settings, undefined)
       const resolved = await this.resolveTarget(
         conversation,
         settings,
-        moa ? this.aggregatorOverrides(moa) : undefined
+        moa ? this.aggregatorOverrides(moa) : req.overrides
       )
       this.db.messages.deleteById(target.id)
       return this.start(conversation, settings, resolved, null, moa)
     })
+  }
+
+  /**
+   * "Second opinion": keeps the finished answer and streams a challenger
+   * model beside it, by converting the persisted message into a compare
+   * message — the original text becomes advisor block 0 (still pickable, so
+   * nothing is ever destroyed; a crash mid-run leaves both blocks pickable)
+   * and the challenger runs as block 1 through the same compare pipeline
+   * that pickCompareWinner and the compare-column rendering already handle.
+   */
+  private async startSecondOpinion(
+    conversation: Conversation,
+    settings: AppSettings,
+    target: Message,
+    overrides: ChatRegenerateRequest['overrides']
+  ): Promise<StartStreamResult> {
+    if (!overrides?.providerId || !overrides.modelId) {
+      throw new ProviderError('invalid_request', 'Pick a model to ask for a second opinion.')
+    }
+    if (target.compare || (target.moaReferences?.length ?? 0) > 0) {
+      throw new ProviderError('invalid_request', 'This answer is already a model comparison.')
+    }
+    if (target.status !== 'complete' || target.content.trim().length === 0) {
+      throw new ProviderError(
+        'invalid_request',
+        'Only a completed answer can get a second opinion.'
+      )
+    }
+    const originalProviderId =
+      target.providerId ?? conversation.providerId ?? settings.defaultProviderId
+    const originalModelId = target.modelId ?? conversation.modelId ?? settings.defaultModelId
+    if (!originalProviderId || !originalModelId) {
+      throw new ProviderError(
+        'invalid_request',
+        'The original answer has no model attribution to compare against.'
+      )
+    }
+    // Resolve the challenger BEFORE touching the message, so a bad pick
+    // (disabled provider, missing key) leaves the answer untouched.
+    const challenger = await this.resolveTarget(conversation, settings, overrides)
+
+    const original: MoaReferenceOutput = {
+      index: 0,
+      label: this.moaLabel({ providerId: originalProviderId, modelId: originalModelId }),
+      providerId: originalProviderId,
+      modelId: originalModelId,
+      status: 'done',
+      text: target.content,
+      ...(target.usage ? { usage: target.usage } : {}),
+    }
+    const challengerRef: MoaReferenceOutput = {
+      index: 1,
+      label: this.moaLabel({ providerId: overrides.providerId, modelId: overrides.modelId }),
+      providerId: overrides.providerId,
+      modelId: overrides.modelId,
+      status: 'running',
+      text: '',
+    }
+    const updated = this.db.messages.update(target.id, {
+      content: '',
+      status: 'streaming',
+      error: null,
+      moaReferences: [original, challengerRef],
+      compare: { pickedIndex: null },
+    })
+    if (!updated) {
+      throw new ProviderError('invalid_request', 'Message not found.')
+    }
+
+    const { streamId, controller, active } = this.registerStream(conversation.id)
+    const buildOpts: HistoryBuildOptions = {
+      settings,
+      promptOpts: {},
+      visionEnabled: modelSupportsVision(challenger.provider, challenger.modelId),
+    }
+    // Ephemeral single-advisor preset: the compare pipeline runs the
+    // challenger; the seeded block 0 rides along untouched.
+    const preset: MoaPreset = {
+      id: 'second-opinion',
+      name: 'Second opinion',
+      referenceModels: [{ providerId: overrides.providerId, modelId: overrides.modelId }],
+      aggregator: { providerId: challenger.provider.id, modelId: challenger.modelId },
+      enabled: true,
+    }
+    active.done = this.runCompareStream(
+      streamId,
+      conversation,
+      preset,
+      buildOpts,
+      updated,
+      controller,
+      [original]
+    )
+    return { streamId, userMessage: null, assistantMessage: updated }
   }
 
   async editAndRerun(req: ChatEditAndRerunRequest): Promise<StartStreamResult> {
@@ -856,13 +984,21 @@ export class ChatService {
       accountId = token.accountId
     } else {
       const encrypted = this.db.providers.getEncryptedKey(provider.id)
-      if (!encrypted) {
+      if (encrypted) {
+        apiKey = decryptKey(encrypted)
+      } else if (provider.type === 'openai-compatible' && isLoopbackBaseUrl(provider.baseUrl)) {
+        // SECURITY: keyless generation is allowed ONLY toward a loopback
+        // server (Ollama, LM Studio, Jan). adapterCtx sends this provider's
+        // own baseUrl, so the placeholder bearer can never travel to a
+        // remote endpoint. Keep in sync with providerUsable() in the
+        // renderer (src/renderer/src/lib/providers.ts).
+        apiKey = KEYLESS_API_KEY
+      } else {
         throw new ProviderError(
           'auth',
           `No API key configured for ${provider.label}. Add one in Settings.`
         )
       }
-      apiKey = decryptKey(encrypted)
     }
 
     const modelId = firstNonEmpty(
@@ -1176,8 +1312,10 @@ export class ChatService {
       ...(settings.memoryEnabled
         ? {
             memoryEnabled: true,
+            // Shared memories only: an agent profile's memories belong to
+            // that agent and never leak into an ordinary conversation.
             memories: this.db.memories
-              .list()
+              .listForAgent(null)
               .slice(0, MEMORY_MAX_INJECTED)
               .map((m) => ({ title: m.title, content: m.content })),
           }
@@ -1557,8 +1695,14 @@ export class ChatService {
       ...resolved.params,
       ...(opts?.json ? { responseFormat: 'json' as const } : {}),
     }
+    // An agent profile brings its OWN memories: what "Watcher" remembers is
+    // invisible to every other agent and to ordinary conversations, so a
+    // recurring job builds up its own context instead of one global pile.
+    const agentSystemPrompt = agent ? this.agentSystemPrompt(agent, settings) : null
     const messages: AdapterMessage[] = [
-      ...(agent ? [{ role: 'system', content: agent.systemPrompt } as AdapterMessage] : []),
+      ...(agentSystemPrompt
+        ? [{ role: 'system', content: agentSystemPrompt } as AdapterMessage]
+        : []),
       { role: 'user', content: prompt },
     ]
     const maxRounds =
@@ -1590,17 +1734,87 @@ export class ChatService {
             const def = enabledDefs.find(
               (d) => d.id === req.toolCall.name || d.name === req.toolCall.name
             )
-            return {
-              approved: !!def && approvedTools.has(def.id),
-              scope: 'once' as const,
+            if (def && approvedTools.has(def.id)) {
+              return { approved: true, scope: 'once' as const }
             }
+            // Nothing pre-approved covers this call. Rather than auto-declining
+            // (the old behaviour, which failed the run silently), ask the user
+            // on their phone if remote approvals are configured. A missing
+            // channel or an unanswered question still resolves to declined.
+            const approved = await this.askRemoteApproval(req, opts?.signal)
+            return { approved, scope: 'once' as const }
           },
           ...(opts?.signal ? { signal: opts.signal } : {}),
         })
         messages.push({ role: 'tool', content: out, toolCallId: call.id })
       }
     }
+    // Headless runs never create a message row, so the memory completion hook
+    // cannot see them — an agent's own memories are persisted here instead.
+    if (agent) this.persistAgentMemories(agent.id, final)
     return final
+  }
+
+  /**
+   * An agent profile's persona plus the memory section listing ITS memories
+   * (and the block format for writing new ones). Falls back to the bare
+   * persona when the user has memory switched off.
+   */
+  private agentSystemPrompt(agent: AgentProfile, settings: AppSettings): string {
+    if (!settings.memoryEnabled) return agent.systemPrompt
+    const memories = this.db.memories
+      .listForAgent(agent.id)
+      .slice(0, MEMORY_MAX_INJECTED)
+      .map((memory) => ({ title: memory.title, content: memory.content }))
+    return [agent.systemPrompt.trim(), buildMemorySection(memories)]
+      .filter((section) => section.length > 0)
+      .join('\n\n')
+  }
+
+  /** Persists an agent's own ```uld-memory directives (never throws). */
+  private persistAgentMemories(agentId: string, text: string): void {
+    if (text.trim().length === 0) return
+    try {
+      if (!this.db.settings.get().memoryEnabled) return
+      for (const directive of extractMemoryDirectives(text)) {
+        if (directive.action === 'forget') {
+          this.db.memories.removeByTitle(directive.title, agentId)
+        } else {
+          this.db.memories.upsertByTitle({
+            title: directive.title,
+            content: directive.content,
+            agentId,
+          })
+        }
+      }
+    } catch {
+      // A memory write must never fail the run that produced it.
+    }
+  }
+
+  /**
+   * Side-channel approval for a headless run: there is no window to pop a
+   * dialog in, so the question goes to the paired Telegram chat instead. Any
+   * outcome other than an explicit "allow" — no channel configured, a send
+   * failure, nobody tapping in time, the run being stopped — is a decline.
+   */
+  private async askRemoteApproval(
+    req: Omit<ToolApprovalRequest, 'requestId'>,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    const ask = this.options.remoteApproval
+    if (!ask || signal?.aborted) return false
+    try {
+      const answer = await ask({
+        requestKey: randomUUID(),
+        title: `${req.toolCall.name} wants to run in a background task`,
+        detail: req.note ? `${req.note}\n\n${req.toolCall.arguments}` : req.toolCall.arguments,
+        ...(signal ? { signal } : {}),
+      })
+      return answer === true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1826,6 +2040,7 @@ export class ChatService {
           record.status = 'done'
           record.result = result
           this.db.agentPlatform.runFinish(persisted.id, 'done', result)
+          this.announceBackgroundRun(profile?.name ?? agentName, 'done', task, result, ctx)
         }
       })
       .catch((e: unknown) => {
@@ -1833,9 +2048,31 @@ export class ChatService {
           record.status = 'error'
           record.result = toNormalizedError(e).message
           this.db.agentPlatform.runFinish(persisted.id, 'error', record.result)
+          this.announceBackgroundRun(profile?.name ?? agentName, 'error', task, record.result, ctx)
         }
       })
     return `Started background task '${taskId}'. Poll it with task_output({"taskId":"${taskId}"}); continue other work meanwhile.`
+  }
+
+  /** Tells the notifier a background run landed (never throws). */
+  private announceBackgroundRun(
+    label: string | null | undefined,
+    status: 'done' | 'error',
+    task: string,
+    result: string,
+    ctx: ToolExecuteContext
+  ): void {
+    try {
+      this.options.onBackgroundRunFinished?.({
+        label: label && label.trim().length > 0 ? label : 'Background agent',
+        status,
+        task,
+        result,
+        conversationId: ctx.conversation.id,
+      })
+    } catch {
+      // Notification delivery is a courtesy, never a failure path.
+    }
   }
 
   /**
@@ -2063,17 +2300,22 @@ export class ChatService {
     buildOpts: HistoryBuildOptions,
     placeholder: Message,
     controller: AbortController,
-    emit: (event: StreamEvent) => void
+    emit: (event: StreamEvent) => void,
+    /**
+     * Pre-seeded, already-final blocks (a second opinion's original answer).
+     * They occupy the first indexes; only preset.referenceModels actually run.
+     */
+    seed: MoaReferenceOutput[] = []
   ): Promise<MoaReferenceOutput[]> {
     const settings = buildOpts.settings
-    const references: MoaReferenceOutput[] = []
+    const references: MoaReferenceOutput[] = seed.map((ref) => ({ ...ref }))
 
     try {
       // moaLabel reads the providers table, so the blocks are built inside the
       // try — a DB failure here must not escape this never-throws method.
       for (const [index, ref] of preset.referenceModels.entries()) {
         references.push({
-          index,
+          index: seed.length + index,
           label: this.moaLabel(ref),
           providerId: ref.providerId,
           modelId: ref.modelId,
@@ -2095,7 +2337,7 @@ export class ChatService {
 
       await Promise.all(
         preset.referenceModels.map(async (modelRef, index) => {
-          const ref = references[index]
+          const ref = references[seed.length + index]
           let target: ResolvedTarget | undefined
           try {
             target = await this.resolveTarget(conversation, settings, {
@@ -2352,7 +2594,9 @@ export class ChatService {
     preset: MoaPreset,
     buildOpts: HistoryBuildOptions,
     placeholder: Message,
-    controller: AbortController
+    controller: AbortController,
+    /** Pre-seeded final blocks (second opinion) — see runAdvisors. */
+    seed: MoaReferenceOutput[] = []
   ): Promise<void> {
     const conversationId = conversation.id
     const emit = (event: StreamEvent): void => {
@@ -2369,7 +2613,8 @@ export class ChatService {
         buildOpts,
         placeholder,
         controller,
-        emit
+        emit,
+        seed
       )
       const aborted = controller.signal.aborted
       const anyDone = references.some((r) => r.status === 'done')

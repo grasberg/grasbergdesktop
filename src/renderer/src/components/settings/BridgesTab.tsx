@@ -7,7 +7,9 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import type { ImBridgeStatus } from '@shared/types'
 import { errorMessage } from '@/api/uld'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useConversationsStore } from '@/stores/conversations'
+import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 
 export default function BridgesTab(): ReactElement {
@@ -15,6 +17,8 @@ export default function BridgesTab(): ReactElement {
   const convLoaded = useConversationsStore((s) => s.loaded)
   const loadConversations = useConversationsStore((s) => s.load)
   const toast = useUiStore((s) => s.toast)
+  const settings = useSettingsStore((s) => s.settings)
+  const persist = usePersistSettings()
 
   const [status, setStatus] = useState<ImBridgeStatus | null>(null)
   const [token, setToken] = useState('')
@@ -134,6 +138,28 @@ export default function BridgesTab(): ReactElement {
       <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void saveTelegram()}>
         Save Telegram settings
       </button>
+
+      <h4 className="section-subhead">Approve from Telegram</h4>
+      <p className="field-hint">
+        Off by default. When on, a tool call waiting for approval is also sent to the paired chat
+        with Allow/Deny buttons — so a scheduled task can ask instead of failing while you are
+        away. Answer on either surface; the first one wins. Only the paired chat is obeyed, and an
+        unanswered request is declined after three minutes.
+      </p>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings?.remoteApprovalsEnabled ?? false}
+          disabled={!status?.telegramConnected}
+          onChange={(e) => void persist({ remoteApprovalsEnabled: e.target.checked })}
+        />
+        <span>
+          Let me approve tool calls from Telegram
+          {!status?.telegramConnected ? (
+            <span className="field-hint">Connect and pair the bridge above first.</span>
+          ) : null}
+        </span>
+      </label>
 
       <h4 className="section-subhead">Outbound webhook</h4>
       <p className="field-hint">

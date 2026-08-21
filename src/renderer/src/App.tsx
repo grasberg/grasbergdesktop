@@ -131,6 +131,11 @@ export default function App(): React.JSX.Element {
     const unsubscribeScheduledTasks = window.uld.scheduledTasks.onChanged((event) => {
       useScheduledTasksStore.getState().handleChanged(event)
     })
+    // Standing approval rules can be created from an approval dialog in this
+    // window or another one; keep Settings -> Tools in step either way.
+    const unsubscribeToolRules = window.uld.tools.onRulesChanged(() => {
+      void useToolsStore.getState().loadRules()
+    })
     return () => {
       unsubscribeStream()
       unsubscribeApproval()
@@ -140,6 +145,7 @@ export default function App(): React.JSX.Element {
       unsubscribeMcp()
       unsubscribeRuns()
       unsubscribeScheduledTasks()
+      unsubscribeToolRules()
     }
   }, [])
 

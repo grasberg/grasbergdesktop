@@ -114,16 +114,28 @@ export default function ToolApprovalDialog(): ReactElement | null {
             Deny
           </button>
           {tool?.noStandingApproval !== true && (
-            <button
-              type="button"
-              className="btn"
-              title="Also auto-approve future calls of this tool in this conversation (until the app restarts)"
-              onClick={() =>
-                void useToolsStore.getState().respond(pending.requestId, true, 'conversation')
-              }
-            >
-              Allow for this conversation
-            </button>
+            <>
+              <button
+                type="button"
+                className="btn"
+                title="Saves a rule: this tool runs without asking in this conversation. Remove it under Settings → Tools."
+                onClick={() =>
+                  void useToolsStore.getState().respond(pending.requestId, true, 'conversation')
+                }
+              >
+                Allow in this chat
+              </button>
+              <button
+                type="button"
+                className="btn"
+                title="Saves a rule: this tool runs without asking anywhere. Remove it under Settings → Tools."
+                onClick={() =>
+                  void useToolsStore.getState().respond(pending.requestId, true, 'always')
+                }
+              >
+                Always allow
+              </button>
+            </>
           )}
           <button
             type="button"

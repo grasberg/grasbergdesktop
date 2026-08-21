@@ -1,7 +1,7 @@
 /** Standalone clock-task popover beside Home (independent from Workflows). */
 
 import { useEffect, useRef, useState } from 'react'
-import type { CodeProject, ScheduledTaskRecurrence } from '@shared/types'
+import type { AgentProfile, CodeProject, ScheduledTaskRecurrence } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useNow } from '@/hooks/useNow'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
@@ -56,6 +56,8 @@ export default function ScheduledTasks(): React.JSX.Element {
   const [grantIds, setGrantIds] = useState<string[]>([])
   const [projectId, setProjectId] = useState('')
   const [projects, setProjects] = useState<CodeProject[]>([])
+  const [agentId, setAgentId] = useState('')
+  const [agents, setAgents] = useState<AgentProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -114,6 +116,7 @@ export default function ScheduledTasks(): React.JSX.Element {
     setRecurrence('once')
     setGrantIds([])
     setProjectId('')
+    setAgentId('')
   }
 
   const openCreateForm = (): void => {
@@ -126,6 +129,11 @@ export default function ScheduledTasks(): React.JSX.Element {
         setProjects(await unwrap(window.uld.code.projectsList()))
       } catch {
         setProjects([])
+      }
+      try {
+        setAgents((await unwrap(window.uld.agents.list())).filter((agent) => agent.enabled))
+      } catch {
+        setAgents([])
       }
     })()
   }
@@ -144,6 +152,7 @@ export default function ScheduledTasks(): React.JSX.Element {
       runAt: timestamp,
       approvedToolIds: grantIds,
       projectId: grantIds.length > 0 && projectId ? projectId : null,
+      agentId: agentId || null,
     })
     setSaving(false)
     if (created) {
@@ -228,6 +237,21 @@ export default function ScheduledTasks(): React.JSX.Element {
                   <option value="weekly">Weekly</option>
                 </select>
               </div>
+              {agents.length > 0 ? (
+                <select
+                  className="select"
+                  value={agentId}
+                  aria-label="Agent profile that runs this task"
+                  onChange={(event) => setAgentId(event.target.value)}
+                >
+                  <option value="">Default model, no persona</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      Run as {agent.name} (own memory)
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               {grantable.length > 0 ? (
                 <div className="sched-grants">
                   <span className="sched-grants-label">

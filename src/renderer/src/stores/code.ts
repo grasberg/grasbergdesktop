@@ -11,6 +11,7 @@
 import { create } from 'zustand'
 import type {
   Attachment,
+  CheckpointLite,
   CodeChange,
   CodeProject,
   Conversation,
@@ -37,6 +38,10 @@ export interface CodeStoreState {
   selectedPaths: string[]
   openFile: OpenFilePreview | null
   changes: CodeChange[]
+  /** Pre-edit checkpoints for the open conversation (turn-grouped undo). */
+  checkpoints: CheckpointLite[]
+  /** Conversation the checkpoints belong to (guards stale refreshes). */
+  checkpointsConversationId: string | null
   /** Project-wide changes with conversation titles (the "All chats" scope). */
   allChanges: CodeChangeWithContext[]
   /** Changes panel scope: this conversation only, or the whole project. */
@@ -59,10 +64,13 @@ export interface CodeStoreState {
   openFilePreview(relPath: string): Promise<void>
   closePreview(): void
   loadChanges(): Promise<void>
+  loadCheckpoints(conversationId: string): Promise<void>
   applyChange(id: string): Promise<void>
   rejectChange(id: string): Promise<void>
   /** Restores the pre-change content of an APPLIED change (in-app undo). */
   revertChange(id: string): Promise<void>
+  /** Reverts every change applied during one assistant turn (bulk undo). */
+  revertTurn(conversationId: string, messageSeq: number): Promise<void>
   /**
    * Reads every selected file and converts it to an Attachment.
    * Returns null when a read failed (already toasted).
@@ -87,6 +95,8 @@ export interface CodeStoreState {
 
 /** Guards loadForConversation against out-of-order responses. */
 let loadToken = 0
+/** Guards loadCheckpoints the same way — last request wins. */
+let checkpointsToken = 0
 
 function friendlyMessage(e: unknown, what: string): string {
   const n = toNormalized(e)
@@ -115,6 +125,8 @@ function ensureChangesSubscription(): void {
     void s.loadChanges()
     if (s.changesScope === 'all') void s.loadAllChanges()
     void s.loadGitStatus()
+    // Applies create checkpoints — keep the turn-undo affordances current.
+    if (s.checkpointsConversationId) void s.loadCheckpoints(s.checkpointsConversationId)
   })
 }
 
@@ -124,6 +136,8 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
   selectedPaths: [],
   openFile: null,
   changes: [],
+  checkpoints: [],
+  checkpointsConversationId: null,
   allChanges: [],
   changesScope: 'conversation',
   gitStatus: null,
@@ -151,7 +165,7 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
     const token = ++loadToken
     ensureChangesSubscription()
     if (!conversation.projectId) {
-      set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], allChanges: [], gitStatus: null })
+      set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], checkpoints: [], checkpointsConversationId: null, allChanges: [], gitStatus: null })
       return
     }
     try {
@@ -159,7 +173,7 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       if (token !== loadToken) return
       const project = projects.find((p) => p.id === conversation.projectId) ?? null
       if (!project) {
-        set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], allChanges: [], gitStatus: null })
+        set({ project: null, tree: null, selectedPaths: [], openFile: null, changes: [], checkpoints: [], checkpointsConversationId: null, allChanges: [], gitStatus: null })
         useUiStore
           .getState()
           .toast('The folder linked to this conversation is no longer registered.', 'info')
@@ -175,8 +189,17 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
         // Another project's review queue must never stay on screen: the panel
         // would apply/reject changes belonging to a project that isn't open.
         ...(samePath ? {} : { changes: [], allChanges: [], gitStatus: null }),
+        // Checkpoints are per conversation, not per project — always reload.
+        ...(get().checkpointsConversationId === conversation.id
+          ? {}
+          : { checkpoints: [], checkpointsConversationId: null }),
       })
-      await Promise.all([get().loadTree(), get().loadChanges(), get().loadGitStatus()])
+      await Promise.all([
+        get().loadTree(),
+        get().loadChanges(),
+        get().loadGitStatus(),
+        get().loadCheckpoints(conversation.id),
+      ])
       if (get().changesScope === 'all') void get().loadAllChanges()
     } catch (e) {
       if (token !== loadToken) return
@@ -249,6 +272,20 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
     }
   },
 
+  async loadCheckpoints(conversationId) {
+    const token = ++checkpointsToken
+    try {
+      const checkpoints = await unwrap(window.uld.code.checkpointsList(conversationId))
+      // Last request wins — a slow response for a previous conversation must
+      // never repopulate the store after a switch.
+      if (token === checkpointsToken) {
+        set({ checkpoints, checkpointsConversationId: conversationId })
+      }
+    } catch {
+      // Background refresh — checkpoint affordances just stay hidden.
+    }
+  },
+
   async applyChange(id) {
     set({ busyChangeId: id })
     try {
@@ -297,6 +334,31 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
     } catch (e) {
       set({ busyChangeId: null })
       toastError(e, 'Reverting the change')
+    }
+  },
+
+  async revertTurn(conversationId, messageSeq) {
+    try {
+      const result = await unwrap(window.uld.code.revertTurn({ conversationId, messageSeq }))
+      void get().loadChanges()
+      void get().loadTree()
+      void get().loadCheckpoints(conversationId)
+      const total = result.reverted.length + result.skipped.length
+      const toast = useUiStore.getState().toast
+      if (result.skipped.length === 0) {
+        toast(
+          `Reverted ${result.reverted.length} file${result.reverted.length === 1 ? '' : 's'}.`,
+          'success'
+        )
+      } else {
+        // Honest partial outcome: say what was skipped and why.
+        const detail = result.skipped
+          .map((s) => `${s.filePath} skipped: ${s.reason}`)
+          .join(' · ')
+        toast(`Reverted ${result.reverted.length} of ${total} — ${detail}`, 'info')
+      }
+    } catch (e) {
+      toastError(e, 'Undoing the turn')
     }
   },
 
@@ -504,6 +566,8 @@ export const useCodeStore = create<CodeStoreState>()((set, get) => ({
       selectedPaths: [],
       openFile: null,
       changes: [],
+      checkpoints: [],
+      checkpointsConversationId: null,
       allChanges: [],
       gitStatus: null,
       gitBusy: false,

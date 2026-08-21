@@ -5,13 +5,13 @@
  * conversation and the reply is sent back.
  */
 
-import { randomInt } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { Conversation, ImBridgeStatus, Message } from '@shared/types'
 import { isAllowedHttpUrl } from '@shared/schemas'
 import type { AppDatabase } from '../db/database'
 import type { Keystore } from '../keys/keystore'
 import { redactSecrets } from '../providers/redact'
-import { TelegramBridge } from './telegram'
+import { TelegramBridge, type TelegramCallbackResult } from './telegram'
 
 const TELEGRAM_OWNER = 'telegram'
 const TOKEN_NAME = 'token'
@@ -19,6 +19,14 @@ const WEBHOOK_TIMEOUT_MS = 10_000
 /** A six-digit code is guessable, so it is short-lived and cheap to burn. */
 const PAIRING_TTL_MS = 15 * 60_000
 const PAIRING_MAX_ATTEMPTS = 5
+/**
+ * How long a remote approval waits for a tap. Shorter than the in-app dialog's
+ * five minutes on purpose: a headless run holds a slot in the shared scheduled
+ * run queue while it waits, so an unanswered question must not park it there.
+ */
+const REMOTE_APPROVAL_TIMEOUT_MS = 3 * 60_000
+/** Chars of the proposed action shown in the chat message. */
+const REMOTE_APPROVAL_DETAIL_MAX = 900
 
 export interface ImBridgeManagerDeps {
   db: AppDatabase
@@ -43,6 +51,24 @@ export class ImBridgeManager {
    * can never outlive the session that issued the code.
    */
   private pairing: { expiresAt: number; attempts: number } | null = null
+  /**
+   * Remote approvals waiting for a tap, keyed by the opaque token that travels
+   * through Telegram in callback_data. `requestKey` is the caller's own handle
+   * (the approval requestId) so a request answered in the app can cancel its
+   * Telegram twin. Nothing about the decision is derivable from the token — it
+   * is a lookup key into this map and nothing else.
+   */
+  private readonly remoteApprovals = new Map<
+    string,
+    {
+      requestKey: string
+      chatId: number
+      messageId: number | null
+      summary: string
+      settle: (answer: boolean | null) => void
+    }
+  >()
+  private readonly remoteApprovalTokens = new Map<string, string>()
 
   constructor(private readonly deps: ImBridgeManagerDeps) {}
 
@@ -103,9 +129,122 @@ export class ImBridgeManager {
       token,
       fetchImpl: this.deps.fetchImpl,
       onMessage: (chatId, text) => this.handleInbound(chatId, text, conversationId),
+      onCallback: (chatId, data) => this.handleCallback(chatId, data),
       onError: () => undefined,
     })
     this.bridge.start()
+  }
+
+  /**
+   * True when a remote approval could actually be delivered right now: the
+   * feature is on, the bridge is connected, and a chat has paired. Checked
+   * before asking so a headless run fails fast instead of waiting three
+   * minutes for a message nobody will ever see.
+   */
+  remoteApprovalsAvailable(): boolean {
+    const settings = this.deps.db.settings.get()
+    return (
+      settings.remoteApprovalsEnabled &&
+      this.bridge !== null &&
+      settings.telegramBridgeAllowedChatId !== null
+    )
+  }
+
+  /**
+   * Asks the paired chat to approve one action, resolving true (allowed),
+   * false (denied) or null — no channel, send failed, or nobody tapped in
+   * time. Null is NOT an approval: every caller treats it as a decline.
+   *
+   * `requestKey` lets the caller cancel this when the same request is answered
+   * in the app instead (see cancelApproval).
+   */
+  async requestApproval(
+    requestKey: string,
+    input: { title: string; detail: string }
+  ): Promise<boolean | null> {
+    if (!this.remoteApprovalsAvailable()) return null
+    const bridge = this.bridge
+    const chatId = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    if (!bridge || chatId === null) return null
+    // Already asking about this request — never double-send.
+    if (this.remoteApprovalTokens.has(requestKey)) return null
+
+    const token = randomUUID().replace(/-/g, '').slice(0, 24)
+    // The detail can be raw tool arguments, so it goes through redaction before
+    // it leaves the machine: a Telegram message is stored on their servers and
+    // in a phone's notification history long after the app forgot the call.
+    const summary =
+      `Approval needed\n\n${input.title}\n\n` +
+      redactSecrets(input.detail).slice(0, REMOTE_APPROVAL_DETAIL_MAX)
+    const messageId = await bridge.sendButtons(chatId, summary, [
+      { text: 'Allow once', data: `a:${token}` },
+      { text: 'Deny', data: `d:${token}` },
+    ])
+    if (messageId === null) return null
+
+    return new Promise<boolean | null>((resolve) => {
+      const timer = setTimeout(() => this.settleRemote(token, null), REMOTE_APPROVAL_TIMEOUT_MS)
+      timer.unref?.()
+      this.remoteApprovals.set(token, {
+        requestKey,
+        chatId,
+        messageId,
+        summary,
+        settle: (answer) => {
+          clearTimeout(timer)
+          resolve(answer)
+        },
+      })
+      this.remoteApprovalTokens.set(requestKey, token)
+    })
+  }
+
+  /** Resolves one pending remote approval and forgets its token. */
+  private settleRemote(token: string, answer: boolean | null): boolean {
+    const pending = this.remoteApprovals.get(token)
+    if (!pending) return false
+    this.remoteApprovals.delete(token)
+    this.remoteApprovalTokens.delete(pending.requestKey)
+    pending.settle(answer)
+    return true
+  }
+
+  /**
+   * The request was answered elsewhere (the desktop dialog, a timeout, app
+   * quit): stop waiting and rewrite the Telegram message so its buttons can no
+   * longer be tapped into a stale decision.
+   */
+  cancelApproval(requestKey: string, reason = 'Handled in the app.'): void {
+    const token = this.remoteApprovalTokens.get(requestKey)
+    if (!token) return
+    const pending = this.remoteApprovals.get(token)
+    if (!this.settleRemote(token, null)) return
+    if (pending && pending.messageId !== null) {
+      void this.bridge?.editMessage(pending.chatId, pending.messageId, `${pending.summary}\n\n${reason}`)
+    }
+  }
+
+  /**
+   * One inline-button tap. ONLY the pinned owner chat is obeyed — the same
+   * authorization the message path uses, applied again here because a button
+   * payload arrives from whoever tapped it, not from whoever it was sent to.
+   */
+  private async handleCallback(chatId: number, data: string): Promise<TelegramCallbackResult> {
+    const allowed = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    if (allowed === null || allowed !== chatId) {
+      return { toast: 'This assistant only responds to its owner.' }
+    }
+    const approved = data.startsWith('a:')
+    if (!approved && !data.startsWith('d:')) return { toast: 'Unrecognized action.' }
+    const token = data.slice(2)
+    const pending = this.remoteApprovals.get(token)
+    if (!pending || !this.settleRemote(token, approved)) {
+      return { toast: 'That request is no longer waiting.' }
+    }
+    return {
+      toast: approved ? 'Allowed.' : 'Denied.',
+      replaceText: `${pending.summary}\n\n${approved ? 'Allowed' : 'Denied'} from Telegram.`,
+    }
   }
 
   /**
@@ -202,6 +341,11 @@ export class ImBridgeManager {
   }
 
   stopAll(): void {
+    // Anything still waiting on a tap resolves to null (= declined), so no
+    // executor promise can outlive the session waiting on a phone.
+    for (const token of [...this.remoteApprovals.keys()]) {
+      this.settleRemote(token, null)
+    }
     this.stopBridge()
   }
 
@@ -263,6 +407,24 @@ export class ImBridgeManager {
    * Throws unless at least one channel ACTUALLY accepted the message, so a
    * notify node fails visibly instead of silently dropping its payload.
    */
+  /**
+   * Whether notify() has at least one configured channel — the same checks as
+   * notify() but with NO sends. Used by workflow dry runs so a missing
+   * delivery channel fails the dry run exactly like it would fail a real run.
+   */
+  notifyConfigured(): boolean {
+    const settings = this.deps.db.settings.get()
+    if (this.bridge && settings.telegramBridgeAllowedChatId !== null) return true
+    const url = settings.outboundWebhookUrl
+    if (!url) return false
+    try {
+      new URL(url)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async notify(text: string): Promise<void> {
     let configured = false
     let delivered = false

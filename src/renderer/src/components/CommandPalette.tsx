@@ -56,6 +56,11 @@ export default function CommandPalette() {
       setQuery('')
       setActive(0)
       if (!convLoaded) void loadConversations()
+      // Getting-started checklist: remember that the palette has been used.
+      const settings = useSettingsStore.getState().settings
+      if (settings && !settings.paletteEverOpened) {
+        void updateSettings({ paletteEverOpened: true }).catch(() => undefined)
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -141,6 +146,19 @@ export default function CommandPalette() {
           close()
           openSettings(false)
           void updateSettings({ onboardingCompleted: false }).catch(catchToast)
+        },
+      },
+      {
+        id: 'act-discover',
+        section: 'Actions',
+        label: 'What can Grasberg do?',
+        hint: 'Re-show the Getting started checklist and feature tips on Home',
+        run: () => {
+          close()
+          void updateSettings({ gettingStartedDismissedAt: null, dismissedTipIds: [] }).catch(
+            catchToast
+          )
+          setView('home')
         },
       },
     ]

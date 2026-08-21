@@ -64,6 +64,33 @@ export function isAllowedBaseUrl(value: string): boolean {
   return false
 }
 
+/**
+ * Placeholder bearer for keyless loopback providers (Ollama, LM Studio, Jan
+ * accept any token). Not a secret: redaction must NOT treat it as one, or
+ * every error mentioning "localhost" gets mangled.
+ */
+export const KEYLESS_API_KEY = 'local'
+
+/**
+ * True when a base URL targets a loopback host (localhost / 127.0.0.1 / ::1).
+ * SECURITY: this is the gate for keyless providers — local model servers
+ * (Ollama, LM Studio, Jan) accept any bearer, so a provider without a stored
+ * key is usable ONLY when this returns true for its own base URL; the
+ * placeholder bearer must never be sent to a remote endpoint.
+ */
+export function isLoopbackBaseUrl(value: string | null | undefined): boolean {
+  if (!value) return false
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  const host = url.hostname.replace(/^\[|\]$/g, '')
+  return LOCAL_HTTP_HOSTS.has(host)
+}
+
 export const providerConfigInputSchema = z.object({
   type: providerTypeSchema,
   label: z.string().trim().min(1).max(100),
@@ -183,6 +210,21 @@ export const memoryPatchSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     content: z.string().max(10_000).optional(),
+  })
+  .strict()
+
+/**
+ * A standing approval rule from the renderer. Note what is NOT here: the rule
+ * can only ever say "ask" or "skip the dialog" — there is no shape in which it
+ * grants a capability, so a malformed rule costs at most one extra prompt.
+ */
+export const toolRuleInputSchema = z
+  .object({
+    toolId: z.string().trim().min(1).max(200),
+    effect: z.enum(['allow', 'require_approval']),
+    scope: z.enum(['global', 'conversation', 'project']),
+    scopeId: z.string().trim().min(1).max(200).nullable().optional(),
+    pattern: z.string().trim().max(500).nullable().optional(),
   })
   .strict()
 
@@ -392,6 +434,11 @@ export const settingsPatchSchema = z
       enabled: z.boolean(),
     }).strict()).max(100),
     ideCommand: z.enum(['auto', 'code', 'cursor', 'zed']),
+    gettingStartedDismissedAt: z.number().nullable(),
+    dismissedTipIds: z.array(z.string().min(1).max(100)).max(200),
+    paletteEverOpened: z.boolean(),
+    desktopNotificationsEnabled: z.boolean(),
+    remoteApprovalsEnabled: z.boolean(),
   })
   .partial()
   .strict()

@@ -33,6 +33,7 @@ import { createInboxRepository, type InboxRepository } from './repositories/inbo
 import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
+import { createToolRulesRepository, type ToolRulesRepository } from './repositories/tool-rules'
 import {
   createScheduledTasksRepository,
   type ScheduledTasksRepository,
@@ -61,6 +62,8 @@ export interface AppDatabase {
   memories: MemoriesRepository
   skills: SkillsRepository
   agents: AgentsRepository
+  /** Standing approval rules ("always allow" / "always ask"). */
+  toolRules: ToolRulesRepository
   knowledge: KnowledgeRepository
   agentPlatform: AgentPlatformRepository
   scheduledTasks: ScheduledTasksRepository
@@ -207,6 +210,7 @@ export function openDatabase(filePath: string): AppDatabase {
     memories: createMemoriesRepository(driver),
     skills: createSkillsRepository(driver),
     agents: createAgentsRepository(driver),
+    toolRules: createToolRulesRepository(driver),
     knowledge: createKnowledgeRepository(driver),
     agentPlatform: createAgentPlatformRepository(driver),
     scheduledTasks: createScheduledTasksRepository(driver),

@@ -15,6 +15,7 @@ interface ScheduledTaskRow {
   enabled: number
   approved_tools_json: string
   project_id: string | null
+  agent_id: string | null
   last_run_at: number | null
   last_status: ScheduledTaskStatus
   last_output: string
@@ -42,6 +43,7 @@ function toTask(row: ScheduledTaskRow): ScheduledTask {
     enabled: row.enabled === 1,
     approvedToolIds: parseApprovedTools(row.approved_tools_json),
     projectId: row.project_id,
+    agentId: row.agent_id,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
     lastOutput: row.last_output,
@@ -103,6 +105,7 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
         enabled: true,
         approvedToolIds: input.approvedToolIds ?? [],
         projectId: input.projectId ?? null,
+        agentId: input.agentId ?? null,
         lastRunAt: null,
         lastStatus: 'idle',
         lastOutput: '',
@@ -113,8 +116,9 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
       driver.run(
         `INSERT INTO scheduled_tasks
            (id, title, prompt, recurrence, next_run_at, enabled, approved_tools_json,
-            project_id, last_run_at, last_status, last_output, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL, 'idle', '', NULL, ?, ?)`,
+            project_id, agent_id, last_run_at, last_status, last_output, last_error,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, 'idle', '', NULL, ?, ?)`,
         [
           task.id,
           task.title,
@@ -123,6 +127,7 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
           task.nextRunAt,
           JSON.stringify(task.approvedToolIds),
           task.projectId,
+          task.agentId,
           now,
           now,
         ]

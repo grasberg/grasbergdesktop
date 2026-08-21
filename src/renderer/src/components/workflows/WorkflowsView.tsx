@@ -30,6 +30,8 @@ import type {
   WorkflowRun,
   WorkflowRunResult,
 } from '@shared/types'
+import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from '@shared/workflow-templates'
+import { validateWorkflowGraph } from '@shared/workflow-validate'
 import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
 import './workflows.css'
@@ -118,6 +120,7 @@ export default function WorkflowsView(): ReactElement {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [result, setResult] = useState<WorkflowRunResult | null>(null)
   const [running, setRunning] = useState(false)
+  const [wasDryRun, setWasDryRun] = useState(false)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [everyMinutes, setEveryMinutes] = useState('60')
   const [runs, setRuns] = useState<WorkflowRun[]>([])
@@ -176,6 +179,23 @@ export default function WorkflowsView(): ReactElement {
       },
     ])
   }
+
+  // Pre-run sanity checks: badge offending nodes and list problems in the
+  // inspector. Warnings still run; errors will fail or do nothing.
+  const issues = useMemo(() => validateWorkflowGraph(toGraph(nodes, edges)), [nodes, edges])
+  const errorNodeIds = useMemo(
+    () => new Set(issues.filter((i) => i.level === 'error' && i.nodeId).map((i) => i.nodeId)),
+    [issues]
+  )
+  const displayNodes = useMemo(
+    () =>
+      nodes.map((n) =>
+        errorNodeIds.has(n.id) ? { ...n, className: 'workflows-node-invalid' } : n
+      ),
+    [nodes, errorNodeIds]
+  )
+  const labelOfNode = (id: string | null): string =>
+    id ? (nodes.find((n) => n.id === id)?.data.label ?? id) : ''
 
   const selected = useMemo(() => nodes.find((n) => n.id === selectedId) ?? null, [nodes, selectedId])
   const selectedEdge = useMemo(
@@ -252,7 +272,17 @@ export default function WorkflowsView(): ReactElement {
     if (res.ok) {
       setWorkflowId(res.data.id)
       await loadList()
-      if (!silent) toast('Workflow saved.', 'success')
+      if (!silent) {
+        const errorCount = issues.filter((i) => i.level === 'error').length
+        if (errorCount > 0) {
+          toast(
+            `Saved — ${errorCount} problem${errorCount === 1 ? '' : 's'} may stop it from running (see Checks).`,
+            'info'
+          )
+        } else {
+          toast('Workflow saved.', 'success')
+        }
+      }
       return res.data.id
     }
     toast(res.error.message, 'error')
@@ -272,6 +302,7 @@ export default function WorkflowsView(): ReactElement {
   const run = async (): Promise<void> => {
     setRunning(true)
     setResult(null)
+    setWasDryRun(false)
     try {
       const id = await save(true)
       if (!id) return
@@ -282,6 +313,39 @@ export default function WorkflowsView(): ReactElement {
     } finally {
       setRunning(false)
     }
+  }
+
+  /**
+   * Dry run: executes the LIVE editor graph with side effects stubbed — HTTP
+   * nodes report what they would send, notifications are swallowed, AI routes
+   * to the economy model. Nothing is saved and no run history is recorded.
+   */
+  const dryRun = async (): Promise<void> => {
+    setRunning(true)
+    setResult(null)
+    setWasDryRun(true)
+    try {
+      const res = await window.uld.workflows.run(toGraph(nodes, edges), { dryRun: true })
+      if (res.ok) {
+        setResult(res.data)
+        toast('Dry run finished — nothing was sent or delivered.', 'success')
+      } else {
+        toast(res.error.message, 'error')
+      }
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  /** Loads a starter template into the (empty) canvas, ready to edit. */
+  const applyTemplate = (template: WorkflowTemplate): void => {
+    const flow = toFlow(template.graph)
+    setNodes(flow.nodes)
+    setEdges(flow.edges)
+    if (!workflowId) setName(template.name)
+    setSelectedId(null)
+    setSelectedEdgeId(null)
+    setResult(null)
   }
 
   return (
@@ -321,8 +385,17 @@ export default function WorkflowsView(): ReactElement {
               Delete
             </button>
           ) : null}
+          <button
+            type="button"
+            className="btn"
+            disabled={running || nodes.length === 0}
+            title="Test the workflow without side effects: HTTP requests report what they would send, notifications are swallowed, AI uses the economy model."
+            onClick={() => void dryRun()}
+          >
+            {running && wasDryRun ? 'Dry running…' : 'Dry run'}
+          </button>
           <button type="button" className="btn btn-primary" disabled={running} onClick={() => void run()}>
-            {running ? 'Running…' : 'Save & run'}
+            {running && !wasDryRun ? 'Running…' : 'Save & run'}
           </button>
         </div>
       </header>
@@ -346,8 +419,32 @@ export default function WorkflowsView(): ReactElement {
         </aside>
 
         <div className="workflows-canvas">
+          {nodes.length === 0 && (
+            <div className="workflows-gallery" role="region" aria-label="Workflow templates">
+              <h3 className="workflows-gallery-title">Start from a template</h3>
+              <div className="workflows-gallery-grid">
+                {WORKFLOW_TEMPLATES.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    className="card workflows-gallery-card"
+                    onClick={() => applyTemplate(template)}
+                  >
+                    <strong>{template.name}</strong>
+                    <span className="field-hint">{template.description}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="field-hint">…or add nodes from the palette to start blank.</p>
+            </div>
+          )}
+          {wasDryRun && result && (
+            <div className="workflows-dryrun-badge" role="status">
+              Dry run — HTTP &amp; notifications were stubbed, nothing was sent.
+            </div>
+          )}
           <ReactFlow
-            nodes={nodes}
+            nodes={displayNodes}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -541,6 +638,19 @@ export default function WorkflowsView(): ReactElement {
             </>
           ) : (
             <>
+              {issues.length > 0 && (
+                <>
+                  <h4 className="section-subhead">Checks</h4>
+                  <ul className="workflows-issues">
+                    {issues.map((issue, i) => (
+                      <li key={i} className={`workflows-issue workflows-issue-${issue.level}`}>
+                        {issue.nodeId ? <strong>{labelOfNode(issue.nodeId)}: </strong> : null}
+                        {issue.message}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
               <h4 className="section-subhead">Schedule</h4>
               <div className="field">
                 <Switch

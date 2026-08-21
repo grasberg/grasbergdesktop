@@ -10,11 +10,24 @@
  * resolves everything still pending to the fallback — the promise can never
  * dangle. Whenever a request settles for ANY reason the broker broadcasts
  * `settledChannel` with the requestId so the renderer can dismiss its dialog.
+ *
+ * setHooks() adds SIDE channels next to the renderer: a desktop notification,
+ * and (for approvals) the paired Telegram chat, so a request can be answered
+ * from a phone. Side channels never replace the renderer broadcast — both are
+ * live at once and the first answer wins, since respond() ignores a requestId
+ * that already settled.
  */
 
 import { randomUUID } from 'node:crypto'
 
 type Broadcast = (channel: string, payload: unknown) => void
+
+export interface BrokerHooks<TRequest, TAnswer> {
+  /** A request is now pending. Fired after the renderer broadcast succeeded. */
+  onRequest?: (request: TRequest) => void
+  /** The request settled (answered, timed out, aborted, torn down). */
+  onSettled?: (requestId: string, answer: TAnswer) => void
+}
 
 interface PendingEntry<TAnswer> {
   resolve: (answer: TAnswer) => void
@@ -26,6 +39,7 @@ interface PendingEntry<TAnswer> {
 
 export abstract class PendingBroker<TRequest extends { requestId: string }, TAnswer> {
   private readonly pending = new Map<string, PendingEntry<TAnswer>>()
+  private hooks: BrokerHooks<TRequest, TAnswer> = {}
 
   protected constructor(
     private readonly requestChannel: string,
@@ -72,8 +86,26 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
       } catch {
         // No reachable window — settle to the fallback right away.
         this.settle(requestId, this.fallback)
+        return
+      }
+      // Side channels only for a request that is genuinely still pending.
+      if (this.pending.has(requestId)) {
+        try {
+          this.hooks.onRequest?.(fullRequest)
+        } catch {
+          // A failing side channel must not strand the request.
+        }
       }
     })
+  }
+
+  /**
+   * Attaches the side channels (notifications, remote approval). Wired once at
+   * startup, after the services they call have been constructed. A hook that
+   * throws is swallowed: a broken notifier must never strand a tool call.
+   */
+  setHooks(hooks: BrokerHooks<TRequest, TAnswer>): void {
+    this.hooks = hooks
   }
 
   /** Renderer's answer. Unknown (expired/duplicate) requestIds are ignored. */
@@ -107,6 +139,11 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
       entry.broadcast(this.settledChannel, requestId)
     } catch {
       // No reachable window — nothing to dismiss.
+    }
+    try {
+      this.hooks.onSettled?.(requestId, answer)
+    } catch {
+      // Side-channel cleanup is best-effort.
     }
   }
 }

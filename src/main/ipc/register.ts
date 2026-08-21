@@ -33,7 +33,7 @@ import type {
   WorkflowsOverview,
   WorkspaceItemKind,
 } from '@shared/types'
-import { runWorkflow } from '../workflows/engine'
+import { makeDryRunDeps, runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
 import type { WorkspaceRootService } from '../code/workspace-root'
 import type { TerminalService } from '../terminal/terminal-service'
@@ -48,7 +48,7 @@ import {
 } from '@shared/catalog'
 import { presetMeta } from '@shared/presets'
 import { buildUsageSummary } from '@shared/usage-summary'
-import { buildInboxItems } from '../services/inbox'
+import { collectInboxItems } from '../services/inbox'
 import type { ArenaService } from '../services/arena'
 import { modeModelDefault } from '@shared/mode-models'
 import {
@@ -66,6 +66,7 @@ import {
   promptTemplatePatchSchema,
   skillInputSchema,
   skillPatchSchema,
+  toolRuleInputSchema,
   providerConfigInputSchema,
   providerConfigPatchSchema,
   providerTypeSchema,
@@ -73,8 +74,11 @@ import {
   researchDepthSchema,
   settingsPatchSchema,
   workflowGraphSchema,
+  KEYLESS_API_KEY,
+  isLoopbackBaseUrl,
   isValidStorageKey,
 } from '@shared/schemas'
+import { detectLocalServers } from '../providers/local-detect'
 import type { AppDatabase } from '../db/database'
 import type { ChatService } from '../services/chat-service'
 import type { CodeService } from '../code/code-service'
@@ -109,6 +113,8 @@ export interface RegisterIpcDeps {
   keystore: Keystore
   toolSystem: ToolSystem
   approvalBroker: ApprovalBroker
+  /** Desktop notifier — the unread badge follows inbox review state. */
+  notifier?: { refreshBadge(): void }
   questionBroker: QuestionBroker
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
@@ -303,6 +309,13 @@ const chatPickCompareWinnerSchema = z.object({
 const chatRegenerateSchema = z.object({
   conversationId: z.string().min(1),
   messageId: z.string().min(1),
+  overrides: z
+    .object({
+      providerId: z.string().optional(),
+      modelId: z.string().optional(),
+    })
+    .optional(),
+  mode: z.enum(['replace', 'second-opinion']).optional(),
 })
 
 const chatEditAndRerunSchema = z.object({
@@ -645,10 +658,17 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       accountId = token.accountId
     } else {
       const encrypted = db.providers.getEncryptedKey(provider.id)
-      if (!encrypted) {
+      if (encrypted) {
+        apiKey = keystore.decryptKey(encrypted)
+      } else if (provider.type === 'openai-compatible' && isLoopbackBaseUrl(provider.baseUrl)) {
+        // Loopback servers (Ollama, LM Studio, …) accept any bearer; the
+        // placeholder only ever travels to this provider's own local URL.
+        // Same gate as chat-service key resolution + renderer providerUsable,
+        // so Test never asserts a provider works that chat would refuse.
+        apiKey = KEYLESS_API_KEY
+      } else {
         throw new ProviderError('auth', 'Add an API key first.', { retryable: false })
       }
-      apiKey = keystore.decryptKey(encrypted)
     }
     // Probe with the provider's chosen model (falling back to the catalog
     // default) so Test validates the model the user actually configured.
@@ -683,8 +703,23 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       })
     }
     const encrypted = db.providers.getEncryptedKey(provider.id)
-    // No key yet: fall back to the catalog (family or preset) instead of failing.
-    if (!encrypted) return modelCatalog.knownModels
+    // No key yet: loopback servers (Ollama, LM Studio, …) list models keyless;
+    // everything else falls back to the catalog (family or preset) instead of
+    // failing.
+    if (!encrypted) {
+      if (provider.type === 'openai-compatible' && isLoopbackBaseUrl(provider.baseUrl)) {
+        try {
+          return await getAdapter(provider.type).listModels({
+            apiKey: KEYLESS_API_KEY,
+            baseUrl: provider.baseUrl,
+            modelCatalog,
+          })
+        } catch {
+          return modelCatalog.knownModels
+        }
+      }
+      return modelCatalog.knownModels
+    }
     const apiKey = keystore.decryptKey(encrypted)
     return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl, modelCatalog })
   })
@@ -710,6 +745,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       return modelCatalog.knownModels
     }
   })
+
+  // Read-only loopback probe (Ollama/LM Studio/Jan/llama.cpp) for the
+  // zero-key first chat; never touches anything beyond localhost.
+  register(CHANNELS.providersDetectLocal, () => detectLocalServers())
 
   register(CHANNELS.providersOauthStart, async (id) => {
     const provider = requireProvider(id)
@@ -769,6 +808,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     // folders are never touched — the service checks the path prefix).
     const conversation = db.conversations.getById(conversationId)
     if (conversation) deps.workspaceRoots.deleteIfAutoRegistered(conversation)
+    // Standing approval rules scoped to this conversation go with it. A left
+    // dangling rule would be inert, but it would also clutter Settings with
+    // entries pointing at a chat the user can no longer see.
+    db.toolRules.removeByScope('conversation', conversationId)
     db.conversations.remove(conversationId)
     return undefined
   })
@@ -859,6 +902,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       db.workspaces.deleteAll() // cascades workspace_items
       db.projects.deleteAll()
       db.scheduledTasks.deleteAll()
+      // Approval rules point at conversations and projects that are going
+      // away; a standing "always allow" must not outlive the content it was
+      // granted for.
+      db.toolRules.deleteAll()
     })
     // After the rows are gone: sweep every auto-created task workspace folder
     // (rows + dirs). User-granted folder rows survive as they always did.
@@ -1139,6 +1186,14 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     codeService.restoreCheckpoint(requireString(checkpointId, 'Checkpoint id'))
   )
 
+  register(CHANNELS.codeTurnRevert, (req) => {
+    const parsed = parseInput(
+      z.object({ conversationId: z.string().min(1), messageSeq: z.number().int().min(0) }),
+      req
+    )
+    return codeService.revertTurn(parsed.conversationId, parsed.messageSeq)
+  })
+
   // -- code arena ----------------------------------------------------------------
 
   register(CHANNELS.arenaStart, (req) => {
@@ -1178,16 +1233,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   // -- agent inbox (unified review queue for background results) ----------------
 
-  register(CHANNELS.inboxList, () =>
-    buildInboxItems(
-      {
-        agentRuns: db.agentPlatform.runsList(),
-        workflowRuns: db.workflows.listRecentRunsWithNames(30),
-        scheduledTasks: db.scheduledTasks.list(),
-      },
-      db.inbox.reviewedByKey()
-    )
-  )
+  register(CHANNELS.inboxList, () => collectInboxItems(db))
 
   register(CHANNELS.inboxMarkReviewed, (req) => {
     const parsed = parseInput(
@@ -1198,6 +1244,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       req
     )
     db.inbox.markReviewed(parsed.itemType, parsed.itemId)
+    deps.notifier?.refreshBadge()
   })
 
   // -- usage (local, estimate-only spend summary) -------------------------------
@@ -1281,6 +1328,47 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       scope: parseInput(approvalScopeSchema, scope ?? 'once'),
     })
     return undefined
+  })
+
+  // -- standing approval rules ("always allow" / "always ask") -----------------
+  //
+  // A rule can only remove or add a dialog; it never widens what a tool may do.
+  // 'deny', plan mode, the read-only sandbox and noStandingApproval tools all
+  // still refuse first, inside the executor.
+
+  const signalToolRulesChanged = (): void => {
+    for (const win of deps.getWindows()) {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send(CHANNELS.toolRulesChanged, undefined)
+      }
+    }
+  }
+
+  register(CHANNELS.toolsRulesList, () => db.toolRules.list())
+
+  register(CHANNELS.toolsRuleCreate, (input) => {
+    const parsed = parseInput(toolRuleInputSchema, input)
+    // An allow rule for an unknown tool would be dead weight; for a
+    // noStandingApproval tool it would be a promise the executor never keeps.
+    if (parsed.effect === 'allow') {
+      const tool = toolSystem.registry.getById(parsed.toolId)
+      if (!tool) throw invalid(`Unknown tool: ${parsed.toolId}`)
+      if (tool.noStandingApproval === true) {
+        throw invalid(`The tool '${parsed.toolId}' requires a fresh approval for every call.`)
+      }
+    }
+    if (parsed.scope !== 'global' && !parsed.scopeId) {
+      throw invalid('A conversation or project rule needs the id it applies to.')
+    }
+    db.toolRules.create(parsed)
+    signalToolRulesChanged()
+    return db.toolRules.list()
+  })
+
+  register(CHANNELS.toolsRuleDelete, (ruleId) => {
+    db.toolRules.remove(requireString(ruleId, 'Rule id'))
+    signalToolRulesChanged()
+    return db.toolRules.list()
   })
 
   // The renderer's answer to an ask_user_question dialog (null = dismissed).
@@ -1553,13 +1641,29 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     deps.wakeWorkflowScheduler?.()
     return undefined
   })
-  register(CHANNELS.workflowsRun, (graph) =>
-    runWorkflow(asGraph(graph), {
-      runAgent: (prompt, providerId, modelId, opts) =>
-        chatService.generateForWorkflow(prompt, providerId, modelId, opts),
-      notify: (text) => deps.imBridgeManager.notify(text),
-    })
-  )
+  register(CHANNELS.workflowsRun, (graph, opts) => {
+    const parsed = parseInput(
+      z.object({ dryRun: z.boolean().optional() }).optional(),
+      opts
+    )
+    const liveDeps = {
+      runAgent: (
+        prompt: string,
+        providerId?: string,
+        modelId?: string,
+        agentOpts?: Parameters<ChatService['generateForWorkflow']>[3]
+      ) => chatService.generateForWorkflow(prompt, providerId, modelId, agentOpts),
+      notify: (text: string) => deps.imBridgeManager.notify(text),
+    }
+    return runWorkflow(
+      asGraph(graph),
+      parsed?.dryRun === true
+        ? makeDryRunDeps(liveDeps, {
+            notifyConfigured: () => deps.imBridgeManager.notifyConfigured(),
+          })
+        : liveDeps
+    )
+  })
 
   // Saved-workflow execution (persisted to the run history) + that history.
   register(CHANNELS.workflowsRunById, (id) =>
@@ -1598,6 +1702,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     runAt: z.number().int().positive(),
     approvedToolIds: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
     projectId: z.string().trim().min(1).nullable().optional(),
+    agentId: z.string().trim().min(1).nullable().optional(),
   }) satisfies z.ZodType<ScheduledTaskInput>
 
   /**
@@ -1615,6 +1720,10 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     }
     if (input.projectId && !db.code.projectGetById(input.projectId)) {
       throw invalid('The selected working folder is no longer registered.')
+    }
+    if (input.agentId) {
+      const agent = db.agents.getById(input.agentId)
+      if (!agent || !agent.enabled) throw invalid('The selected agent profile is unavailable.')
     }
   }
 

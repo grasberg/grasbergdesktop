@@ -19,6 +19,16 @@ describe('redactSecrets', () => {
     expect(redactSecrets('the cat sat', ['at'])).toBe('the cat sat')
   })
 
+  it('never treats the keyless-loopback placeholder as a secret', () => {
+    // Keyless Ollama/LM Studio providers use the placeholder bearer 'local';
+    // errors in that flow routinely mention "localhost" and must stay intact.
+    const out = redactSecrets('getaddrinfo ENOTFOUND localhost (http://localhost:11434/v1)', [
+      'local',
+    ])
+    expect(out).toContain('localhost:11434')
+    expect(out).not.toContain('[redacted]')
+  })
+
   it('removes Bearer tokens even when not passed as a secret', () => {
     const out = redactSecrets('sent header "Authorization: Bearer abc.DEF_123-xyz" upstream')
     expect(out).not.toContain('abc.DEF_123-xyz')

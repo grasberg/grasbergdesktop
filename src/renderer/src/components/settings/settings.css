@@ -1129,3 +1129,27 @@
   font-size: 0.8rem;
   text-align: right;
 }
+
+/* ------------------------------------------------- local server quickstart */
+
+.local-server-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.local-server-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+.local-server-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
