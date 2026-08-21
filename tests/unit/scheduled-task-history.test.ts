@@ -136,24 +136,6 @@ describe('scheduled-task run history', () => {
     expect(runs[0].output).toBe(`run ${MAX_RUNS_PER_TASK + 4}`)
   })
 
-  it('counts recent failures — the "quietly broken" signal', () => {
-    const task = makeTask()
-    const statuses: Array<'ok' | 'error'> = ['ok', 'error', 'error', 'ok', 'error']
-    statuses.forEach((status, i) => {
-      db.scheduledTaskRuns.insert({
-        taskId: task.id,
-        status,
-        output: '',
-        error: status === 'error' ? 'boom' : null,
-        startedAt: 1000 + i,
-        finishedAt: 1001 + i,
-        catchUp: false,
-      })
-    })
-    expect(db.scheduledTaskRuns.recentFailureCount(task.id, 5)).toBe(3)
-    expect(db.scheduledTaskRuns.recentFailureCount(task.id, 2)).toBe(1)
-  })
-
   it('history dies with its task', () => {
     const task = makeTask()
     db.scheduledTaskRuns.insert({

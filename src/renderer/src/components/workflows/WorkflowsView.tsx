@@ -34,6 +34,7 @@ import type {
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from '@shared/workflow-templates'
 import { validateWorkflowGraph } from '@shared/workflow-validate'
 import { scheduleLabel } from '@shared/workflow-status'
+import { dateTime } from '@/lib/format'
 import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
 import './workflows.css'
@@ -114,10 +115,6 @@ function toGraph(nodes: FlowNode[], edges: Edge[]): WorkflowGraph {
       sourceHandle: e.sourceHandle ?? null,
     })),
   }
-}
-
-function formatRunTime(ts: number): string {
-  return new Date(ts).toLocaleString()
 }
 
 export default function WorkflowsView(): ReactElement {
@@ -267,6 +264,11 @@ export default function WorkflowsView(): ReactElement {
     setResult(null)
     setScheduleEnabled(false)
     setEveryMinutes('60')
+    setScheduleKind('interval')
+    setScheduleTime('08:00')
+    setScheduleDays([])
+    // The trigger opt-in is per workflow; a new one must never inherit it.
+    setWebhookEnabled(false)
     setRuns([])
   }
 
@@ -821,7 +823,7 @@ export default function WorkflowsView(): ReactElement {
                     <li key={r.id} className={`workflows-run workflows-run-${r.status}`}>
                       <div className="workflows-run-head">
                         <span>{r.status === 'ok' ? '✓' : '✗'}</span>
-                        <span>{formatRunTime(r.startedAt)}</span>
+                        <span>{dateTime(r.startedAt)}</span>
                         <span className="workflows-run-trigger">{r.trigger}</span>
                       </div>
                       {r.error ? (

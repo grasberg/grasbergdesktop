@@ -16,6 +16,20 @@ export function prettyJson(raw: string): string {
   }
 }
 
+const COMPACT_DATE_TIME = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+})
+
+/** Absolute local timestamp: `full` is the plain locale string, `compact`
+ * drops the year and the seconds for tight rows (the schedule popover). */
+export function dateTime(ts: number, style: 'full' | 'compact' = 'full'): string {
+  if (style === 'compact') return COMPACT_DATE_TIME.format(ts)
+  return new Date(ts).toLocaleString()
+}
+
 /** Compact "how long ago": now, 5m, 3h, 2d, then a locale date. */
 export function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts

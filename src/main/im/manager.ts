@@ -40,6 +40,23 @@ export interface ImBridgeManagerDeps {
   fetchImpl?: typeof fetch
 }
 
+/** One remote prompt waiting for a tap. */
+interface RemoteApproval {
+  requestKey: string
+  chatId: number
+  /** Null until the send returns — the message may still be in flight. */
+  messageId: number | null
+  summary: string
+  /** Values the buttons map to, by index. */
+  choices: unknown[]
+  /**
+   * Set only when the request was cancelled before its message existed;
+   * askRemote rewrites the message with it as soon as the send returns an id.
+   */
+  cancelText: string | null
+  settle: (answer: unknown) => void
+}
+
 export interface SetTelegramInput {
   /** New token to store (omit to keep the existing one). */
   token?: string
@@ -63,18 +80,7 @@ export class ImBridgeManager {
    * Telegram twin. Nothing about the answer is derivable from the token: it is
    * a lookup key into this map, and the CHOICES live only on this side.
    */
-  private readonly remoteApprovals = new Map<
-    string,
-    {
-      requestKey: string
-      chatId: number
-      messageId: number | null
-      summary: string
-      /** Values the buttons map to, by index. */
-      choices: unknown[]
-      settle: (answer: unknown) => void
-    }
-  >()
+  private readonly remoteApprovals = new Map<string, RemoteApproval>()
   private readonly remoteApprovalTokens = new Map<string, string>()
 
   constructor(private readonly deps: ImBridgeManagerDeps) {}
@@ -228,29 +234,46 @@ export class ImBridgeManager {
     if (this.remoteApprovalTokens.has(requestKey)) return null
 
     const token = randomUUID().replace(/-/g, '').slice(0, 24)
+    // Registered BEFORE the send: the round trip takes hundreds of milliseconds
+    // and a cancel landing inside that window has to find something to cancel,
+    // or the message goes out with live buttons that a later tap could still
+    // turn into an answer for a request that was already settled.
+    let resolveAnswer!: (answer: T | null) => void
+    const answered = new Promise<T | null>((resolve) => {
+      resolveAnswer = resolve
+    })
+    const timer = setTimeout(() => this.settleRemote(token, null), REMOTE_APPROVAL_TIMEOUT_MS)
+    timer.unref?.()
+    const pending: RemoteApproval = {
+      requestKey,
+      chatId,
+      messageId: null,
+      summary,
+      choices: choices.map((choice) => choice.value),
+      cancelText: null,
+      settle: (answer) => {
+        clearTimeout(timer)
+        resolveAnswer(answer as T | null)
+      },
+    }
+    this.remoteApprovals.set(token, pending)
+    this.remoteApprovalTokens.set(requestKey, token)
+
     const messageId = await bridge.sendButtons(
       chatId,
       summary,
       choices.map((choice, index) => ({ text: choice.label, data: `${index}:${token}` }))
     )
-    if (messageId === null) return null
-
-    return new Promise<T | null>((resolve) => {
-      const timer = setTimeout(() => this.settleRemote(token, null), REMOTE_APPROVAL_TIMEOUT_MS)
-      timer.unref?.()
-      this.remoteApprovals.set(token, {
-        requestKey,
-        chatId,
-        messageId,
-        summary,
-        choices: choices.map((choice) => choice.value),
-        settle: (answer) => {
-          clearTimeout(timer)
-          resolve(answer as T | null)
-        },
-      })
-      this.remoteApprovalTokens.set(requestKey, token)
-    })
+    if (this.remoteApprovals.get(token) === pending) {
+      // Nothing was delivered: settle now rather than leaving an entry waiting
+      // three minutes for a tap on a message that does not exist.
+      if (messageId === null) this.settleRemote(token, null)
+      else pending.messageId = messageId
+    } else if (messageId !== null && pending.cancelText !== null) {
+      // Cancelled mid-send, so the canceller had no message id to rewrite yet.
+      void bridge.editMessage(chatId, messageId, pending.cancelText)
+    }
+    return answered
   }
 
   /** Resolves one pending remote prompt and forgets its token. */
@@ -273,9 +296,15 @@ export class ImBridgeManager {
     if (!token) return
     const pending = this.remoteApprovals.get(token)
     if (!this.settleRemote(token, null)) return
-    if (pending && pending.messageId !== null) {
-      void this.bridge?.editMessage(pending.chatId, pending.messageId, `${pending.summary}\n\n${reason}`)
+    if (!pending) return
+    const text = `${pending.summary}\n\n${reason}`
+    if (pending.messageId === null) {
+      // The message is still in flight; askRemote rewrites it as soon as it has
+      // an id, so the buttons never stay live on a settled request.
+      pending.cancelText = text
+      return
     }
+    void this.bridge?.editMessage(pending.chatId, pending.messageId, text)
   }
 
   /**

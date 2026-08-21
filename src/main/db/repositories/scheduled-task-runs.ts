@@ -21,8 +21,6 @@ export interface ScheduledTaskRunsRepository {
   insert(input: ScheduledTaskRunInput): ScheduledTaskRun
   /** Newest first. */
   list(taskId: string, limit?: number): ScheduledTaskRun[]
-  /** How many of the last `window` runs failed — the "quietly broken" signal. */
-  recentFailureCount(taskId: string, window?: number): number
 }
 
 interface ScheduledTaskRunRow {
@@ -89,17 +87,6 @@ export function createScheduledTaskRunsRepository(
           [taskId, Math.min(Math.max(1, Math.floor(limit)), MAX_RUNS_PER_TASK)]
         )
         .map(toRun)
-    },
-
-    recentFailureCount(taskId, window = 5) {
-      const row = driver.get<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM (
-           SELECT status FROM scheduled_task_runs
-           WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?
-         ) WHERE status = 'error'`,
-        [taskId, Math.max(1, Math.floor(window))]
-      )
-      return row?.n ?? 0
     },
   }
 }

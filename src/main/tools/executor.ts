@@ -294,6 +294,14 @@ export interface ToolExecuteContext {
 
 export const USER_DECLINED_RESULT = 'User declined this tool call.'
 
+/**
+ * Conversation id on the stub headless callers pass in (generateForWorkflow:
+ * workflows, scheduled tasks, arena candidates). No conversation row exists
+ * under it, so anything persisting a conversation reference must treat it as
+ * "no conversation" — see recordActivity.
+ */
+export const HEADLESS_CONVERSATION_ID = 'workflow'
+
 /** Chars of arguments/result kept per activity entry. */
 const ACTIVITY_TEXT_MAX = 4000
 
@@ -1098,7 +1106,10 @@ export class ToolExecutor {
         at: Date.now(),
         // Headless runs use a synthetic conversation id; recording it would
         // point the UI at a conversation that does not exist.
-        conversationId: ctx.conversation.id.length > 0 ? ctx.conversation.id : null,
+        conversationId:
+          ctx.conversation.id.length > 0 && ctx.conversation.id !== HEADLESS_CONVERSATION_ID
+            ? ctx.conversation.id
+            : null,
         agentName: ctx.agentName ?? null,
         toolId: audit.definition.id,
         toolName: audit.definition.name,

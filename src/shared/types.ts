@@ -1295,11 +1295,23 @@ export interface ActivityEntry {
   changeId: string | null
 }
 
+/**
+ * Where a page of the log stopped. Both halves travel together: entries are
+ * ordered by timestamp then by insertion order, and two tool calls routinely
+ * land in the same millisecond, so a cursor on the clock alone would skip
+ * every entry sharing the boundary one — from this page and every later one.
+ */
+export interface ActivityCursor {
+  at: number
+  /** The entry's insertion order within its millisecond; higher is newer. */
+  seq: number
+}
+
 export interface ActivityQuery {
   /** Newest first; defaults to a page of 100. */
   limit?: number
-  /** Only entries at or before this timestamp (cursor for "load older"). */
-  before?: number
+  /** Only entries older than this cursor (the previous page's "load older"). */
+  before?: ActivityCursor
   /** Restrict to one decision, e.g. only what a human approved. */
   decision?: ActivityDecision
   /** Free-text over tool name, detail, arguments and result. */
@@ -1562,8 +1574,6 @@ export type WorkflowRunTrigger = 'manual' | 'schedule' | 'webhook'
 
 /** State of the local trigger endpoint, for the settings + builder UI. */
 export interface WorkflowTriggerInfo {
-  /** The user's switch. */
-  enabled: boolean
   /** Whether the listener is actually bound (a taken port leaves this false). */
   running: boolean
   port: number

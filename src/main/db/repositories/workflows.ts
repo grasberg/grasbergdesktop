@@ -15,7 +15,7 @@ import type {
 } from '@shared/types'
 import { WORKFLOW_RUN_SNIPPET_MAX } from '@shared/workflow-status'
 import type { SqliteDriver } from '../driver'
-import { parseJson } from './util'
+import { parseJson, updateById } from './util'
 
 const EMPTY_GRAPH: WorkflowGraph = { nodes: [], edges: [] }
 
@@ -36,7 +36,12 @@ export interface WorkflowsRepository {
   list(): Workflow[]
   getById(id: string): Workflow | null
   create(input: WorkflowInput): Workflow
-  update(id: string, input: WorkflowInput): Workflow | null
+  /**
+   * Patch: a field left undefined keeps its stored value (omitting
+   * `webhookEnabled` must never revoke a workflow's trigger opt-in), while an
+   * explicit null/false still clears it.
+   */
+  update(id: string, patch: Partial<WorkflowInput>): Workflow | null
   remove(id: string): void
   /** Workflows whose schedule is enabled and configured. */
   listScheduled(): Workflow[]
@@ -132,6 +137,16 @@ function toWorkflow(row: WorkflowRow): Workflow {
   }
 }
 
+/** Patch encoders for updateById: undefined leaves the column untouched. */
+function scheduleColumn(schedule: WorkflowSchedule | null | undefined): string | null | undefined {
+  if (schedule === undefined) return undefined
+  return schedule ? JSON.stringify(schedule) : null
+}
+
+function flagColumn(value: boolean | undefined): number | undefined {
+  return value === undefined ? undefined : value ? 1 : 0
+}
+
 function toRun(row: WorkflowRunRow): WorkflowRun {
   return {
     id: row.id,
@@ -193,21 +208,19 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
       return workflow
     },
 
-    update(id, input) {
-      driver.run(
-        `UPDATE workflows
-           SET name = ?, graph_json = ?, schedule_json = ?, schedule_enabled = ?,
-               webhook_enabled = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          input.name,
-          JSON.stringify(input.graph ?? EMPTY_GRAPH),
-          input.schedule ? JSON.stringify(input.schedule) : null,
-          input.scheduleEnabled === true ? 1 : 0,
-          input.webhookEnabled === true ? 1 : 0,
-          Date.now(),
-          id,
-        ]
+    update(id, patch) {
+      updateById(
+        driver,
+        'workflows',
+        id,
+        {
+          name: patch.name,
+          graph_json: patch.graph === undefined ? undefined : JSON.stringify(patch.graph),
+          schedule_json: scheduleColumn(patch.schedule),
+          schedule_enabled: flagColumn(patch.scheduleEnabled),
+          webhook_enabled: flagColumn(patch.webhookEnabled),
+        },
+        { touchUpdatedAt: true }
       )
       return getById(id)
     },

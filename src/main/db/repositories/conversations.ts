@@ -11,7 +11,7 @@ import type {
   ConversationSummary,
 } from '@shared/types'
 import type { SqliteDriver, SqlValue } from '../driver'
-import { parseJson, updateById } from './util'
+import { parseJson, toSearchGlob, updateById } from './util'
 
 export type ConversationListRequest = ConvListRequest
 
@@ -111,27 +111,6 @@ function toConversation(row: ConversationRow): Conversation {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
-}
-
-/**
- * Case-insensitive substring pattern for GLOB. SQLite's LIKE (and LOWER) only
- * fold ASCII, so every cased character gets an explicit [lower UPPER] class;
- * GLOB's own wildcards (* ? [) are wrapped so they match literally.
- */
-function toSearchGlob(text: string): string {
-  let pattern = '*'
-  for (const ch of text) {
-    const lower = ch.toLowerCase()
-    const upper = ch.toUpperCase()
-    if (lower !== upper && [...lower].length === 1 && [...upper].length === 1) {
-      pattern += `[${lower}${upper}]`
-    } else if (ch === '*' || ch === '?' || ch === '[') {
-      pattern += `[${ch}]`
-    } else {
-      pattern += ch
-    }
-  }
-  return `${pattern}*`
 }
 
 function toSnippet(content: string | null): string | null {

@@ -333,4 +333,134 @@ describe('settings:update', () => {
     expect(db.settings.get().outboundWebhookUrl).toBe('https://example.com/hook')
     expect(DEFAULT_SETTINGS.outboundWebhookUrl).toBeNull()
   })
+
+  it('never lets a renderer choose the trigger endpoint token', async () => {
+    const chosen = await invoke(CHANNELS.settingsUpdate, { workflowWebhookToken: 'aaaaaaaa' })
+    expect(chosen.ok).toBe(false)
+    expect(db.settings.get().workflowWebhookToken).toBeNull()
+    // …including in the same payload that switches the endpoint on, which is
+    // the ordering that would otherwise skip the mint.
+    const smuggled = await invoke(CHANNELS.settingsUpdate, {
+      workflowWebhookEnabled: true,
+      workflowWebhookToken: 'aaaaaaaa',
+    })
+    expect(smuggled.ok).toBe(false)
+    expect(db.settings.get().workflowWebhookEnabled).toBe(false)
+    expect(db.settings.get().workflowWebhookToken).toBeNull()
+  })
+
+  it('mints a token when the trigger endpoint is switched on, and keeps it after', async () => {
+    const on = await invoke(CHANNELS.settingsUpdate, { workflowWebhookEnabled: true })
+    expect(on.ok).toBe(true)
+    const minted = db.settings.get().workflowWebhookToken
+    expect(minted).toMatch(/^[0-9a-f]{32}$/)
+
+    // A later unrelated write must not rotate it: every URL already handed out
+    // would stop working.
+    const again = await invoke(CHANNELS.settingsUpdate, { workflowWebhookPort: 9100 })
+    expect(again.ok).toBe(true)
+    expect(db.settings.get().workflowWebhookToken).toBe(minted)
+  })
+})
+
+describe('activity:list', () => {
+  /** The page shape the Activity tab reads, as it crosses IPC. */
+  interface ActivityPageResult {
+    entries: Array<{ at: number; detail: string }>
+    cursor: { at: number; seq: number } | null
+    total: number
+  }
+
+  /** One log row. `at` is explicit so the newest-first order is deterministic. */
+  const record = (at: number, detail: string): void => {
+    db.activity.record({
+      at,
+      conversationId: null,
+      agentName: null,
+      toolId: 'file_search',
+      toolName: 'file_search',
+      risk: 'safe',
+      decision: 'auto',
+      detail,
+      arguments: '',
+      result: '',
+      changeId: null,
+    })
+  }
+
+  const BASE = 1_700_000_000_000
+
+  it('answers a first page with a cursor to continue from and the untruncated total', async () => {
+    for (let i = 0; i < 5; i++) record(BASE + i, `e-${i}`)
+
+    const result = await invoke<ActivityPageResult>(CHANNELS.activityList, { limit: 2 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.data.entries.map((e) => e.detail)).toEqual(['e-4', 'e-3'])
+    // "Showing N of M": the total counts the whole log, not the page.
+    expect(result.data.total).toBe(5)
+    // Both halves of the cursor cross the boundary. A page that came back with
+    // only a timestamp could not resume inside a millisecond several calls share.
+    expect(result.data.cursor).toEqual({ at: BASE + 3, seq: expect.any(Number) })
+  })
+
+  it('pages with the cursor it handed back, dropping and duplicating nothing', async () => {
+    // Every entry in the same millisecond: two cheap tool calls land there
+    // routinely, and it is exactly where a clock-only cursor goes wrong.
+    const written = 7
+    for (let i = 0; i < written; i++) record(BASE, `same-${i}`)
+
+    const seen: string[] = []
+    let before: { at: number; seq: number } | undefined
+    // Bounded: a cursor that never advances must fail the assertions below
+    // rather than spin here.
+    for (let page = 0; page <= written; page++) {
+      const result = await invoke<ActivityPageResult>(CHANNELS.activityList, {
+        limit: 3,
+        ...(before ? { before } : {}),
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      // The total is of the log, so it does not shrink as pages are consumed.
+      expect(result.data.total).toBe(written)
+      seen.push(...result.data.entries.map((e) => e.detail))
+      if (result.data.cursor === null) break
+      before = result.data.cursor
+    }
+
+    // Newest first, which within one millisecond means newest-inserted first.
+    expect(seen).toEqual(['same-6', 'same-5', 'same-4', 'same-3', 'same-2', 'same-1', 'same-0'])
+    expect(new Set(seen).size).toBe(written)
+  })
+
+  it('rejects a malformed cursor rather than silently restarting at page one', async () => {
+    for (let i = 0; i < 3; i++) record(BASE + i, `e-${i}`)
+
+    const malformed: unknown[] = [
+      // A bare timestamp — the shape the cursor used to be. Honouring it would
+      // skip every entry sharing the boundary millisecond.
+      BASE + 2,
+      { at: BASE + 2 },
+      { seq: 2 },
+      // Strict: nothing rides along beside the two halves of the cursor.
+      { at: BASE + 2, seq: 2, extra: 1 },
+      { at: 0, seq: 0 },
+      { at: `${BASE + 2}`, seq: '2' },
+      // "End of log" is not "start over".
+      null,
+    ]
+
+    for (const before of malformed) {
+      const result = await invoke<ActivityPageResult>(CHANNELS.activityList, {
+        limit: 2,
+        before,
+      })
+      // The alternative — ignoring the cursor and serving page one again — is
+      // an endless "Load older" that never leaves the newest entries.
+      expect(result.ok, JSON.stringify(before)).toBe(false)
+      if (result.ok) continue
+      expect(result.error.code).toBe('invalid_request')
+    }
+  })
 })

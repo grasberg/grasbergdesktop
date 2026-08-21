@@ -1,6 +1,7 @@
 /**
- * Small shared helpers for the repositories: the dynamic UPDATE builder and
- * safe JSON-column parsing. No repository-specific logic lives here.
+ * Small shared helpers for the repositories: the dynamic UPDATE builder, safe
+ * JSON-column parsing and the free-text search pattern. No repository-specific
+ * logic lives here.
  */
 
 import type { SqliteDriver, SqlValue } from '../driver'
@@ -52,6 +53,27 @@ export function parseJson<T>(
   } catch {
     return fallback
   }
+}
+
+/**
+ * Case-insensitive substring pattern for GLOB. SQLite's LIKE (and LOWER) only
+ * fold ASCII, so every cased character gets an explicit [lower UPPER] class;
+ * GLOB's own wildcards (* ? [) are wrapped so they match literally.
+ */
+export function toSearchGlob(text: string): string {
+  let pattern = '*'
+  for (const ch of text) {
+    const lower = ch.toLowerCase()
+    const upper = ch.toUpperCase()
+    if (lower !== upper && [...lower].length === 1 && [...upper].length === 1) {
+      pattern += `[${lower}${upper}]`
+    } else if (ch === '*' || ch === '?' || ch === '[') {
+      pattern += `[${ch}]`
+    } else {
+      pattern += ch
+    }
+  }
+  return `${pattern}*`
 }
 
 /**

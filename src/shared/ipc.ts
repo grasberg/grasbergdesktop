@@ -70,6 +70,7 @@ import type {
   ProviderConfigPatch,
   ProviderTypeMeta,
   ResearchDepth,
+  ActivityCursor,
   ActivityEntry,
   ActivityQuery,
   ScheduledTask,
@@ -823,7 +824,11 @@ export interface UldApi {
   }
   /** The audit trail: every tool call, newest first. */
   activity: {
-    list(query?: ActivityQuery): Promise<IpcResult<{ entries: ActivityEntry[]; total: number }>>
+    list(
+      query?: ActivityQuery
+    ): Promise<
+      IpcResult<{ entries: ActivityEntry[]; total: number; cursor: ActivityCursor | null }>
+    >
     clear(): Promise<IpcResult<void>>
   }
   prompts: {
@@ -875,7 +880,14 @@ export interface UldApi {
     list(): Promise<IpcResult<Workflow[]>>
     get(id: string): Promise<IpcResult<Workflow | null>>
     create(input: WorkflowInput): Promise<IpcResult<Workflow>>
-    update(id: string, input: WorkflowInput): Promise<IpcResult<Workflow>>
+    /**
+     * True patch: only the keys present are written, the rest keep their
+     * stored values. Send just what you mean to change — echoing fields back
+     * from a cached snapshot risks writing a stale name or graph over the
+     * stored one. The builder sends a whole WorkflowInput, which is still a
+     * valid patch.
+     */
+    update(id: string, patch: Partial<WorkflowInput>): Promise<IpcResult<Workflow>>
     delete(id: string): Promise<IpcResult<void>>
     /**
      * Runs the given graph (the live editor state) and returns per-node

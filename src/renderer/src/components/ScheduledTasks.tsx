@@ -9,6 +9,7 @@ import type {
 } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useNow } from '@/hooks/useNow'
+import { dateTime } from '@/lib/format'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
@@ -38,16 +39,6 @@ function initialDateTime(): string {
   date.setSeconds(0, 0)
   const offset = date.getTimezoneOffset() * 60_000
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
-}
-
-function dateTimeLabel(value: number | null): string {
-  if (value === null) return 'No next run'
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(value)
 }
 
 export default function ScheduledTasks(): React.JSX.Element {
@@ -335,6 +326,8 @@ export default function ScheduledTasks(): React.JSX.Element {
                       : 'never'
                 const completed = task.recurrence === 'once' && task.nextRunAt === null
                 const confirming = confirmingId === task.id
+                const nextRun =
+                  task.nextRunAt === null ? 'No next run' : dateTime(task.nextRunAt, 'compact')
                 return (
                   <li
                     key={task.id}
@@ -353,7 +346,7 @@ export default function ScheduledTasks(): React.JSX.Element {
                       <span className="sched-item-meta">
                         {completed
                           ? 'Completed'
-                          : `${RECURRENCE_LABEL[task.recurrence]} · ${dateTimeLabel(task.nextRunAt)}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.enabled ? '' : ' · paused'}`}
+                          : `${RECURRENCE_LABEL[task.recurrence]} · ${nextRun}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.enabled ? '' : ' · paused'}`}
                       </span>
                     </button>
                     {!completed ? (
@@ -411,7 +404,7 @@ export default function ScheduledTasks(): React.JSX.Element {
                             <li key={run.id} className={`sched-history-run ${run.status}`}>
                               <span className={`run-dot ${run.status}`} aria-hidden="true" />
                               <span className="sched-history-time">
-                                {dateTimeLabel(run.startedAt)}
+                                {dateTime(run.startedAt, 'compact')}
                               </span>
                               {/* The honest bit: a slot missed while Grasberg
                                   was closed ran late, and says so. */}

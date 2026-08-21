@@ -4,13 +4,26 @@
  * The bot token is write-only (encrypted in main, never shown again).
  */
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type { ImBridgeStatus, WorkflowTriggerInfo } from '@shared/types'
 import { errorMessage } from '@/api/uld'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useConversationsStore } from '@/stores/conversations'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
+
+/**
+ * A fully valid in-range port, or null. Out-of-range and half-typed input is
+ * rejected, never clamped: clamping "9" (mid-retype of 9000) to 1024 would
+ * rebind main's listener on a port nobody asked for and 404 every trigger URL
+ * already handed out.
+ */
+function parsePort(draft: string): number | null {
+  const trimmed = draft.trim()
+  if (!/^\d+$/.test(trimmed)) return null
+  const port = Number(trimmed)
+  return port >= 1024 && port <= 65_535 ? port : null
+}
 
 export default function BridgesTab(): ReactElement {
   const summaries = useConversationsStore((s) => s.summaries)
@@ -27,6 +40,7 @@ export default function BridgesTab(): ReactElement {
   const [webhook, setWebhook] = useState('')
   const [busy, setBusy] = useState(false)
   const [trigger, setTrigger] = useState<WorkflowTriggerInfo | null>(null)
+  const [portDraft, setPortDraft] = useState('')
 
   const applyStatus = (s: ImBridgeStatus): void => {
     setStatus(s)
@@ -51,6 +65,50 @@ export default function BridgesTab(): ReactElement {
       if (res.ok) setTrigger(res.data)
     })
   }, [webhookEnabled, webhookPort])
+
+  useEffect(() => {
+    if (webhookPort !== undefined) setPortDraft(String(webhookPort))
+  }, [webhookPort])
+
+  // Mirrors the current render's values for the unmount commit below, which
+  // would otherwise read the draft captured on the very first render.
+  const latest = useRef({ portDraft, webhookPort, persist })
+  useEffect(() => {
+    latest.current = { portDraft, webhookPort, persist }
+  })
+
+  // The port is a draft while typing and only saved on blur/Enter: persisting
+  // per keystroke rebinds main's listener on every half-typed number.
+  const commitPort = (): void => {
+    const port = parsePort(portDraft)
+    if (port === null || port === webhookPort) {
+      setPortDraft(webhookPort === undefined ? '' : String(webhookPort))
+      return
+    }
+    setPortDraft(String(port))
+    void (async () => {
+      await persist({ workflowWebhookPort: port })
+      // persist reports a failure only as a toast, so the store — which rolls
+      // the patch back — is the one witness of what was actually saved. Leave
+      // the field alone if the user has typed on since.
+      const saved = useSettingsStore.getState().settings?.workflowWebhookPort
+      if (saved !== port && latest.current.portDraft === String(port)) {
+        setPortDraft(saved === undefined ? '' : String(saved))
+      }
+    })()
+  }
+
+  // Escape closes Settings from a document-level handler without moving focus,
+  // so the input can unmount having never fired onBlur. Commit on the way out
+  // so a typed port is not silently dropped; an invalid draft is still lost.
+  useEffect(
+    () => () => {
+      const { portDraft: draft, webhookPort: stored, persist: save } = latest.current
+      const port = parsePort(draft)
+      if (port !== null && port !== stored) void save({ workflowWebhookPort: port })
+    },
+    [],
+  )
 
   const saveTelegram = async (): Promise<void> => {
     setBusy(true)
@@ -203,12 +261,11 @@ export default function BridgesTab(): ReactElement {
               type="number"
               min={1024}
               max={65535}
-              value={settings.workflowWebhookPort}
-              onChange={(e) => {
-                const port = Number.parseInt(e.target.value, 10)
-                if (Number.isInteger(port) && port >= 1024 && port <= 65535) {
-                  void persist({ workflowWebhookPort: port })
-                }
+              value={portDraft}
+              onChange={(e) => setPortDraft(e.target.value)}
+              onBlur={commitPort}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitPort()
               }}
             />
           </label>

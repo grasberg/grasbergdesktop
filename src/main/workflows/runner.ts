@@ -10,6 +10,16 @@ import { WORKFLOW_RUN_TIMEOUT_MS } from '@shared/workflow-status'
 import type { AppDatabase } from '../db/database'
 import { runWorkflow, type WorkflowEngineDeps } from './engine'
 
+/**
+ * The two refusals runById REJECTS with BEFORE it starts anything. They are a
+ * contract, not prose: the trigger endpoint matches them exactly to answer 409
+ * / 404 instead of a 5xx (see src/main/workflows/trigger-server.ts), so both
+ * the thrower and the matcher read the same constants — rewording one in place
+ * can no longer silently turn every concurrent trigger into a 500.
+ */
+export const WORKFLOW_NOT_FOUND_ERROR = 'Workflow not found.'
+export const WORKFLOW_ALREADY_RUNNING_ERROR = 'This workflow is already running.'
+
 export interface WorkflowRunner {
   /** Runs a saved workflow, persists the run, and returns the engine result. */
   runById(
@@ -57,8 +67,8 @@ export function createWorkflowRunner(
   return {
     async runById(workflowId, trigger, payload) {
       const workflow = db.workflows.getById(workflowId)
-      if (!workflow) throw new Error('Workflow not found.')
-      if (running.has(workflowId)) throw new Error('This workflow is already running.')
+      if (!workflow) throw new Error(WORKFLOW_NOT_FOUND_ERROR)
+      if (running.has(workflowId)) throw new Error(WORKFLOW_ALREADY_RUNNING_ERROR)
       const controller = new AbortController()
       running.set(workflowId, controller)
       const timeout = setTimeout(() => controller.abort(), WORKFLOW_RUN_TIMEOUT_MS)

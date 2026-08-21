@@ -95,6 +95,31 @@ function broadcast(channel: string, payload: unknown): void {
 }
 
 /**
+ * Notices main raises with no request in flight. A send is never replayed, so
+ * one emitted before a renderer subscribed — a trigger endpoint that fails to
+ * bind at startup does exactly that — would vanish. They are held until a
+ * renderer has loaded, then flushed.
+ */
+const pendingNotices: Array<{ message: string; level: 'info' | 'error' }> = []
+let rendererLoaded = false
+
+function notice(message: string, level: 'info' | 'error'): void {
+  if (!rendererLoaded) {
+    pendingNotices.push({ message, level })
+    return
+  }
+  broadcast(CHANNELS.mainNotice, { message, level })
+}
+
+/** A renderer is listening now — hand it whatever was raised before it was. */
+function flushNotices(): void {
+  rendererLoaded = true
+  for (const held of pendingNotices.splice(0)) {
+    broadcast(CHANNELS.mainNotice, held)
+  }
+}
+
+/**
  * Idempotent teardown. Aborts in-flight generations and AWAITS their detached
  * loops so streamed text is persisted before the database closes, then resolves
  * pending tool approvals as declined and closes the db.
@@ -255,6 +280,10 @@ function createWindow(): BrowserWindow {
     // with no UI). It is recreated on demand by the next browser/computer call.
     browserSession?.close()
   })
+
+  // The renderer's push subscriptions exist by the time the page has loaded, so
+  // anything raised while it was still booting can be delivered now.
+  win.webContents.on('did-finish-load', () => flushNotices())
 
   win.once('ready-to-show', () => {
     if (process.env.SMOKE_TEST === '1') {
@@ -658,7 +687,7 @@ function bootstrap(): void {
     },
     isTriggerable: (workflowId) => database.workflows.getById(workflowId)?.webhookEnabled === true,
     run: (workflowId, trigger, payload) => workflowRunner.runById(workflowId, trigger, payload),
-    onError: (message) => broadcast(CHANNELS.mainNotice, { message, level: 'error' }),
+    onError: (message) => notice(message, 'error'),
   })
   triggerServer = triggers
 

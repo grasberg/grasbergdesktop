@@ -57,14 +57,10 @@ export const useWorkflowsStore = create<WorkflowsStoreState>()((set, get) => ({
   async toggleSchedule(status, enabled) {
     const w = status.workflow
     try {
-      await unwrap(
-        window.uld.workflows.update(w.id, {
-          name: w.name,
-          graph: w.graph,
-          schedule: w.schedule,
-          scheduleEnabled: enabled,
-        })
-      )
+      // update is a patch: every key left out keeps whatever is stored, so
+      // this (possibly stale) overview snapshot can never write back a name,
+      // a graph, a schedule or the trigger opt-in. Pausing is one field.
+      await unwrap(window.uld.workflows.update(w.id, { scheduleEnabled: enabled }))
     } catch (e) {
       toastError('Could not update the schedule', e)
     }

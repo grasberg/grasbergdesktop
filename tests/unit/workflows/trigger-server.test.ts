@@ -7,16 +7,40 @@
  * on this machine can start a workflow" and "so can the coffee shop".
  */
 
+import type { Server } from 'node:http'
+import type { Socket } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { WorkflowRunResult } from '@shared/types'
+import { WORKFLOW_RUN_TIMEOUT_MS } from '@shared/workflow-status'
+import {
+  WORKFLOW_ALREADY_RUNNING_ERROR,
+  WORKFLOW_NOT_FOUND_ERROR,
+} from '../../../src/main/workflows/runner'
 import { WorkflowTriggerServer, generateTriggerToken } from '../../../src/main/workflows/trigger-server'
 
 const TOKEN = 'a'.repeat(32)
+
+/**
+ * A realistic provider key, shaped like the ones that show up embedded in a
+ * 401 body. The endpoint answers a machine — a CI job, a git hook — whose
+ * build log keeps whatever it prints, so this must never survive to the wire.
+ */
+const LEAKED_KEY = 'sk-live-4f9c2b8a1d6e0f37a5b9c4d2e8f1a6b3'
 
 let server: WorkflowTriggerServer
 let run: ReturnType<typeof vi.fn>
 let settings: { enabled: boolean; port: number; token: string | null }
 let triggerable: Set<string>
 let port: number
+
+/** What the runner resolves with — a failed run resolves, it does not reject. */
+function okResult(): WorkflowRunResult {
+  return { ok: true, nodeOutputs: {}, order: [] }
+}
+
+function failedResult(error: string): WorkflowRunResult {
+  return { ok: false, nodeOutputs: {}, order: [], error }
+}
 
 /** Binds on an ephemeral port so parallel test files cannot collide. */
 async function start(): Promise<void> {
@@ -32,6 +56,21 @@ async function start(): Promise<void> {
   port = Number.parseInt(new URL(url).port, 10)
 }
 
+/** The bound listener itself, so its idle timeout can be shortened for a test. */
+function boundServer(): Server {
+  const inner = (server as unknown as { server: Server | null }).server
+  if (!inner) throw new Error('the endpoint never bound')
+  return inner
+}
+
+/** Polls until the condition holds, so a test never sleeps a fixed guess. */
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) {
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  if (!condition()) throw new Error('condition never became true')
+}
+
 function post(
   path: string,
   init: { body?: string; headers?: Record<string, string> } = {}
@@ -44,7 +83,7 @@ function post(
 }
 
 beforeEach(() => {
-  run = vi.fn(async () => undefined)
+  run = vi.fn(async () => okResult())
   settings = { enabled: true, port: 0, token: TOKEN }
   triggerable = new Set(['wf-open'])
   server = new WorkflowTriggerServer({
@@ -157,6 +196,129 @@ describe('WorkflowTriggerServer', () => {
     const res = await post(`/run/wf-open?token=${TOKEN}`)
     expect(res.status).toBe(500)
     expect(await res.text()).toContain('the graph blew up')
+  })
+
+  it('reports a run that RESOLVES as failed with a non-2xx status too', async () => {
+    // The runner resolves { ok: false } instead of rejecting, so a CI job or a
+    // git hook gating on the HTTP status would otherwise read a failure as 200.
+    run.mockResolvedValueOnce(failedResult('the model node returned nothing'))
+    await start()
+    const res = await post(`/run/wf-open?token=${TOKEN}`)
+    expect(res.status).toBe(500)
+    expect(await res.text()).toContain('the model node returned nothing')
+  })
+
+  it('redacts a secret out of a thrown failure before it leaves the machine', async () => {
+    // This is the app's only EGRESS of provider error text to a third party. A
+    // provider 401 routinely quotes the key it rejected, and the caller here is
+    // a CI job or a git hook whose log keeps the response body forever.
+    run.mockRejectedValueOnce(
+      new Error(`ai_agent node failed: 401 Unauthorized — invalid api key ${LEAKED_KEY}`)
+    )
+    await start()
+    const res = await post(`/run/wf-open?token=${TOKEN}`)
+    expect(res.status).toBe(500)
+    const body = await res.text()
+    expect(body).not.toContain(LEAKED_KEY)
+    expect(body).toContain('[redacted]')
+    // The diagnosis still has to survive — redaction, not an empty answer.
+    expect(body).toContain('401 Unauthorized')
+  })
+
+  it('redacts a secret out of a run that RESOLVES as failed too', async () => {
+    // The two failure paths are separate call sites; a refactor can drop the
+    // redaction from either one, so both are pinned.
+    run.mockResolvedValueOnce(
+      failedResult(`ai_agent node failed: 401 Unauthorized — invalid api key ${LEAKED_KEY}`)
+    )
+    await start()
+    const res = await post(`/run/wf-open?token=${TOKEN}`)
+    expect(res.status).toBe(500)
+    const body = await res.text()
+    expect(body).not.toContain(LEAKED_KEY)
+    expect(body).toContain('[redacted]')
+    expect(body).toContain('401 Unauthorized')
+  })
+
+  it('answers 409 when the runner refuses because a run is already in flight', async () => {
+    // The runner rejects this before starting anything, so it is not a broken
+    // graph: a hook gating on the status has to be able to back off and retry
+    // rather than page whoever owns the workflow. The message comes from the
+    // runner's own constant, so a reword there cannot desynchronize the two.
+    run.mockRejectedValueOnce(new Error(WORKFLOW_ALREADY_RUNNING_ERROR))
+    await start()
+    const res = await post(`/run/wf-open?token=${TOKEN}`)
+    expect(res.status).toBe(409)
+    expect(await res.text()).toContain(WORKFLOW_ALREADY_RUNNING_ERROR)
+  })
+
+  it('answers 404 when the workflow vanished between the opt-in check and the run', async () => {
+    run.mockRejectedValueOnce(new Error(WORKFLOW_NOT_FOUND_ERROR))
+    await start()
+    const res = await post(`/run/wf-open?token=${TOKEN}`)
+    expect(res.status).toBe(404)
+  })
+
+  it('does not lend the pre-start statuses to a graph failure that talks about them', async () => {
+    // Matching is exact, not substring — on BOTH messages. A node reporting
+    // "the deploy job is already running" is a failure, and answering 409 would
+    // tell CI to retry; "model not found" / "404 not found" / "file not found"
+    // are routine node failures, and answering 404 would claim the workflow
+    // itself is missing and stop the hook from ever being fixed.
+    run.mockRejectedValueOnce(new Error('node deploy failed: the job is already running.'))
+    run.mockRejectedValueOnce(new Error('ai_agent node failed: model not found (404 not found)'))
+    await start()
+    expect((await post(`/run/wf-open?token=${TOKEN}`)).status).toBe(500)
+    expect((await post(`/run/wf-open?token=${TOKEN}`)).status).toBe(500)
+  })
+
+  it('answers a run that outlasts the connection idle timeout', async () => {
+    await start()
+    // The real guard is 10 s; shortened here so the test stays fast while
+    // exercising the same mechanism. Node applies it as an IDLE timeout on the
+    // whole connection, and a run moves no bytes for as long as it takes — with
+    // the guard left armed the socket is destroyed and the eventual response is
+    // written into a dead connection, so the caller sees a reset for a run that
+    // succeeded.
+    boundServer().setTimeout(250)
+    let finishRun = (): void => undefined
+    run.mockImplementationOnce(
+      () =>
+        new Promise<WorkflowRunResult>((resolve) => {
+          finishRun = () => resolve(okResult())
+        })
+    )
+    const pending = post(`/run/wf-open?token=${TOKEN}`, { body: 'commit abc123' })
+    await new Promise((r) => setTimeout(r, 800))
+    finishRun()
+    const res = await pending
+    expect(res.status).toBe(200)
+  })
+
+  it('loosens the idle guard for the run instead of removing it', async () => {
+    await start()
+    const sockets: Socket[] = []
+    boundServer().on('connection', (socket: Socket) => sockets.push(socket))
+    let finishRun = (): void => undefined
+    run.mockImplementationOnce(
+      () =>
+        new Promise<WorkflowRunResult>((resolve) => {
+          finishRun = () => resolve(okResult())
+        })
+    )
+    const pending = post(`/run/wf-open?token=${TOKEN}`, { body: 'commit abc123' })
+    await until(() => run.mock.calls.length > 0)
+    // A node that ignores its AbortSignal must not be able to pin the socket —
+    // and with it server.close() — forever, so the guard is widened past the
+    // runner's own wall-clock cap rather than switched off.
+    const timeout = sockets[0]?.timeout
+    expect(timeout).toBeGreaterThan(WORKFLOW_RUN_TIMEOUT_MS)
+    // Bounded on the other side too: an effectively-infinite guard (or one
+    // large enough to overflow Node's timer) is the same as having none, which
+    // is exactly what the widening is not allowed to become.
+    expect(timeout).toBeLessThanOrEqual(WORKFLOW_RUN_TIMEOUT_MS * 2)
+    finishRun()
+    expect((await pending).status).toBe(200)
   })
 
   it('stops answering the moment it is switched off', async () => {

@@ -234,7 +234,11 @@ export interface WorkflowsStoreState {
   load(): Promise<void>
   /** Runs a saved workflow now; toasts the outcome and refreshes. */
   runNow(id: string): Promise<void>
-  /** Pauses/resumes a schedule, preserving the rest of the workflow. */
+  /**
+   * Pauses/resumes a schedule. Patches `scheduleEnabled` alone, so nothing
+   * else in this (possibly stale) snapshot is written back over the stored
+   * workflow — `status` is here for its id and the surface's own rendering.
+   */
   toggleSchedule(status: ScheduledWorkflowStatus, enabled: boolean): Promise<void>
   /** Wired once at app start to window.uld.workflows.onRunFinished. */
   handleRunFinished(evt: WorkflowRunFinishedEvent): void

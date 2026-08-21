@@ -68,7 +68,7 @@ import { ProviderError, toNormalizedError } from '../providers/errors'
 import { decryptKey } from '../keys/keystore'
 import { buildMemorySection, buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
 import type { ToolExecuteContext } from '../tools/executor'
-import { USER_DECLINED_RESULT } from '../tools/executor'
+import { HEADLESS_CONVERSATION_ID, USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
 import { redactSecrets } from '../providers/redact'
 import { KEYLESS_API_KEY, isLoopbackBaseUrl, isValidStorageKey } from '@shared/schemas'
@@ -1654,7 +1654,7 @@ export class ChatService {
   ): Promise<string> {
     const settings = this.db.settings.get()
     const stub: Conversation = {
-      id: 'workflow',
+      id: HEADLESS_CONVERSATION_ID,
       mode: 'chat',
       title: '',
       providerId: null,

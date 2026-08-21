@@ -30,6 +30,7 @@ import type {
   ToolPermissionDecision,
   WorkflowGraph,
   WorkflowInput,
+  WorkflowSchedule,
   WorkflowsOverview,
   WorkflowTriggerInfo,
   WorkspaceItemKind,
@@ -582,18 +583,14 @@ export function registerIpc(deps: RegisterIpcDeps): void {
 
   register(CHANNELS.settingsUpdate, (patch) => {
     const parsed = parseInput(settingsPatchSchema, patch)
+    let updated = db.settings.update(parsed)
     // Switching the trigger endpoint on for the first time mints its secret.
-    // The renderer never supplies the token: it is generated here, so a
-    // compromised or replayed IPC payload cannot choose one.
-    if (parsed.workflowWebhookEnabled === true && !db.settings.get().workflowWebhookToken) {
-      parsed.workflowWebhookToken = generateTriggerToken()
+    // The token is not part of the patch surface at all (see settingsPatchSchema),
+    // so it is written here on its own and no IPC payload can choose one.
+    if (parsed.workflowWebhookEnabled === true && !updated.workflowWebhookToken) {
+      updated = db.settings.update({ workflowWebhookToken: generateTriggerToken() })
     }
-    const updated = db.settings.update(parsed)
-    if (
-      parsed.workflowWebhookEnabled !== undefined ||
-      parsed.workflowWebhookPort !== undefined ||
-      parsed.workflowWebhookToken !== undefined
-    ) {
+    if (parsed.workflowWebhookEnabled !== undefined || parsed.workflowWebhookPort !== undefined) {
       deps.triggerServer?.sync()
     }
     return updated
@@ -1403,7 +1400,12 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       z
         .object({
           limit: z.number().int().min(1).max(500).optional(),
-          before: z.number().int().positive().optional(),
+          // The whole cursor, not just the timestamp: entries that share a
+          // millisecond are ordered by insertion, and paging has to follow.
+          before: z
+            .object({ at: z.number().int().positive(), seq: z.number().int().positive() })
+            .strict()
+            .optional(),
           decision: z.enum(['auto', 'rule', 'approved', 'declined', 'blocked']).optional(),
           search: z.string().max(200).optional(),
         })
@@ -1411,7 +1413,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
         .optional(),
       query ?? {}
     )
-    return { entries: db.activity.list(parsed ?? {}), total: db.activity.count() }
+    return { ...db.activity.list(parsed ?? {}), total: db.activity.count() }
   })
 
   register(CHANNELS.activityClear, () => {
@@ -1641,49 +1643,71 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   const asGraph = (value: unknown): WorkflowGraph =>
     parseInput(workflowGraphSchema, value) as WorkflowGraph
 
+  const workflowScheduleSchema = z.union([
+    // A pre-v33 client (or a saved graph round-tripped through a backup)
+    // may still send the untagged interval shape.
+    z.object({ everyMinutes: z.number() }),
+    z.object({ kind: z.literal('interval'), everyMinutes: z.number() }),
+    z.object({
+      kind: z.literal('calendar'),
+      days: z.array(z.number().int().min(0).max(6)).max(7),
+      time: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
+    }),
+  ])
+
   const workflowInputSchema = z.object({
     name: z.string().trim().min(1).max(200),
     graph: workflowGraphSchema,
-    schedule: z
-      .union([
-        // A pre-v33 client (or a saved graph round-tripped through a backup)
-        // may still send the untagged interval shape.
-        z.object({ everyMinutes: z.number() }),
-        z.object({ kind: z.literal('interval'), everyMinutes: z.number() }),
-        z.object({
-          kind: z.literal('calendar'),
-          days: z.array(z.number().int().min(0).max(6)).max(7),
-          time: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
-        }),
-      ])
-      .nullish(),
+    schedule: workflowScheduleSchema.nullish(),
     scheduleEnabled: z.boolean().optional(),
     webhookEnabled: z.boolean().optional(),
   })
 
-  const asWorkflowInput = (value: unknown): WorkflowInput => {
-    const parsed = parseInput(workflowInputSchema, value)
-    let schedule: WorkflowInput['schedule'] = null
-    const raw = parsed.schedule
+  /**
+   * Update is a PATCH, so an absent field means "leave unchanged" and only an
+   * explicitly sent null/false clears — a caller that omits `webhookEnabled`
+   * can never silently revoke a workflow's trigger opt-in.
+   */
+  const workflowPatchSchema = workflowInputSchema.partial()
+
+  const asSchedule = (
+    raw: z.infer<typeof workflowScheduleSchema> | null | undefined
+  ): WorkflowSchedule | null => {
     if (raw && 'kind' in raw && raw.kind === 'calendar') {
-      schedule = {
+      return {
         kind: 'calendar',
         days: [...new Set(raw.days)].sort((a, b) => a - b),
         time: raw.time,
       }
-    } else if (raw && 'everyMinutes' in raw) {
+    }
+    if (raw && 'everyMinutes' in raw) {
       // Interval clamped to [1 minute, 7 days]; anything else = no schedule.
       const every = raw.everyMinutes
-      schedule =
-        Number.isFinite(every) && every >= 1
-          ? { kind: 'interval', everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
-          : null
+      return Number.isFinite(every) && every >= 1
+        ? { kind: 'interval', everyMinutes: Math.min(Math.floor(every), 7 * 24 * 60) }
+        : null
     }
-    // Enabling the schedule with an invalid interval must fail loudly, not
-    // save a workflow that silently never fires.
-    if (parsed.scheduleEnabled === true && schedule === null) {
+    return null
+  }
+
+  /**
+   * Enabling the schedule with nothing that can fire must fail loudly, not
+   * save a workflow that silently never runs. `schedule` is the MERGED value:
+   * a patch that omits the field keeps whatever is stored.
+   */
+  const assertScheduleCanFire = (
+    scheduleEnabled: boolean | undefined,
+    schedule: WorkflowSchedule | null
+  ): void => {
+    if (scheduleEnabled === true && schedule === null) {
       throw invalid('Set a valid interval or a time before turning the schedule on.')
     }
+  }
+
+  const asWorkflowInput = (value: unknown): WorkflowInput => {
+    const parsed = parseInput(workflowInputSchema, value)
+    const schedule = asSchedule(parsed.schedule)
+    assertScheduleCanFire(parsed.scheduleEnabled, schedule)
     return {
       name: parsed.name,
       graph: parsed.graph as WorkflowGraph,
@@ -1691,6 +1715,17 @@ export function registerIpc(deps: RegisterIpcDeps): void {
       scheduleEnabled: parsed.scheduleEnabled === true,
       webhookEnabled: parsed.webhookEnabled === true,
     }
+  }
+
+  const asWorkflowPatch = (value: unknown): Partial<WorkflowInput> => {
+    const parsed = parseInput(workflowPatchSchema, value)
+    const patch: Partial<WorkflowInput> = {}
+    if (parsed.name !== undefined) patch.name = parsed.name
+    if (parsed.graph !== undefined) patch.graph = parsed.graph as WorkflowGraph
+    if (parsed.schedule !== undefined) patch.schedule = asSchedule(parsed.schedule)
+    if (parsed.scheduleEnabled !== undefined) patch.scheduleEnabled = parsed.scheduleEnabled
+    if (parsed.webhookEnabled !== undefined) patch.webhookEnabled = parsed.webhookEnabled
+    return patch
   }
 
   register(CHANNELS.workflowsList, () => db.workflows.list())
@@ -1701,10 +1736,16 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return workflow
   })
   register(CHANNELS.workflowsUpdate, (id, input) => {
-    const workflow = found(
-      db.workflows.update(requireString(id, 'Workflow id'), asWorkflowInput(input)),
-      'Workflow'
+    const workflowId = requireString(id, 'Workflow id')
+    const patch = asWorkflowPatch(input)
+    // A patch that omits `schedule` keeps the stored one, so the guard needs
+    // the merged state, not just what was sent.
+    const current = found(db.workflows.getById(workflowId), 'Workflow')
+    assertScheduleCanFire(
+      patch.scheduleEnabled,
+      patch.schedule !== undefined ? patch.schedule : current.schedule
     )
+    const workflow = found(db.workflows.update(workflowId, patch), 'Workflow')
     deps.wakeWorkflowScheduler?.()
     return workflow
   })
@@ -1755,7 +1796,6 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     const current = db.settings.get()
     const id = typeof workflowId === 'string' && workflowId.length > 0 ? workflowId : undefined
     return {
-      enabled: current.workflowWebhookEnabled,
       running: deps.triggerServer?.running === true,
       port: current.workflowWebhookPort,
       // The token only ever travels to the desktop UI that displays it; it is

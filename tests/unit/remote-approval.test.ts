@@ -22,6 +22,10 @@ let manager: ImBridgeManager
 let calls: Array<{ method: string; body: Record<string, unknown> }>
 /** Releases the pending long-poll with a batch of updates. */
 let releaseUpdates: (updates: unknown[]) => void
+/** When set, sendMessage stays in flight until this resolves. */
+let sendGate: Promise<void> | null
+/** When true, Telegram refuses the send the way a blocked chat does. */
+let sendRefused: boolean
 
 const OWNER_CHAT = 555
 const STRANGER_CHAT = 999
@@ -45,6 +49,8 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'uld-remote-approval-'))
   db = openDatabase(join(dir, 'app.db'))
   calls = []
+  sendGate = null
+  sendRefused = false
 
   let pendingUpdates = new Promise<unknown[]>((resolve) => {
     releaseUpdates = resolve
@@ -64,6 +70,17 @@ beforeEach(() => {
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
     calls.push({ method, body })
     if (method === 'sendMessage') {
+      // The request is already logged above (it is on the wire); a test that
+      // set the gate keeps the RESPONSE pending, as a slow round trip does.
+      if (sendGate) await sendGate
+      if (sendRefused) {
+        // What a blocked chat / removed bot actually looks like: a 4xx, which
+        // makes sendButtons resolve null — no message, no buttons, no tap ever.
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        )
+      }
       return jsonResponse({ ok: true, result: { message_id: 77 } })
     }
     return jsonResponse({ ok: true, result: true })
@@ -229,6 +246,72 @@ describe('remote approvals — answering', () => {
     expect(String(edit?.body.text)).toMatch(/handled in the app/i)
   })
 
+  it('honors a cancel that lands while the send is still in flight', async () => {
+    let release = (): void => undefined
+    sendGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const pending = manager.requestApproval('req-1', { title: 't', detail: 'd' })
+    // The buttons are on the wire but Telegram has not answered yet — the
+    // window in which a cancel used to find nothing to cancel.
+    await new Promise((r) => setTimeout(r, 0))
+    const allow = payloadFor('Allow once')
+    expect(allow).not.toBe('')
+
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    manager.cancelApproval('req-1')
+    await new Promise((r) => setTimeout(r, 0))
+    // Proves the cancel really landed mid-send: nothing has come back yet.
+    expect(settled).toBe(false)
+
+    release()
+    await expect(pending).resolves.toBeNull()
+    await new Promise((r) => setTimeout(r, 10))
+    // The message is retracted as soon as it has an id…
+    const edit = calls.find((c) => c.method === 'editMessageText')
+    expect(String(edit?.body.text)).toMatch(/handled in the app/i)
+
+    // …and a tap arriving after that decides nothing.
+    calls.length = 0
+    tap(allow)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(String(calls.find((c) => c.method === 'answerCallbackQuery')?.body.text)).toMatch(
+      /no longer waiting/i
+    )
+    expect(calls.some((c) => c.method === 'editMessageText')).toBe(false)
+  })
+
+  it('settles at once when Telegram refuses the send, instead of waiting for a tap', async () => {
+    sendRefused = true
+    const pending = manager.requestApproval('req-1', { title: 't', detail: 'd' })
+    // There is no message and therefore no tap coming, ever. If the request
+    // stayed registered it would sit here for the full three-minute remote
+    // timeout while the tool call that raised its hand hangs, instead of
+    // falling straight through to the desktop dialog — so the race below
+    // reports "still waiting" rather than quietly blocking the suite.
+    const answer = await Promise.race([
+      pending,
+      new Promise((r) => setTimeout(() => r('still waiting'), 50)),
+    ])
+    expect(answer).toBeNull()
+
+    // Nothing is left registered: the buttons went out on the wire (the request
+    // is logged before Telegram refuses it), and a tap on that token now
+    // decides nothing — it cannot answer a request that already fell through.
+    const allow = payloadFor('Allow once')
+    expect(allow).not.toBe('')
+    calls.length = 0
+    tap(allow)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(String(calls.find((c) => c.method === 'answerCallbackQuery')?.body.text)).toMatch(
+      /no longer waiting/i
+    )
+    expect(calls.some((c) => c.method === 'editMessageText')).toBe(false)
+  })
+
   it('never asks twice about the same request', async () => {
     void manager.requestApproval('req-1', { title: 't', detail: 'd' })
     await new Promise((r) => setTimeout(r, 0))
@@ -289,6 +372,30 @@ describe('remote questions — a background run raising its hand', () => {
     // The request is still live and the real button still works.
     tap(payloadFor('alpha'))
     await expect(pending).resolves.toBe('alpha')
+  })
+
+  it('a cancel mid-send retracts the question, so a late tap answers nothing', async () => {
+    let release = (): void => undefined
+    sendGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const pending = manager.requestChoice('q-1', { question: 'Pick', options: ['alpha', 'beta'] })
+    await new Promise((r) => setTimeout(r, 0))
+    const alpha = payloadFor('alpha')
+    expect(alpha).not.toBe('')
+
+    manager.cancelApproval('q-1', 'The run was stopped.')
+    release()
+    await expect(pending).resolves.toBeNull()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(String(calls.find((c) => c.method === 'editMessageText')?.body.text)).toMatch(/stopped/i)
+
+    calls.length = 0
+    tap(alpha)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(String(calls.find((c) => c.method === 'answerCallbackQuery')?.body.text)).toMatch(
+      /no longer waiting/i
+    )
   })
 
   it('resolves to null with no options to offer', async () => {

@@ -1186,6 +1186,28 @@
 .activity-row.activity-declined,
 .activity-row.activity-blocked { border-left-color: var(--danger, #b4413f); }
 
+/* Decision chip. 'auto' keeps the muted default on purpose: "nothing had to
+   be decided" is the quiet case, the others are the ones worth spotting. */
+.activity-decision-auto {
+  color: var(--text-muted);
+}
+
+.activity-decision-rule {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.activity-decision-approved {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.activity-decision-declined,
+.activity-decision-blocked {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .activity-head {
   display: flex;
   align-items: center;
