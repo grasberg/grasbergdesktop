@@ -777,7 +777,12 @@ export const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )`,
-      `INSERT INTO scheduled_tasks_new SELECT * FROM scheduled_tasks`,
+      `INSERT INTO scheduled_tasks_new
+         (id, title, prompt, recurrence, next_run_at, enabled, last_run_at,
+          last_status, last_output, last_error, created_at, updated_at)
+       SELECT id, title, prompt, recurrence, next_run_at, enabled, last_run_at,
+          last_status, last_output, last_error, created_at, updated_at
+       FROM scheduled_tasks`,
       `DROP TABLE scheduled_tasks`,
       `ALTER TABLE scheduled_tasks_new RENAME TO scheduled_tasks`,
       `CREATE INDEX idx_scheduled_tasks_due
@@ -922,10 +927,26 @@ export const MIGRATIONS: Migration[] = [
          started_at INTEGER NOT NULL,
          finished_at INTEGER NOT NULL
        )`,
-      `INSERT INTO workflow_runs_new SELECT * FROM workflow_runs`,
+      `INSERT INTO workflow_runs_new
+         (id, workflow_id, trigger, status, output, error, started_at, finished_at)
+       SELECT id, workflow_id, trigger, status, output, error, started_at, finished_at
+       FROM workflow_runs`,
       `DROP TABLE workflow_runs`,
       `ALTER TABLE workflow_runs_new RENAME TO workflow_runs`,
       `CREATE INDEX idx_workflow_runs ON workflow_runs(workflow_id, started_at DESC)`,
+    ],
+  },
+  {
+    version: 36,
+    name: 'messages-usage-index',
+    // The Usage view scans messages by time window; without this index that
+    // walk touches EVERY message row ever stored (all transcripts). The
+    // partial index covers exactly the rows the query can use, so it stays
+    // small next to the table it indexes.
+    statements: [
+      `CREATE INDEX IF NOT EXISTS idx_messages_usage_created
+         ON messages(created_at)
+         WHERE role = 'assistant' AND usage_json IS NOT NULL`,
     ],
   },
 ]

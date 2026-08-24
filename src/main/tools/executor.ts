@@ -1486,10 +1486,14 @@ export class ToolExecutor {
       }
       if (looksBinary(buffer)) continue
       const content = buffer.toString('utf8')
-      if (!content.toLowerCase().includes(needle)) continue
+      // One lowercased copy drives both the whole-file gate and the per-line
+      // scan (splitting preserves line indices, so raw lines stay indexable).
+      const lowered = content.toLowerCase()
+      if (!lowered.includes(needle)) continue
       const contentLines = content.split(/\r?\n/)
+      const loweredLines = lowered.split(/\r?\n/)
       for (let i = 0; i < contentLines.length && lines.length < maxResults; i++) {
-        if (!contentLines[i].toLowerCase().includes(needle)) continue
+        if (!loweredLines[i]?.includes(needle)) continue
         const text = contentLines[i].trim().slice(0, SEARCH_LINE_MAX_CHARS)
         lines.push(`${file.relPath}:${i + 1}: ${text}`)
       }

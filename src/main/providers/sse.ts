@@ -98,16 +98,21 @@ export async function* parseSSE(
           retryable: false,
         })
       }
+      // Scan with an offset instead of re-slicing the residual buffer once per
+      // line: a chunk carrying many events (fast local servers) otherwise pays
+      // O(lines × residual) copies. One slice at the end trims the remainder.
+      let start = 0
       let nl: number
-      while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl)
-        buffer = buffer.slice(nl + 1)
+      while ((nl = buffer.indexOf('\n', start)) !== -1) {
+        const line = buffer.slice(start, nl)
+        start = nl + 1
         const payload = feedLine(line)
         if (payload !== undefined) {
           if (payload === '[DONE]') return
           yield payload
         }
       }
+      if (start > 0) buffer = buffer.slice(start)
     }
 
     // Flush any buffered decoder state and a final line without trailing

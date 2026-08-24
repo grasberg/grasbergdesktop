@@ -152,6 +152,12 @@ export class DreamingService {
   async dreamNow(force: boolean): Promise<DreamResult> {
     const { db } = this.deps
     const now = this.deps.now?.() ?? Date.now()
+    // Cheap gates first: the hourly auto check must not read the whole
+    // memories table when dreaming/memory are switched off anyway.
+    if (!force) {
+      const settings = db.settings.get()
+      if (!settings.memoryEnabled || !settings.dreamingEnabled) return skipped(0)
+    }
     // SHARED memories only. Consolidation merges and rewrites entries, so
     // feeding it several agents' private recollections at once would let one
     // agent's fact be rewritten into another's — the very separation an
@@ -164,8 +170,6 @@ export class DreamingService {
     if (memories.length < 2) return skipped(memories.length)
 
     if (!force) {
-      const settings = db.settings.get()
-      if (!settings.memoryEnabled || !settings.dreamingEnabled) return skipped(memories.length)
       if (memories.length < DREAM_MIN_MEMORIES) return skipped(memories.length)
       const lastRun = this.readLastRunAt()
       if (now - lastRun < DREAM_INTERVAL_MS) return skipped(memories.length)

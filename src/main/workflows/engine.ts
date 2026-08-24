@@ -26,6 +26,7 @@
  * of them inactive, is skipped.
  */
 
+import { isAllowedBaseUrl } from '@shared/schemas'
 import type { WorkflowGraph, WorkflowNode, WorkflowRunResult } from '@shared/types'
 
 const MAX_NODES = 100
@@ -191,7 +192,9 @@ async function runHttp(
   const method = (str(node.config, 'method') || 'GET').toUpperCase()
   const url = interpolate(str(node.config, 'url'), input, outputs).trim()
   const parsed = new URL(url) // throws -> caught by caller
-  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+  // Same policy as providers/MCP/webhooks: https always, http only for the
+  // loopback hosts (localhost / 127.0.0.1 / [::1]).
+  if (!isAllowedBaseUrl(parsed.toString())) {
     throw new Error('URL must use https:// (http is only allowed for localhost).')
   }
   const fetchImpl = deps.fetchImpl ?? fetch

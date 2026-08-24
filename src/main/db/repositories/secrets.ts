@@ -30,8 +30,12 @@ export interface ToolSecretCipher {
 export interface SecretsRepository {
   /** Names + previews for one owner (safe to send to the renderer). */
   listNames(scope: ToolSecretScope, ownerId: string): ToolSecretRef[]
+  /** Whether one specific secret exists (existence probe without the payload). */
+  has(scope: ToolSecretScope, ownerId: string, name: string): boolean
   /** Ciphertext for every secret of one owner (for main-side decryption). */
   listCiphers(scope: ToolSecretScope, ownerId: string): ToolSecretCipher[]
+  /** Ciphertext for one specific secret, or null. */
+  getCipher(scope: ToolSecretScope, ownerId: string, name: string): ToolSecretCipher | null
   /** Upsert one secret. */
   set(
     scope: ToolSecretScope,
@@ -67,12 +71,29 @@ export function createSecretsRepository(driver: SqliteDriver): SecretsRepository
       }))
     },
 
+    has(scope, ownerId, name) {
+      return (
+        driver.get<{ name: string }>(
+          'SELECT name FROM tool_secrets WHERE scope = ? AND owner_id = ? AND name = ?',
+          [scope, ownerId, name]
+        ) !== undefined
+      )
+    },
+
     listCiphers(scope, ownerId) {
       const rows = driver.all<SecretRow>(
         'SELECT name, encrypted_value, preview, updated_at FROM tool_secrets WHERE scope = ? AND owner_id = ?',
         [scope, ownerId]
       )
       return rows.map((row) => ({ name: row.name, encryptedValue: row.encrypted_value }))
+    },
+
+    getCipher(scope, ownerId, name) {
+      const row = driver.get<SecretRow>(
+        'SELECT name, encrypted_value, preview, updated_at FROM tool_secrets WHERE scope = ? AND owner_id = ? AND name = ?',
+        [scope, ownerId, name]
+      )
+      return row ? { name: row.name, encryptedValue: row.encrypted_value } : null
     },
 
     set(scope, ownerId, name, encryptedValue, preview) {

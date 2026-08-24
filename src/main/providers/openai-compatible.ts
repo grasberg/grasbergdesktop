@@ -113,6 +113,33 @@ function mapFinishReason(reason: string | null | undefined): FinishReason | unde
   }
 }
 
+/**
+ * The text of a single-choice, content-only delta chunk, or null when the
+ * payload is anything else (tool deltas, reasoning, finish_reason, usage,
+ * errors, multi-choice). Deliberately strict: null sends the chunk through
+ * full schema validation, so this can only ever accept what the schema
+ * would have accepted unchanged.
+ */
+function plainTextDelta(json: unknown): string | null {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return null
+  const obj = json as Record<string, unknown>
+  if ('error' in obj || 'usage' in obj) return null
+  if (!Array.isArray(obj.choices) || obj.choices.length !== 1) return null
+  const choice: unknown = obj.choices[0]
+  if (typeof choice !== 'object' || choice === null || Array.isArray(choice)) return null
+  const c = choice as Record<string, unknown>
+  if (c.finish_reason != null) return null
+  if (typeof c.index !== 'undefined' && c.index !== null && typeof c.index !== 'number') return null
+  const delta = c.delta
+  if (typeof delta !== 'object' || delta === null || Array.isArray(delta)) return null
+  const d = delta as Record<string, unknown>
+  // Empty string matches the original falsy check: it falls through to the
+  // schema path, where `if (delta?.content)` skips emitting an event.
+  if (typeof d.content !== 'string' || d.content.length === 0) return null
+  if (d.reasoning_content != null || d.tool_calls != null) return null
+  return d.content
+}
+
 function mapUsage(u: {
   prompt_tokens?: number
   completion_tokens?: number
@@ -537,6 +564,17 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         continue // keep-alive or provider noise
       }
       this.checkBodyForProviderError(json, ctx)
+      // Fast path: plain text-delta chunks dominate streaming traffic (tens per
+      // second). Schema-validating each one allocates validated copies of every
+      // choice/delta just to re-extract a single string; when the JSON matches
+      // the minimal shape exactly, extract directly. Any other shape — tool
+      // deltas, finish_reason, usage, errors, multiple choices — falls back to
+      // the schema so quirky providers keep their exact existing behavior.
+      const fastText = plainTextDelta(json)
+      if (fastText !== null) {
+        yield { type: 'text', text: fastText }
+        continue
+      }
       const parsed = oaiChatChunkSchema.safeParse(json)
       if (!parsed.success) continue
 

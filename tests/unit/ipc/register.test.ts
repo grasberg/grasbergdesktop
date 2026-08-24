@@ -202,6 +202,17 @@ describe('conv:fork', () => {
     ])
   })
 
+  it('keeps the knowledge-base attachment of the source conversation', async () => {
+    const kb = db.knowledge.create({ name: 'Docs', providerId: 'p', modelId: 'e' })
+    const sourceId = seed()
+    db.conversations.update(sourceId, { knowledgeBaseId: kb.id })
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, { id: sourceId })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(db.conversations.getById(result.data.id)?.knowledgeBaseId).toBe(kb.id)
+  })
+
   it('rolls the fork back when a message copy fails (no truncated fork survives)', async () => {
     const sourceId = seed()
     const insert = db.messages.insert

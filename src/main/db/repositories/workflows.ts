@@ -45,6 +45,18 @@ export interface WorkflowsRepository {
   remove(id: string): void
   /** Workflows whose schedule is enabled and configured. */
   listScheduled(): Workflow[]
+  /**
+   * Schedule fields only, for due-time math (the scheduler runs this on every
+   * wake): skips decoding the potentially large graph_json per row. Rows are
+   * filtered to schedule_enabled = 1, hence the constant.
+   */
+  listScheduledLite(): Array<{
+    id: string
+    schedule: WorkflowSchedule
+    scheduleEnabled: true
+    lastRunAt: number | null
+    updatedAt: number
+  }>
   /** Records that a run started (drives the scheduler's due check). */
   touchLastRun(id: string, startedAtMs: number): void
   /** Persists a finished run and prunes history beyond the per-workflow cap. */
@@ -236,6 +248,33 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
         )
         .map(toWorkflow)
         .filter((w) => w.schedule !== null)
+    },
+
+    listScheduledLite() {
+      const rows = driver.all<
+        Pick<WorkflowRow, 'id' | 'schedule_json' | 'last_run_at' | 'updated_at'>
+      >(
+        'SELECT id, schedule_json, last_run_at, updated_at FROM workflows WHERE schedule_enabled = 1 AND schedule_json IS NOT NULL'
+      )
+      const result: Array<{
+        id: string
+        schedule: WorkflowSchedule
+        scheduleEnabled: true
+        lastRunAt: number | null
+        updatedAt: number
+      }> = []
+      for (const row of rows) {
+        const schedule = parseSchedule(row.schedule_json)
+        if (schedule === null) continue
+        result.push({
+          id: row.id,
+          schedule,
+          scheduleEnabled: true,
+          lastRunAt: row.last_run_at ?? null,
+          updatedAt: row.updated_at,
+        })
+      }
+      return result
     },
 
     touchLastRun(id, startedAtMs) {

@@ -399,6 +399,101 @@ const imTelegramSchema = z
   })
   .strict()
 
+// Handler-input schemas, hoisted to module level: building them inline would
+// reconstruct identical parser objects on every IPC call (terminalInput runs
+// per keystroke; activityList per page scroll).
+
+const appStorePastedImageSchema = z.object({
+  mimeType: z.enum(PASTED_IMAGE_MIME_TYPES),
+  dataBase64: z
+    .string()
+    .min(1)
+    .max(MAX_IMAGE_BASE64_CHARS)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Invalid base64 image data'),
+})
+
+const appSaveAttachmentAsSchema = z.object({
+  storageKey: z
+    .string()
+    .max(300)
+    .refine(isValidStorageKey, { message: 'Invalid attachment storage key' }),
+  suggestedName: z.string().max(200).optional(),
+})
+
+const convForkSchema = z.object({
+  id: z.string().min(1),
+  throughSeq: z.number().int().positive().optional(),
+})
+
+const gitCommitSchema = z.object({ projectId: z.string().min(1), message: z.string().min(1).max(5000) })
+
+const gitBranchSchema = z.object({ projectId: z.string().min(1), name: z.string().min(1).max(200) })
+
+const gitSetOriginSchema = z.object({
+  projectId: z.string().min(1),
+  url: z.string().trim().min(1).max(2_000),
+})
+
+const gitPushSchema = z.object({ projectId: z.string().min(1), confirmDefaultBranch: z.boolean() })
+
+const githubPrCreateSchema = z.object({
+  projectId: z.string().min(1),
+  input: z.object({
+    title: z.string().trim().min(1).max(200),
+    body: z.string().max(20_000).optional(),
+    base: z.string().trim().min(1).max(200).optional(),
+    draft: z.boolean().optional(),
+  }),
+})
+
+const worktreeCreateSchema = z.object({
+  projectId: z.string().min(1),
+  name: z.string().max(100).optional(),
+})
+
+const turnRevertSchema = z.object({
+  conversationId: z.string().min(1),
+  messageSeq: z.number().int().min(0),
+})
+
+const arenaStartSchema = z.object({
+  conversationId: z.string().min(1),
+  task: z.string().trim().min(1).max(20_000),
+  candidates: z
+    .array(z.object({ providerId: z.string().min(1), modelId: z.string().min(1).max(200) }))
+    .min(2)
+    .max(4),
+})
+
+const arenaApplySchema = z.object({ conversationId: z.string().min(1), runId: z.string().min(1) })
+
+const inboxMarkReviewedSchema = z.object({
+  itemType: z.enum(['agent_run', 'workflow_run', 'scheduled_task_run']),
+  itemId: z.string().min(1).max(200),
+})
+
+const terminalInputSchema = z.object({
+  sessionId: z.string().min(1),
+  data: z.string().min(1).max(8_192),
+})
+
+const activityListSchema = z
+  .object({
+    limit: z.number().int().min(1).max(500).optional(),
+    // The whole cursor, not just the timestamp: entries that share a
+    // millisecond are ordered by insertion, and paging has to follow.
+    before: z
+      .object({ at: z.number().int().positive(), seq: z.number().int().positive() })
+      .strict()
+      .optional(),
+    decision: z.enum(['auto', 'rule', 'approved', 'declined', 'blocked']).optional(),
+    search: z.string().max(200).optional(),
+  })
+  .strict()
+  .optional()
+
+const workflowsRunOptsSchema = z.object({ dryRun: z.boolean().optional() }).optional()
+
 // ---------------------------------------------------------------------------
 // Settings cleanup
 // ---------------------------------------------------------------------------
@@ -532,17 +627,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   register(CHANNELS.appStorePastedImage, async (req) => {
-    const parsed = parseInput(
-      z.object({
-        mimeType: z.enum(PASTED_IMAGE_MIME_TYPES),
-        dataBase64: z
-          .string()
-          .min(1)
-          .max(MAX_IMAGE_BASE64_CHARS)
-          .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Invalid base64 image data'),
-      }),
-      req
-    )
+    const parsed = parseInput(appStorePastedImageSchema, req)
     return storePastedImage(deps.attachmentsDir, parsed.mimeType, parsed.dataBase64)
   })
 
@@ -551,16 +636,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.appSaveAttachmentAs, async (req) => {
-    const parsed = parseInput(
-      z.object({
-        storageKey: z
-          .string()
-          .max(300)
-          .refine(isValidStorageKey, { message: 'Invalid attachment storage key' }),
-        suggestedName: z.string().max(200).optional(),
-      }),
-      req
-    )
+    const parsed = parseInput(appSaveAttachmentAsSchema, req)
     // Same gate as readStoredImage: only app-shaped keys, only image mimes.
     const stored = await readStoredImage(deps.attachmentsDir, parsed.storageKey)
     if (!stored) throw invalid('That image is no longer available.')
@@ -858,10 +934,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   register(CHANNELS.convFork, (req) => {
-    const parsed = parseInput(
-      z.object({ id: z.string().min(1), throughSeq: z.number().int().positive().optional() }),
-      req
-    )
+    const parsed = parseInput(convForkSchema, req)
     const source = found(db.conversations.getById(parsed.id), 'Conversation')
     // One transaction: a fork is the conversation AND its transcript — a
     // partially copied fork would look like a valid (silently truncated) one.
@@ -878,6 +951,9 @@ export function registerIpc(deps: RegisterIpcDeps): void {
         projectId: source.projectId,
         projectRef: source.projectRef,
         moaPresetId: source.moaPresetId,
+        // KB attachment is steering config like the model choice: a fork keeps
+        // it (the base is only ever nulled here if it was already deleted).
+        knowledgeBaseId: source.knowledgeBaseId,
       })
       const messages = db.messages
         .listByConversation(source.id)
@@ -1112,18 +1188,12 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   register(CHANNELS.codeGitCommit, (req) => {
-    const parsed = parseInput(
-      z.object({ projectId: z.string().min(1), message: z.string().min(1).max(5000) }),
-      req
-    )
+    const parsed = parseInput(gitCommitSchema, req)
     return gitService.commit(projectRoot(parsed.projectId), parsed.message)
   })
 
   register(CHANNELS.codeGitCreateBranch, async (req) => {
-    const parsed = parseInput(
-      z.object({ projectId: z.string().min(1), name: z.string().min(1).max(200) }),
-      req
-    )
+    const parsed = parseInput(gitBranchSchema, req)
     const root = projectRoot(parsed.projectId)
     await gitService.createBranch(root, parsed.name)
     return gitService.status(root)
@@ -1134,10 +1204,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.codeGitSetOrigin, (req) => {
-    const parsed = parseInput(
-      z.object({ projectId: z.string().min(1), url: z.string().trim().min(1).max(2_000) }),
-      req
-    )
+    const parsed = parseInput(gitSetOriginSchema, req)
     return gitService.setOrigin(projectRoot(parsed.projectId), parsed.url)
   })
 
@@ -1146,26 +1213,12 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.codeGitPush, (req) => {
-    const parsed = parseInput(
-      z.object({ projectId: z.string().min(1), confirmDefaultBranch: z.boolean() }),
-      req
-    )
+    const parsed = parseInput(gitPushSchema, req)
     return gitService.push(projectRoot(parsed.projectId), parsed.confirmDefaultBranch)
   })
 
   register(CHANNELS.codeGithubPrCreate, (req) => {
-    const parsed = parseInput(
-      z.object({
-        projectId: z.string().min(1),
-        input: z.object({
-          title: z.string().trim().min(1).max(200),
-          body: z.string().max(20_000).optional(),
-          base: z.string().trim().min(1).max(200).optional(),
-          draft: z.boolean().optional(),
-        }),
-      }),
-      req
-    )
+    const parsed = parseInput(githubPrCreateSchema, req)
     return gitService.createPullRequest(projectRoot(parsed.projectId), parsed.input)
   })
 
@@ -1174,10 +1227,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.codeWorktreeCreate, async (req) => {
-    const parsed = parseInput(
-      z.object({ projectId: z.string().min(1), name: z.string().max(100).optional() }),
-      req
-    )
+    const parsed = parseInput(worktreeCreateSchema, req)
     const created = await gitService.createWorktree(
       projectRoot(parsed.projectId),
       deps.worktreesDir,
@@ -1206,27 +1256,14 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.codeTurnRevert, (req) => {
-    const parsed = parseInput(
-      z.object({ conversationId: z.string().min(1), messageSeq: z.number().int().min(0) }),
-      req
-    )
+    const parsed = parseInput(turnRevertSchema, req)
     return codeService.revertTurn(parsed.conversationId, parsed.messageSeq)
   })
 
   // -- code arena ----------------------------------------------------------------
 
   register(CHANNELS.arenaStart, (req) => {
-    const parsed = parseInput(
-      z.object({
-        conversationId: z.string().min(1),
-        task: z.string().trim().min(1).max(20_000),
-        candidates: z
-          .array(z.object({ providerId: z.string().min(1), modelId: z.string().min(1).max(200) }))
-          .min(2)
-          .max(4),
-      }),
-      req
-    )
+    const parsed = parseInput(arenaStartSchema, req)
     return deps.arenaService.start(parsed)
   })
 
@@ -1235,10 +1272,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   )
 
   register(CHANNELS.arenaApply, (req) => {
-    const parsed = parseInput(
-      z.object({ conversationId: z.string().min(1), runId: z.string().min(1) }),
-      req
-    )
+    const parsed = parseInput(arenaApplySchema, req)
     return deps.arenaService.apply(parsed.conversationId, parsed.runId)
   })
 
@@ -1255,13 +1289,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   register(CHANNELS.inboxList, () => collectInboxItems(db))
 
   register(CHANNELS.inboxMarkReviewed, (req) => {
-    const parsed = parseInput(
-      z.object({
-        itemType: z.enum(['agent_run', 'workflow_run', 'scheduled_task_run']),
-        itemId: z.string().min(1).max(200),
-      }),
-      req
-    )
+    const parsed = parseInput(inboxMarkReviewedSchema, req)
     db.inbox.markReviewed(parsed.itemType, parsed.itemId)
     deps.notifier?.refreshBadge()
   })
@@ -1305,10 +1333,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   })
 
   register(CHANNELS.terminalInput, (req) => {
-    const parsed = parseInput(
-      z.object({ sessionId: z.string().min(1), data: z.string().min(1).max(8_192) }),
-      req
-    )
+    const parsed = parseInput(terminalInputSchema, req)
     deps.terminalService.write(parsed.sessionId, parsed.data)
   })
 
@@ -1396,23 +1421,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   // a log you can edit entry by entry is not evidence of anything.
 
   register(CHANNELS.activityList, (query) => {
-    const parsed = parseInput(
-      z
-        .object({
-          limit: z.number().int().min(1).max(500).optional(),
-          // The whole cursor, not just the timestamp: entries that share a
-          // millisecond are ordered by insertion, and paging has to follow.
-          before: z
-            .object({ at: z.number().int().positive(), seq: z.number().int().positive() })
-            .strict()
-            .optional(),
-          decision: z.enum(['auto', 'rule', 'approved', 'declined', 'blocked']).optional(),
-          search: z.string().max(200).optional(),
-        })
-        .strict()
-        .optional(),
-      query ?? {}
-    )
+    const parsed = parseInput(activityListSchema, query ?? {})
     return { ...db.activity.list(parsed ?? {}), total: db.activity.count() }
   })
 
@@ -1755,10 +1764,7 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     return undefined
   })
   register(CHANNELS.workflowsRun, (graph, opts) => {
-    const parsed = parseInput(
-      z.object({ dryRun: z.boolean().optional() }).optional(),
-      opts
-    )
+    const parsed = parseInput(workflowsRunOptsSchema, opts)
     const liveDeps = {
       runAgent: (
         prompt: string,

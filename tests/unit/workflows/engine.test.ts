@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { WorkflowGraph, WorkflowNode } from '@shared/types'
+import type { WorkflowGraph, WorkflowNode, WorkflowRunResult } from '@shared/types'
 import { runWorkflow, topoOrder } from '../../../src/main/workflows/engine'
 
 function node(id: string, kind: WorkflowNode['kind'], config: Record<string, unknown>): WorkflowNode {
@@ -73,6 +73,29 @@ describe('runWorkflow', () => {
     expect(String(fetchImpl.mock.calls[0][0])).toBe('https://api.example.com/ping')
     expect(res.nodeOutputs.h).toContain('HTTP 200')
     expect(res.nodeOutputs.h).toContain('pong')
+  })
+
+  it('allows plain http only for loopback hosts (localhost / 127.0.0.1 / [::1])', async () => {
+    const fetchImpl = vi.fn(async () => new Response('ok', { status: 200 }))
+    const run = async (url: string): Promise<WorkflowRunResult> =>
+      runWorkflow(
+        {
+          nodes: [node('h', 'http_request', { method: 'GET', url })],
+          edges: [],
+        },
+        { runAgent: async () => '', fetchImpl: fetchImpl as unknown as typeof fetch }
+      )
+    for (const url of [
+      'http://localhost:8080/v1',
+      'http://127.0.0.1:8080/v1',
+      'http://[::1]:8080/v1',
+    ]) {
+      const res = await run(url)
+      expect(res.ok, url).toBe(true)
+    }
+    const remote = await run('http://api.example.com/v1')
+    expect(remote.ok).toBe(false)
+    expect(remote.error).toMatch(/https/i)
   })
 
   it('caps a huge http_request body instead of buffering it whole', async () => {

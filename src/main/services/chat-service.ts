@@ -121,10 +121,14 @@ export function pickAutoRouteProvider(
       return (score * 2_000) / 1_000_000 <= settings.autoRoutingMaxCostUsd!
     })
   }
+  // Decode pricing once per provider up front: a comparator would call cost()
+  // O(n log n) times, re-scanning the preset tuple table on every comparison.
+  const costs = new Map<ProviderConfig, number | null>(candidates.map((p) => [p, cost(p)]))
+  const policy = settings.autoRoutingPolicy
   candidates.sort((a, b) => {
-    const aCost = cost(a)
-    const bCost = cost(b)
-    if (settings.autoRoutingPolicy === 'highest_quality') {
+    const aCost = costs.get(a)
+    const bCost = costs.get(b)
+    if (policy === 'highest_quality') {
       return (bCost ?? -1) - (aCost ?? -1)
     }
     return (aCost ?? Number.POSITIVE_INFINITY) - (bCost ?? Number.POSITIVE_INFINITY)
@@ -1193,8 +1197,9 @@ export class ChatService {
       role: 'assistant',
       content: '',
       status: 'streaming',
-      providerId: resolved.provider.id,
-      modelId: resolved.modelId,
+      // A compare send runs N advisors, not one model: leave the placeholder
+      // unattributed until pickCompareWinner stamps the winner's identity.
+      ...(compare ? {} : { providerId: resolved.provider.id, modelId: resolved.modelId }),
       // Marked at insert so the renderer lays the advisors out side by side
       // from the first 'moa-reference' event.
       ...(compare && moa ? { compare: { pickedIndex: null } } : {}),
@@ -2082,11 +2087,16 @@ export class ChatService {
     this.backgroundTasks.set(taskId, record)
     void this.runDelegate(task, ctx, controller.signal, agentName)
       .then((result) => {
+        record.result = result
         if (record.status === 'running') {
           record.status = 'done'
-          record.result = result
           this.db.agentPlatform.runFinish(persisted.id, 'done', result)
           this.announceBackgroundRun(profile?.name ?? agentName, 'done', task, result, ctx)
+        } else if (record.status === 'stopped') {
+          // task_stop finished the row with an empty result before the loop
+          // unwound — backfill whatever the delegate came back with (its last
+          // answer or the stopped note) so Agent Control Center shows it too.
+          this.db.agentPlatform.runFinish(persisted.id, 'stopped', result)
         }
       })
       .catch((e: unknown) => {
@@ -2198,7 +2208,7 @@ export class ChatService {
     }
   }
 
-  /** Stops a running background task (its partial result is discarded). */
+  /** Stops a running background task; its final output is recorded once the loop unwinds. */
   delegateTaskStop(taskId: string): string {
     const record = this.backgroundTasks.get(taskId)
     if (!record) return `Error: unknown task id '${taskId}'.`

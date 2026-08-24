@@ -130,7 +130,9 @@ export function createKnowledgeRepository(driver: SqliteDriver): KnowledgeReposi
     },
 
     insertChunks(kbId, chunks) {
-      writeChunks(kbId, chunks)
+      // One commit for the whole batch — a bare loop would autocommit (and
+      // fsync) per row.
+      driver.transaction(() => writeChunks(kbId, chunks))
     },
 
     replaceSourceChunks(kbId, source, chunks) {

@@ -28,8 +28,16 @@ export interface WorkflowSchedulerDeps {
  * a workflow that says "in 25m" in the sidebar has to be the workflow that
  * fires in 25 minutes. A missed slot runs ONCE at the next opportunity: the
  * app catches up, it does not replay every occurrence it slept through.
+ *
+ * Takes only the fields due math needs, so the scheduler can pass the cheap
+ * `listScheduledLite()` projection instead of fully decoded workflows.
  */
-export function isDue(workflow: Workflow, now: number): boolean {
+export function isDue(
+  workflow: Pick<Workflow, 'schedule' | 'scheduleEnabled' | 'lastRunAt'> & {
+    updatedAt?: number
+  },
+  now: number
+): boolean {
   const at = nextRunAt(workflow, now)
   return at !== null && at <= now
 }
@@ -60,7 +68,8 @@ export class WorkflowScheduler {
     const now = Date.now()
     let next = now + MAX_WAKE_MS
     try {
-      for (const workflow of this.deps.db.workflows.listScheduled()) {
+      // Lean projection: wake() runs every minute; due math needs no graph.
+      for (const workflow of this.deps.db.workflows.listScheduledLite()) {
         if (isDue(workflow, now)) {
           next = now
           break
@@ -91,21 +100,21 @@ export class WorkflowScheduler {
   }
 
   private async runDue(now: number): Promise<void> {
-    let due: Workflow[]
+    let due: Array<{ id: string }>
     try {
-      due = this.deps.db.workflows.listScheduled().filter((w) => isDue(w, now))
+      due = this.deps.db.workflows.listScheduledLite().filter((w) => isDue(w, now))
     } catch {
       return
     }
-    const jobs = due.map((workflow) =>
-      this.queue.enqueue(`workflow:${workflow.id}`, async () => {
+    const jobs = due.map(({ id }) =>
+      this.queue.enqueue(`workflow:${id}`, async () => {
         // Queue wait can be long: re-check the current row immediately before launch.
-        const fresh = this.deps.db.workflows.getById(workflow.id)
+        const fresh = this.deps.db.workflows.getById(id)
         if (!fresh || !isDue(fresh, Math.max(now, Date.now()))) return
         try {
           await this.deps.runner.runById(fresh.id, 'schedule')
         } catch (e) {
-          this.deps.onError?.(workflow.id, e)
+          this.deps.onError?.(id, e)
         }
       })
     )

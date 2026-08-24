@@ -86,13 +86,11 @@ export class ImBridgeManager {
   constructor(private readonly deps: ImBridgeManagerDeps) {}
 
   private hasToken(): boolean {
-    return this.deps.db.secrets.listNames('im_bridge', TELEGRAM_OWNER).some((s) => s.name === TOKEN_NAME)
+    return this.deps.db.secrets.has('im_bridge', TELEGRAM_OWNER, TOKEN_NAME)
   }
 
   private getToken(): string | null {
-    const cipher = this.deps.db.secrets
-      .listCiphers('im_bridge', TELEGRAM_OWNER)
-      .find((c) => c.name === TOKEN_NAME)
+    const cipher = this.deps.db.secrets.getCipher('im_bridge', TELEGRAM_OWNER, TOKEN_NAME)
     if (!cipher) return null
     try {
       return this.deps.keystore.decryptKey(cipher.encryptedValue)

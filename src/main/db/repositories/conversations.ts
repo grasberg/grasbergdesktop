@@ -25,6 +25,7 @@ export interface ConversationCreateInput {
   projectId?: string | null
   projectRef?: string | null
   moaPresetId?: string | null
+  knowledgeBaseId?: string | null
   /**
    * Preserve this id instead of generating one — backup import only, so a
    * re-imported conversation is recognized (and skipped) by its original id.
@@ -190,14 +191,16 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         projectId: input.projectId ?? null,
         projectRef: input.projectRef ?? null,
         moaPresetId: input.moaPresetId ?? null,
+        knowledgeBaseId: input.knowledgeBaseId ?? null,
         createdAt: now,
         updatedAt: now,
       }
       driver.run(
         `INSERT INTO conversations
            (id, mode, title, provider_id, model_id, system_prompt, params_json,
-            workspace_id, project_id, project_ref, moa_preset_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            workspace_id, project_id, project_ref, moa_preset_id, knowledge_base_id,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           conversation.id,
           conversation.mode,
@@ -210,6 +213,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           conversation.projectId,
           conversation.projectRef,
           conversation.moaPresetId,
+          conversation.knowledgeBaseId ?? null,
           conversation.createdAt,
           conversation.updatedAt,
         ]

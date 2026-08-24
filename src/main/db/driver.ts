@@ -6,7 +6,7 @@
  * parameters exclusively.
  */
 
-import { Database } from 'node-sqlite3-wasm'
+import { Database, type Statement } from 'node-sqlite3-wasm'
 
 /** Values that can be bound to a positional `?` parameter. */
 export type SqlValue = number | bigint | string | boolean | Uint8Array | null
@@ -28,6 +28,12 @@ export interface SqliteDriver {
    * a composed one (SQLite rejects a nested BEGIN).
    */
   transaction<T>(fn: () => T): T
+  /**
+   * Registers a callback fired after the OUTERMOST transaction ends — whether
+   * it committed or rolled back. Lets caches built from table reads inside a
+   * transaction discard values that a rollback may have just un-written.
+   */
+  onTransactionEnd(fn: () => void): void
   close(): void
 }
 
@@ -35,6 +41,42 @@ export function open(filePath: string): SqliteDriver {
   const db = new Database(filePath)
   // Nesting level of driver-owned transactions; only used to name savepoints.
   let depth = 0
+
+  /**
+   * Compiled-statement cache. node-sqlite3-wasm's convenience methods prepare
+   * + finalize on EVERY call; on the synchronous main-process thread that is a
+   * per-query recompile of the same handful of SQL strings. A cached Statement
+   * resets and rebinds on each use (its _bind always runs clear_bindings +
+   * reset), so reuse is safe. Bounded LRU: statements hold WASM resources, so
+   * evicted entries are finalized immediately.
+   */
+   const MAX_CACHED_STATEMENTS = 256
+  const stmts = new Map<string, Statement>()
+  const stmtFor = (sql: string): Statement => {
+    const cached = stmts.get(sql)
+    if (cached) {
+      // Re-insert so the Map order reflects recency (eviction takes from the front).
+      stmts.delete(sql)
+      stmts.set(sql, cached)
+      return cached
+    }
+    const stmt = db.prepare(sql)
+    if (stmts.size >= MAX_CACHED_STATEMENTS) {
+      const oldest = stmts.keys().next()
+      if (!oldest.done) {
+        stmts.get(oldest.value)?.finalize()
+        stmts.delete(oldest.value)
+      }
+    }
+    stmts.set(sql, stmt)
+    return stmt
+  }
+
+  /** Subscribers fired when the outermost transaction commits or rolls back. */
+  const transactionEndHooks = new Set<() => void>()
+  const fireTransactionEnd = (): void => {
+    for (const hook of transactionEndHooks) hook()
+  }
 
   db.exec('PRAGMA foreign_keys = ON')
   try {
@@ -46,17 +88,31 @@ export function open(filePath: string): SqliteDriver {
 
   return {
     run(sql, params) {
-      const result = db.run(sql, params)
+      const result = stmtFor(sql).run(params)
       return { changes: result.changes }
     },
 
     get<T>(sql: string, params?: SqlParams): T | undefined {
-      const row = db.get(sql, params)
-      return row === null ? undefined : (row as unknown as T)
+      // Must drain to completion, NOT stop at the first row: a statement
+      // paused mid-iteration keeps its read cursor open, and any later DDL or
+      // write transaction on this connection then fails with SQLITE_LOCKED
+      // ("database table is locked") — e.g. migrations rebuilding a table.
+      // Reaching SQLITE_DONE releases the cursor.
+      const rows = stmtFor(sql).iterate(params)
+      let first: T | undefined
+      let seen = false
+      for (const row of rows) {
+        if (!seen) {
+          first = row as unknown as T
+          seen = true
+        }
+      }
+      return first
     },
 
     all<T>(sql: string, params?: SqlParams): T[] {
-      return db.all(sql, params) as unknown as T[]
+      // Array.from over iterate() drains to completion (same requirement).
+      return Array.from(stmtFor(sql).iterate(params)) as unknown as T[]
     },
 
     exec(sql) {
@@ -71,6 +127,7 @@ export function open(filePath: string): SqliteDriver {
       try {
         const result = fn()
         db.exec(savepoint ? `RELEASE ${savepoint}` : 'COMMIT')
+        if (!savepoint) fireTransactionEnd()
         return result
       } catch (error) {
         try {
@@ -83,13 +140,22 @@ export function open(filePath: string): SqliteDriver {
         } catch {
           // e.g. the error already aborted the transaction — nothing to roll back
         }
+        if (!savepoint) fireTransactionEnd()
         throw error
       } finally {
         if (savepoint) depth--
       }
     },
 
+    onTransactionEnd(fn) {
+      transactionEndHooks.add(fn)
+    },
+
     close() {
+      for (const stmt of stmts.values()) {
+        if (!stmt.isFinalized) stmt.finalize()
+      }
+      stmts.clear()
       db.close()
     },
   }
