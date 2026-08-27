@@ -30,3 +30,10 @@ Thumbs.db
 
 # Marketing site (deployed separately, not part of the app)
 website/
+
+# Relay build artifact (npm run build:relay)
+relay/relay.mjs
+relay/relay.mjs.map
+# Relay runtime token-hash store
+relay/relay-store.json
+relay-store.json

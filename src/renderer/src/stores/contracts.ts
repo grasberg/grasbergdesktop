@@ -14,6 +14,9 @@ import type {
   ModelInfo,
   NormalizedError,
   OAuthStatus,
+  OptimizerRun,
+  OptimizerStartInput,
+  OptimizerVersion,
   Project,
   ProviderConfig,
   ProviderConfigInput,
@@ -252,4 +255,18 @@ export interface ScheduledTasksStoreState {
   setEnabled(id: string, enabled: boolean): Promise<void>
   remove(id: string): Promise<void>
   handleChanged(event: ScheduledTasksChangedEvent): void
+}
+
+/** Optimizer runs (autonomous optimize-evaluate-commit loops per project). */
+export interface OptimizerStoreState {
+  runs: OptimizerRun[]
+  loaded: boolean
+  /** Versions per run id, loaded lazily when a run is expanded. */
+  versions: Record<string, OptimizerVersion[]>
+  load(): Promise<void>
+  loadVersions(runId: string): Promise<void>
+  start(input: OptimizerStartInput): Promise<OptimizerRun | null>
+  stop(runId: string): Promise<void>
+  /** Wired once at app start to window.uld.optimizer.onChanged. */
+  handleChanged(event: { run: OptimizerRun }): void
 }

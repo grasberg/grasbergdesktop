@@ -45,16 +45,24 @@ import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSession } from './browser/session'
 import { TerminalService } from './terminal/terminal-service'
 import { ArenaService } from './services/arena'
+import { OptimizerService } from './services/optimizer'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
 import { registerIpc } from './ipc/register'
+import { publishMainEvent, subscribeMainEvents } from './events'
+import { RemoteService } from './remote/service'
+import { wsSocketFactory } from './remote/ws-socket'
 import { ProjectHookService } from './services/project-hooks'
 import { ScheduledRunQueue } from './scheduling/run-queue'
+import { runShell } from './tools/shell'
 import {
   DesktopNotifier,
   approvalNotification,
   resultNotification,
 } from './services/notify'
 import { collectInboxItems, countUnreviewed } from './services/inbox'
+
+/** Wall-clock cap on one optimizer eval/test command execution. */
+const OPTIMIZER_EVAL_TIMEOUT_MS = 10 * 60_000
 
 const PRODUCTION_CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
@@ -81,18 +89,26 @@ let mainWindow: BrowserWindow | null = null
 let browserSession: BrowserSession | null = null
 let terminalService: TerminalService | null = null
 let arenaService: ArenaService | null = null
+let optimizerService: OptimizerService | null = null
+let remoteService: RemoteService | null = null
 let oauthManager: OpenAiOAuthManager | null = null
 let notifier: DesktopNotifier | null = null
 let cleanedUp = false
 let quitting = false
 
 function broadcast(channel: string, payload: unknown): void {
+  publishMainEvent(channel, payload)
+}
+
+// Every renderer window is one subscriber of the main event bus; the remote
+// (phone tunnel) service is another. Both therefore see the exact same pushes.
+subscribeMainEvents((channel, payload) => {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send(channel, payload)
     }
   }
-}
+})
 
 /**
  * Notices main raises with no request in flight. A send is never replayed, so
@@ -155,6 +171,10 @@ async function cleanup(): Promise<void> {
   terminalService?.disposeAll()
   // Abort running arena candidates (their agent_runs settle as stopped).
   arenaService?.stopAll()
+  // Abort running optimizer loops (their runs settle as stopped).
+  optimizerService?.stopAll()
+  // Drop the phone tunnel (revoked devices' keys are already gone).
+  remoteService?.stopAll()
   // Close MCP connections (kills any stdio child processes) before the db.
   try {
     await mcpManager?.stopAll()
@@ -601,6 +621,28 @@ function bootstrap(): void {
   })
   notifier = desktopNotifier
 
+  // Optimizer: autonomous optimize-evaluate-commit loops per project (AVO
+  // style). Eval commands run HERE, never through the agent's shell tool.
+  const optimizer = new OptimizerService({
+    db: database,
+    git: gitService,
+    generate: (prompt, providerId, modelId, opts) =>
+      chatService
+        ? chatService.generateForWorkflow(prompt, providerId, modelId, opts)
+        : Promise.reject(new Error('Generation unavailable during startup.')),
+    runCommand: async (command, cwd, signal) => {
+      const result = await runShell(command, cwd, OPTIMIZER_EVAL_TIMEOUT_MS, signal)
+      return {
+        ok: result.code === 0 && !result.timedOut && !result.aborted,
+        exitCode: result.code,
+        output: `${result.stdout}\n${result.stderr}`,
+      }
+    },
+    broadcast,
+    notify: (notification) => desktopNotifier.notify(notification),
+  })
+  optimizerService = optimizer
+
   // A pending approval is also pushed to the desktop and (when enabled) to the
   // paired Telegram chat. Both channels stay live at once and the first answer
   // wins — respond() ignores a requestId that already settled — so the user can
@@ -756,7 +798,7 @@ function bootstrap(): void {
     )
   )
 
-  registerIpc({
+  const ipcHandlers = registerIpc({
     db: database,
     chatService,
     codeService,
@@ -780,8 +822,27 @@ function bootstrap(): void {
     worktreesDir,
     terminalService: terminals,
     arenaService: arena,
+    optimizerService: optimizer,
+    getRemoteService: () => remoteService,
     getWindows: () => BrowserWindow.getAllWindows(),
   })
+
+  // Remote access (phone tunnel): needs the handler map registerIpc built —
+  // the phone invokes the very same handlers through its allowlist. The
+  // service opens NO port; it dials the relay outbound and stays offline
+  // until Settings turns it on (sync() re-reads settings, like the trigger
+  // endpoint).
+  const remote = new RemoteService({
+    db: database,
+    keystore,
+    handlers: ipcHandlers,
+    mobileDir: join(__dirname, '../mobile'),
+    appVersion: app.getVersion(),
+    socketFactory: wsSocketFactory,
+    notice: (message, level) => notice(message, level),
+    onChanged: () => broadcast(CHANNELS.remoteChanged, undefined),
+  })
+  remoteService = remote
 
   // Connect enabled MCP servers + IM bridge in the background (no-op under SMOKE_TEST).
   void mcp.start()
@@ -792,6 +853,8 @@ function bootstrap(): void {
     dreaming.start()
     // Binds only when the endpoint is switched on (it re-reads settings).
     triggers.sync()
+    // Dials the relay only when remote access is switched on (same pattern).
+    remote.sync()
   }
 
   createWindow()

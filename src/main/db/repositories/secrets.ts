@@ -12,7 +12,7 @@
 
 import type { SqliteDriver } from '../driver'
 
-export type ToolSecretScope = 'custom_tool' | 'mcp_server' | 'im_bridge'
+export type ToolSecretScope = 'custom_tool' | 'mcp_server' | 'im_bridge' | 'remote'
 
 /** A secret's name + preview (never its value). */
 export interface ToolSecretRef {

@@ -436,6 +436,21 @@ export class GitService {
   }
 
   /**
+   * Discards EVERY working-tree change — tracked edits back to HEAD plus all
+   * untracked files — so an autonomous loop can roll a rejected attempt back.
+   * Deliberately NOT exposed over IPC: this is main-process automation plumbing
+   * (the optimizer), never a user-facing button.
+   */
+  async discardAllChanges(root: string): Promise<void> {
+    const head = await runGit(['rev-parse', '--verify', 'HEAD'], root)
+    if (!head.ok) throw invalid('Cannot discard changes: the repository has no commits yet.')
+    let result = await runGit(['reset', '--hard', 'HEAD'], root)
+    if (!result.ok) throw invalid(`git reset failed: ${result.stderr || 'unknown error'}`)
+    result = await runGit(['clean', '-fd'], root)
+    if (!result.ok) throw invalid(`git clean failed: ${result.stderr || 'unknown error'}`)
+  }
+
+  /**
    * Commits what is staged. The message is ONE argv element — never shell-
    * parsed. Refuses an empty message and an empty index (clear errors beat
    * git's own).

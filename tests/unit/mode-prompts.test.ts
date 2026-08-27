@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildModeSystemPrompt } from '../../src/main/prompts'
+import { buildExperimentSection, buildModeSystemPrompt } from '../../src/main/prompts'
 
 describe('buildModeSystemPrompt', () => {
   it('chat mode adds conversational tone guidance but no artifact formats', () => {
@@ -192,5 +192,28 @@ describe('buildModeSystemPrompt', () => {
   it('adds no skills section when none are installed', () => {
     expect(buildModeSystemPrompt('chat')).not.toContain('Installed skills')
     expect(buildModeSystemPrompt('chat', { skills: [] })).not.toContain('Installed skills')
+  })
+})
+
+describe('experiment log section', () => {
+  it('is omitted when the project has no entries', () => {
+    expect(buildExperimentSection([])).toBe('')
+  })
+
+  it('lists outcomes and details, and respects the char budget', () => {
+    const section = buildExperimentSection([
+      { title: 'memoize parser', outcome: 'improved', detail: 'score 10 -> 14' },
+      { title: 'rewrite in asm', outcome: 'failed', detail: 'broke tests' },
+    ])
+    expect(section).toContain('[improved] memoize parser — score 10 -> 14')
+    expect(section).toContain('[failed] rewrite in asm — broke tests')
+    expect(section).toContain('do NOT repeat what failed')
+  })
+
+  it('never appears in chat mode even when experiments are supplied', () => {
+    const prompt = buildModeSystemPrompt('chat', {
+      experiments: [{ title: 'x', outcome: 'improved', detail: '' }],
+    })
+    expect(prompt).not.toContain('Experiment log')
   })
 })

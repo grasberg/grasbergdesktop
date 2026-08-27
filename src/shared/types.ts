@@ -754,6 +754,27 @@ export interface AppSettings {
    * Local-only, but still a credential: never imported from a backup.
    */
   workflowWebhookToken: string | null
+  /**
+   * Opt-in remote access: let a paired phone use the full app through an
+   * outbound tunnel to the relay below. Off by default. The desktop opens NO
+   * inbound port — it connects out (like the Telegram bridge), so the feature
+   * works behind CGNAT/firewalls and adds no listening network surface.
+   */
+  remoteAccessEnabled: boolean
+  /**
+   * Base URL of the relay that routes the phone tunnel (wss://… or ws:// for
+   * local testing). Security-sensitive: a URL from an untrusted backup would
+   * silently point the tunnel — and therefore the phone's traffic — at an
+   * attacker's server. Never imported from a backup.
+   */
+  remoteRelayUrl: string | null
+  /**
+   * Public routing id of this desktop on the relay (random, minted on first
+   * enable). Not a secret: it only identifies WHICH desktop a phone connects
+   * to; authentication is the relay/desktop token + per-device keys, which
+   * live in encrypted storage and never travel in a backup.
+   */
+  remoteDesktopId: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -806,6 +827,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   workflowWebhookEnabled: false,
   workflowWebhookPort: 8787,
   workflowWebhookToken: null,
+  remoteAccessEnabled: false,
+  remoteRelayUrl: null,
+  remoteDesktopId: null,
 }
 
 /**
@@ -833,6 +857,11 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'workflowWebhookEnabled',
   'workflowWebhookPort',
   'workflowWebhookToken',
+  // …and these would re-enable the phone tunnel and point it at whatever
+  // relay the backup names — the desktop would then connect OUT to a server
+  // the backup's author controls.
+  'remoteAccessEnabled',
+  'remoteRelayUrl',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
@@ -875,6 +904,10 @@ export interface ArenaCandidateState {
   diff: string
   /** Files the candidate changed (staged in its worktree). */
   changedFiles: GitFileChange[]
+  /** Round this candidate ran in (1-based). Always 1 when totalRounds is 1. */
+  round: number
+  /** The runId whose worktree this candidate's copy was seeded from (round > 1). */
+  parentRunId: string | null
 }
 
 export interface ArenaState {
@@ -887,6 +920,12 @@ export interface ArenaState {
   candidates: ArenaCandidateState[]
   appliedRunId: string | null
   createdAt: number
+  /** Evolutionary arenas run more than one judged round (default 1). */
+  totalRounds: number
+  /** Current/last completed round (1-based). */
+  round: number
+  /** The judged winner of the last completed round (rounds > 1 only). */
+  winnerRunId: string | null
 }
 
 export interface ArenaStartRequest {
@@ -894,6 +933,70 @@ export interface ArenaStartRequest {
   task: string
   /** 2–4 models to race on identical worktree copies of the repo. */
   candidates: MoaModelRef[]
+  /**
+   * Evolutionary rounds: after each round an LLM judge picks a winning diff,
+   * and every candidate of the next round starts from the winner's tree to
+   * improve on it. Default 1 (single round, no judging).
+   */
+  rounds?: number
+}
+
+// ---------------------------------------------------------------------------
+// Optimizer (autonomous benchmark-improve-commit loop per project)
+// ---------------------------------------------------------------------------
+
+export interface OptimizerRun {
+  id: string
+  projectId: string
+  goal: string
+  /** Command whose exit code gates correctness and whose output is scored. */
+  evalCommand: string
+  /** Optional second gate that must pass for a version to be accepted. */
+  testCommand: string | null
+  providerId: string | null
+  modelId: string | null
+  maxRounds: number
+  status: 'running' | 'stopped' | 'done' | 'failed'
+  roundsDone: number
+  bestScore: number | null
+  bestVersion: number | null
+  lastError: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** One evaluated attempt within an optimizer run (accepted = became a commit). */
+export interface OptimizerVersion {
+  runId: string
+  seq: number
+  score: number | null
+  accepted: boolean
+  summary: string
+  commitSha: string | null
+  createdAt: number
+}
+
+export interface OptimizerStartInput {
+  projectId: string
+  goal: string
+  evalCommand: string
+  testCommand?: string
+  providerId?: string | null
+  modelId?: string | null
+  maxRounds?: number
+  /** Let the optimization agent run shell commands itself (eval runs regardless). */
+  allowShell?: boolean
+}
+
+/** One recorded experiment outcome, injected into future sessions (#AVO lineage memory). */
+export interface ExperimentEntry {
+  id: string
+  projectId: string
+  title: string
+  outcome: 'improved' | 'failed' | 'neutral'
+  detail: string
+  source: string
+  createdAt: number
 }
 
 // ---------------------------------------------------------------------------
@@ -1738,6 +1841,49 @@ export interface SetTelegramBridgeInput {
   token?: string
   conversationId: string | null
   enabled: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Remote access (phone tunnel via relay)
+// ---------------------------------------------------------------------------
+
+/** One phone (or other device) paired to this desktop. */
+export interface RemoteDevice {
+  id: string
+  /** User-visible label chosen at pairing ("Magnus phone"). */
+  name: string
+  createdAt: number
+  lastSeenAt: number | null
+  /** Short hash of the device key, so the list can show which key is which. */
+  keyFingerprint: string
+  /** Set when revoked; revoked devices are kept for the list until deleted. */
+  revokedAt: number | null
+  /** Whether this device currently holds a live tunnel connection. */
+  online: boolean
+}
+
+/** Settings → Bridges state for the remote access section. */
+export interface RemoteStatus {
+  enabled: boolean
+  relayUrl: string | null
+  /** Whether the outbound tunnel to the relay is currently established. */
+  connected: boolean
+  /** Last connection error, redacted; null while healthy. */
+  error: string | null
+  desktopId: string | null
+  /**
+   * Pairing offer while "Pair a device" is open in the UI: the URL to encode
+   * as a QR code and when it expires. The secret itself stays in the fragment
+   * of that URL — it is shown, never stored.
+   */
+  pairing: { url: string; expiresAt: number } | null
+  devices: RemoteDevice[]
+}
+
+export interface RemoteSetConfigInput {
+  enabled: boolean
+  /** Relay base URL (https:// or ws://localhost for local testing); null keeps the current one. */
+  relayUrl?: string | null
 }
 
 // ---------------------------------------------------------------------------

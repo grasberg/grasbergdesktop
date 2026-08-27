@@ -30,6 +30,11 @@ export interface ModePromptOptions {
   /** Work mode: the conversation's sandbox level is read-only (mutating tools refused). */
   sandboxReadOnly?: boolean
   /**
+   * Work mode: recent experiment-log entries for this project (AVO-style
+   * lineage memory — what was tried, with which outcome), newest first.
+   */
+  experiments?: { title: string; outcome: 'improved' | 'failed' | 'neutral'; detail: string }[]
+  /**
    * Today's local date, e.g. "Friday, July 11, 2026" — lets the model resolve
    * relative dates ("tomorrow", "next Monday") for scheduling. Date only, so
    * the system prompt stays stable within a day (prompt caching).
@@ -228,6 +233,33 @@ function toolsFallbackSection(toolNames: string[]): string {
   )
 }
 
+/** Char cap on the injected experiment log (keeps the system prompt bounded). */
+export const EXPERIMENTS_PROMPT_CHAR_BUDGET = 4_000
+
+/**
+ * Lineage memory for a project: what has been tried before and how it went.
+ * Exported because both streaming conversations and headless optimizer rounds
+ * ride on it. Empty list -> empty string (no section at all).
+ */
+export function buildExperimentSection(
+  experiments: { title: string; outcome: 'improved' | 'failed' | 'neutral'; detail: string }[]
+): string {
+  if (experiments.length === 0) return ''
+  const lines: string[] = [
+    'Experiment log for this project — approaches already tried, newest first.',
+    'Build on what worked; do NOT repeat what failed:',
+  ]
+  let budget = EXPERIMENTS_PROMPT_CHAR_BUDGET
+  for (const experiment of experiments) {
+    const detail = experiment.detail.length > 0 ? ` — ${experiment.detail}` : ''
+    const line = `- [${experiment.outcome}] ${experiment.title}${detail}`
+    if (line.length > budget) break
+    budget -= line.length
+    lines.push(line)
+  }
+  return lines.join('\n')
+}
+
 /** Builds the mode-specific base system prompt (always non-empty). */
 export function buildModeSystemPrompt(
   mode: ConversationMode,
@@ -244,6 +276,9 @@ export function buildModeSystemPrompt(
     sections.push(WORK_SECTION)
     if (opts.planMode) sections.push(PLAN_MODE_SECTION)
     if (opts.sandboxReadOnly) sections.push(SANDBOX_READ_ONLY_SECTION)
+    if (opts.experiments && opts.experiments.length > 0) {
+      sections.push(buildExperimentSection(opts.experiments))
+    }
   }
   if (opts.toolNames && opts.toolNames.length > 0) {
     if (opts.toolsAvailable === false) {

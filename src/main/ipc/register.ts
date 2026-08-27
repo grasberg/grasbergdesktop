@@ -52,6 +52,7 @@ import { presetMeta } from '@shared/presets'
 import { buildUsageSummary } from '@shared/usage-summary'
 import { collectInboxItems } from '../services/inbox'
 import type { ArenaService } from '../services/arena'
+import type { OptimizerService } from '../services/optimizer'
 import { modeModelDefault } from '@shared/mode-models'
 import {
   apiKeySchema,
@@ -89,6 +90,7 @@ import type { Keystore } from '../keys/keystore'
 import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
 import type { ImBridgeManager } from '../im/manager'
+import type { RemoteService } from '../remote/service'
 import type { ApprovalBroker } from '../services/approval-broker'
 import {
   generateTriggerToken,
@@ -101,6 +103,7 @@ import { ProviderError, toNormalizedError } from '../providers/errors'
 import { toJson, toMarkdown, exportFileBase } from '../services/export'
 import { readSkillsFromFolder } from '../services/skills'
 import { applyBackup, buildBackup } from '../services/backup'
+import type { IpcHandler, IpcHandlerMap } from './handler-map'
 import {
   MAX_IMAGE_BASE64_CHARS,
   PASTED_IMAGE_MIME_TYPES,
@@ -146,6 +149,14 @@ export interface RegisterIpcDeps {
   terminalService: TerminalService
   /** Code Arena: N models racing the same task in isolated worktrees. */
   arenaService: ArenaService
+  /** Autonomous optimize-evaluate-commit loops per project. */
+  optimizerService: OptimizerService
+  /**
+   * Remote access (phone tunnel). Resolved lazily: the service needs this
+   * function's RETURN VALUE (the handler map), so it is constructed after
+   * registerIpc returns and reached through this getter ever after.
+   */
+  getRemoteService: () => RemoteService | null
   getWindows: () => BrowserWindow[]
 }
 
@@ -463,6 +474,8 @@ const arenaStartSchema = z.object({
     .array(z.object({ providerId: z.string().min(1), modelId: z.string().min(1).max(200) }))
     .min(2)
     .max(4),
+  // Evolutionary rounds (LLM-judged; the winner seeds the next round).
+  rounds: z.number().int().min(1).max(5).optional(),
 })
 
 const arenaApplySchema = z.object({ conversationId: z.string().min(1), runId: z.string().min(1) })
@@ -493,6 +506,17 @@ const activityListSchema = z
   .optional()
 
 const workflowsRunOptsSchema = z.object({ dryRun: z.boolean().optional() }).optional()
+
+const optimizerStartSchema = z.object({
+  projectId: z.string().min(1),
+  goal: z.string().trim().min(1).max(4_000),
+  evalCommand: z.string().trim().min(1).max(2_000),
+  testCommand: z.string().trim().max(2_000).optional(),
+  providerId: z.string().min(1).nullable().optional(),
+  modelId: z.string().min(1).max(200).nullable().optional(),
+  maxRounds: z.number().int().min(1).max(40).optional(),
+  allowShell: z.boolean().optional(),
+})
 
 // ---------------------------------------------------------------------------
 // Settings cleanup
@@ -551,17 +575,16 @@ function providerRefsCleared(settings: AppSettings, providerId: string): Partial
 // Registration
 // ---------------------------------------------------------------------------
 
-export function registerIpc(deps: RegisterIpcDeps): void {
+export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const { db, chatService, codeService, gitService, keystore, toolSystem, approvalBroker, questionBroker, oauthManager } = deps
 
-  const register = (channel: ChannelName, fn: (...args: unknown[]) => unknown): void => {
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      try {
-        return ok(await fn(...args))
-      } catch (e) {
-        return err(toNormalizedError(e))
-      }
-    })
+  // Handlers collect here first, then wire to ipcMain in one loop at the end.
+  // Returning the map lets the remote service (phone tunnel) invoke the exact
+  // same functions under its own allowlist — one implementation, two transports.
+  const handlers: IpcHandlerMap = new Map()
+
+  const register = (channel: ChannelName, fn: IpcHandler): void => {
+    handlers.set(channel, fn)
   }
 
   const dialogParent = (): BrowserWindow | undefined =>
@@ -1284,6 +1307,27 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     deps.arenaService.discard(requireString(conversationId, 'Conversation id'))
   )
 
+  // -- optimizer (autonomous optimize-evaluate-commit loops) --------------------
+  //
+  // The eval command is executed by MAIN only (never through the agent's shell
+  // tool), so the scoring path stays deterministic and auditable in Activity.
+
+  register(CHANNELS.optimizerStart, (input) => deps.optimizerService.start(parseInput(optimizerStartSchema, input)))
+
+  register(CHANNELS.optimizerStop, (runId) =>
+    deps.optimizerService.stop(requireString(runId, 'Run id'))
+  )
+
+  register(CHANNELS.optimizerList, () => deps.optimizerService.list())
+
+  register(CHANNELS.optimizerVersions, (runId) =>
+    deps.optimizerService.versions(requireString(runId, 'Run id'))
+  )
+
+  register(CHANNELS.experimentsList, (projectId) =>
+    db.experiments.listForProject(requireString(projectId, 'Project id'))
+  )
+
   // -- agent inbox (unified review queue for background results) ----------------
 
   register(CHANNELS.inboxList, () => collectInboxItems(db))
@@ -1645,6 +1689,30 @@ export function registerIpc(deps: RegisterIpcDeps): void {
   // same rule is enforced here — a webhook that can never fire is rejected.
   register(CHANNELS.imSetWebhook, (url) =>
     imBridgeManager.setWebhook(parseInput(outboundWebhookUrlSchema, url ?? null))
+  )
+
+  // -- remote access (phone tunnel) --------------------------------------------
+
+  const remote = (): RemoteService => {
+    const service = deps.getRemoteService()
+    if (!service) throw invalid('Remote access is not available.')
+    return service
+  }
+  const remoteSetConfigSchema = z.object({
+    enabled: z.boolean(),
+    relayUrl: z.string().trim().max(500).nullable().optional(),
+  })
+
+  register(CHANNELS.remoteStatus, () => remote().status())
+
+  register(CHANNELS.remoteSetConfig, (input) =>
+    remote().setConfig(parseInput(remoteSetConfigSchema, input))
+  )
+
+  register(CHANNELS.remotePair, (open) => remote().pair(parseInput(z.boolean(), open)))
+
+  register(CHANNELS.remoteDeviceRevoke, (deviceId) =>
+    remote().revokeDevice(requireString(deviceId, 'Device id'))
   )
 
   // -- workflows --------------------------------------------------------------
@@ -2069,4 +2137,17 @@ export function registerIpc(deps: RegisterIpcDeps): void {
     }
     return { canceled: false, imported, chunks, skipped }
   })
+
+  // Wire every collected handler to ipcMain with the shared normalization:
+  // renderer invoke → IpcResult, never a thrown exception across the boundary.
+  for (const [channel, fn] of handlers) {
+    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
+      try {
+        return ok(await fn(...args))
+      } catch (e) {
+        return err(toNormalizedError(e))
+      }
+    })
+  }
+  return handlers
 }

@@ -47,7 +47,12 @@ async function until(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 
 interface FakePorts {
   files?: GitFileChange[]
-  generate?: (prompt: string, providerId: string, modelId: string, opts: { signal?: AbortSignal }) => Promise<string>
+  generate?: (
+    prompt: string,
+    providerId: string | undefined,
+    modelId: string | undefined,
+    opts: { signal?: AbortSignal; json?: boolean }
+  ) => Promise<string>
 }
 
 function makeService(ports: FakePorts = {}) {
@@ -95,6 +100,7 @@ function makeService(ports: FakePorts = {}) {
   return { service, removed, proposed }
 }
 
+
 const CANDIDATES = [
   { providerId: 'p1', modelId: 'model-a' },
   { providerId: 'p2', modelId: 'model-b' },
@@ -109,7 +115,7 @@ describe('ArenaService', () => {
 
     const runs = db.agentPlatform.runsList(conversationId)
     expect(runs).toHaveLength(2)
-    expect(runs.every((r) => r.agentName === 'arena')).toBe(true)
+    expect(runs.every((r) => r.agentName === 'arena-r1')).toBe(true)
 
     await until(() => service.status(conversationId)?.status === 'finished')
     const finished = service.status(conversationId)!

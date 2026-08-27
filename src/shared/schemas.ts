@@ -447,6 +447,9 @@ export const settingsPatchSchema = z
     // rotation) and written straight to the settings repo. Accepting it here
     // would let a renderer — or a replayed IPC payload — choose the key that
     // guards the app's only inbound port.
+    // remoteDesktopId is deliberately absent too: the routing id is minted by
+    // main when the tunnel is first enabled. The relay/desktop auth token and
+    // per-device keys never appear here — they live in encrypted storage.
   })
   .partial()
   .strict()

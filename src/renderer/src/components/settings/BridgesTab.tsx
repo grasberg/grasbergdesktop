@@ -1,11 +1,13 @@
 /**
  * Settings → Bridges: run the assistant from a Telegram bot bound to a
- * conversation, and POST assistant replies to a generic outbound webhook.
- * The bot token is write-only (encrypted in main, never shown again).
+ * conversation, POST assistant replies to a generic outbound webhook, and
+ * pair a phone through the relay tunnel for full remote access. Secrets are
+ * write-only (encrypted in main, never shown again).
  */
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
-import type { ImBridgeStatus, WorkflowTriggerInfo } from '@shared/types'
+import QRCode from 'qrcode'
+import type { ImBridgeStatus, RemoteStatus, WorkflowTriggerInfo } from '@shared/types'
 import { errorMessage } from '@/api/uld'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useConversationsStore } from '@/stores/conversations'
@@ -42,6 +44,13 @@ export default function BridgesTab(): ReactElement {
   const [trigger, setTrigger] = useState<WorkflowTriggerInfo | null>(null)
   const [portDraft, setPortDraft] = useState('')
 
+  // Remote access (phone tunnel). The pairing QR is rendered from the offer
+  // URL; the secret inside the fragment never leaves this component + main.
+  const [remote, setRemote] = useState<RemoteStatus | null>(null)
+  const [relayDraft, setRelayDraft] = useState('')
+  const [qrData, setQrData] = useState<string | null>(null)
+  const remoteBusy = useRef(false)
+
   const applyStatus = (s: ImBridgeStatus): void => {
     setStatus(s)
     setConversationId(s.telegramConversationId ?? '')
@@ -55,6 +64,37 @@ export default function BridgesTab(): ReactElement {
       if (res.ok) applyStatus(res.data)
     })
   }, [convLoaded, loadConversations])
+
+  // Remote access: initial read + live refresh whenever tunnel/device state
+  // changes (a phone paired, went online, was revoked…).
+  const refreshRemote = (): void => {
+    void window.uld.remote.status().then((res) => {
+      if (res.ok) setRemote(res.data)
+    })
+  }
+  useEffect(() => {
+    refreshRemote()
+    return window.uld.remote.onChanged(refreshRemote)
+  }, [])
+  useEffect(() => {
+    if (remote && relayDraft === '' && remote.relayUrl) setRelayDraft(remote.relayUrl)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remote?.relayUrl])
+  // (Re)renders the QR whenever a pairing offer appears or changes.
+  useEffect(() => {
+    const url = remote?.pairing?.url
+    if (!url) {
+      setQrData(null)
+      return
+    }
+    let alive = true
+    void QRCode.toDataURL(url, { margin: 1, width: 220 }).then((data) => {
+      if (alive) setQrData(data)
+    })
+    return () => {
+      alive = false
+    }
+  }, [remote?.pairing?.url])
 
   // Re-read whenever the endpoint's settings change: whether it actually bound
   // (the port may be taken) is main's answer, not something the toggle knows.
@@ -143,6 +183,60 @@ export default function BridgesTab(): ReactElement {
     }
   }
 
+  const runRemote = async (action: () => Promise<void>): Promise<void> => {
+    if (remoteBusy.current) return
+    remoteBusy.current = true
+    try {
+      await action()
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+    } finally {
+      remoteBusy.current = false
+    }
+  }
+
+  const saveRemote = (enabledNext: boolean): void => {
+    void runRemote(async () => {
+      const trimmed = relayDraft.trim()
+      const res = await window.uld.remote.setConfig({
+        enabled: enabledNext,
+        // An empty draft means "not typed yet", not "clear the stored URL":
+        // the field is pre-filled from status once it loads, and sending null
+        // here during that window would wipe a configured relay on a stray
+        // uncheck. Only an explicitly typed URL is ever sent.
+        ...(trimmed ? { relayUrl: trimmed } : {}),
+      })
+      if (!res.ok) throw res.error
+      setRemote(res.data)
+      toast(enabledNext ? 'Remote access enabled.' : 'Remote access disabled.', 'success')
+    })
+  }
+
+  const openPairing = (): void => {
+    void runRemote(async () => {
+      const res = await window.uld.remote.pair(true)
+      if (!res.ok) throw res.error
+      setRemote(res.data)
+    })
+  }
+
+  const cancelPairing = (): void => {
+    void runRemote(async () => {
+      const res = await window.uld.remote.pair(false)
+      if (!res.ok) throw res.error
+      setRemote(res.data)
+    })
+  }
+
+  const revokeDevice = (deviceId: string): void => {
+    void runRemote(async () => {
+      const res = await window.uld.remote.revoke(deviceId)
+      if (!res.ok) throw res.error
+      setRemote(res.data)
+      toast('Device revoked.', 'success')
+    })
+  }
+
   return (
     <section aria-label="Bridges">
       <header className="tab-header">
@@ -229,6 +323,107 @@ export default function BridgesTab(): ReactElement {
           ) : null}
         </span>
       </label>
+
+      <h4 className="section-subhead">Remote access (phone)</h4>
+      <p className="field-hint">
+        Use the full app from your phone: conversations, live streaming, approvals. The desktop
+        opens no port — it dials out to a relay you host (see relay/ in the repository), and every
+        frame is end-to-end encrypted; the relay only routes ciphertext. Off by default.
+      </p>
+      <label className="field">
+        <span className="field-label">Relay URL</span>
+        <input
+          className="input"
+          value={relayDraft}
+          placeholder="https://relay.example.com"
+          onChange={(e) => setRelayDraft(e.target.value)}
+        />
+      </label>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={remote?.enabled ?? false}
+          onChange={(e) => saveRemote(e.target.checked)}
+        />
+        <span>
+          Enable remote access
+          {remote ? (
+            <span className="field-hint">
+              {remote.enabled
+                ? remote.connected
+                  ? 'Connected to the relay.'
+                  : remote.error
+                    ? `Not connected — ${remote.error}`
+                    : 'Connecting…'
+                : 'Off.'}
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {remote?.enabled ? (
+        <>
+          <div className="btn-row">
+            <button type="button" className="btn" onClick={() => saveRemote(true)}>
+              Save relay settings
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={openPairing}
+              disabled={!remote.connected}
+            >
+              Pair a device
+            </button>
+            {remote.pairing ? (
+              <button type="button" className="btn" onClick={cancelPairing}>
+                Cancel pairing
+              </button>
+            ) : null}
+          </div>
+          {remote.pairing ? (
+            <div className="remote-pairing">
+              {qrData ? <img className="remote-qr" src={qrData} alt="Pairing QR code" /> : null}
+              <p className="field-hint">
+                Scan with the phone&apos;s camera. The code works once, expires in 15 minutes, and
+                the connection is end-to-end encrypted — the relay never sees your chats.
+              </p>
+            </div>
+          ) : null}
+          {remote.devices.length > 0 ? (
+            <div className="remote-devices">
+              <span className="field-label">Paired devices</span>
+              <ul>
+                {remote.devices.map((device) => (
+                  <li key={device.id}>
+                    <span className={`remote-dot${device.online ? ' on' : ''}`} aria-hidden />
+                    <span className="remote-device-name">{device.name}</span>
+                    <span className="field-hint">
+                      {device.revokedAt
+                        ? 'Revoked'
+                        : device.online
+                          ? 'Online'
+                          : device.lastSeenAt
+                            ? `Last seen ${new Date(device.lastSeenAt).toLocaleString()}`
+                            : 'Never connected'}
+                    </span>
+                    {!device.revokedAt ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => revokeDevice(device.id)}
+                      >
+                        Revoke
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="field-hint">No devices paired yet.</p>
+          )}
+        </>
+      ) : null}
 
       <h4 className="section-subhead">Trigger endpoint (incoming)</h4>
       <p className="field-hint">

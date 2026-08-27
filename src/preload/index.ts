@@ -9,6 +9,7 @@ import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
 import type {
   ArenaState,
   McpServerRuntime,
+  OptimizerRun,
   StreamEventEnvelope,
   TerminalDataEvent,
   TerminalExitEvent,
@@ -159,6 +160,16 @@ const api: UldApi = {
     discard: (conversationId) => ipcRenderer.invoke(CHANNELS.arenaDiscard, conversationId),
     onChanged: subscribe<{ arena: ArenaState }>(CHANNELS.arenaChanged),
   },
+  optimizer: {
+    start: (input) => ipcRenderer.invoke(CHANNELS.optimizerStart, input),
+    stop: (runId) => ipcRenderer.invoke(CHANNELS.optimizerStop, runId),
+    list: () => ipcRenderer.invoke(CHANNELS.optimizerList),
+    versions: (runId) => ipcRenderer.invoke(CHANNELS.optimizerVersions, runId),
+    onChanged: subscribe<{ run: OptimizerRun }>(CHANNELS.optimizerChanged),
+  },
+  experiments: {
+    list: (projectId) => ipcRenderer.invoke(CHANNELS.experimentsList, projectId),
+  },
   terminal: {
     create: (conversationId) => ipcRenderer.invoke(CHANNELS.terminalCreate, conversationId),
     input: (sessionId, data) => ipcRenderer.invoke(CHANNELS.terminalInput, { sessionId, data }),
@@ -234,6 +245,13 @@ const api: UldApi = {
     status: () => ipcRenderer.invoke(CHANNELS.imStatus),
     setTelegram: (input) => ipcRenderer.invoke(CHANNELS.imSetTelegram, input),
     setWebhook: (url) => ipcRenderer.invoke(CHANNELS.imSetWebhook, url),
+  },
+  remote: {
+    status: () => ipcRenderer.invoke(CHANNELS.remoteStatus),
+    setConfig: (input) => ipcRenderer.invoke(CHANNELS.remoteSetConfig, input),
+    pair: (open) => ipcRenderer.invoke(CHANNELS.remotePair, open),
+    revoke: (deviceId) => ipcRenderer.invoke(CHANNELS.remoteDeviceRevoke, deviceId),
+    onChanged: subscribe<void>(CHANNELS.remoteChanged),
   },
   workflows: {
     list: () => ipcRenderer.invoke(CHANNELS.workflowsList),

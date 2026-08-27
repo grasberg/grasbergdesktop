@@ -67,6 +67,12 @@ import { resolveAdapter as resolveAdapterForProvider } from '../providers/regist
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { decryptKey } from '../keys/keystore'
 import { buildMemorySection, buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
+import {
+  STALL_LIMIT_NOTE,
+  STALL_STOP_ROUNDS,
+  roundWasProductive,
+  stallNudge,
+} from './stall-supervisor'
 import type { ToolExecuteContext } from '../tools/executor'
 import { HEADLESS_CONVERSATION_ID, USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
@@ -1340,6 +1346,13 @@ export class ChatService {
               .listForAgent(null)
               .slice(0, MEMORY_MAX_INJECTED)
               .map((m) => ({ title: m.title, content: m.content })),
+          }
+        : {}),
+      ...(conversation.mode === 'work' && conversation.projectId
+        ? {
+            experiments: this.db.experiments
+              .listForProject(conversation.projectId, 20)
+              .map((e) => ({ title: e.title, outcome: e.outcome, detail: e.detail })),
           }
         : {}),
     }
@@ -2899,6 +2912,8 @@ export class ChatService {
       }
 
       let toolRounds = 0
+      // Stall supervision: consecutive rounds whose tool calls ALL failed.
+      let unproductiveRounds = 0
       for (;;) {
         const roundCalls: ToolCallRecord[] = []
         let roundText = ''
@@ -3032,6 +3047,24 @@ export class ChatService {
         messages.push({ role: 'assistant', content: roundText, toolCalls: roundCalls })
         for (const call of roundCalls) {
           messages.push({ role: 'tool', content: call.result ?? '', toolCallId: call.id })
+        }
+
+        // Stall supervision (see stall-supervisor.ts): a run stuck in rounds
+        // of failing calls gets redirected first, then stopped — instead of
+        // silently burning the whole round cap.
+        if (roundWasProductive(roundCalls.map((call) => call.result ?? ''))) {
+          unproductiveRounds = 0
+        } else {
+          unproductiveRounds += 1
+          if (unproductiveRounds >= STALL_STOP_ROUNDS) {
+            appendText(text.length > 0 ? `\n\n${STALL_LIMIT_NOTE}` : STALL_LIMIT_NOTE)
+            finishReason = 'stop'
+            break
+          }
+          const nudge = stallNudge(unproductiveRounds)
+          if (nudge) {
+            messages.push({ role: 'user', content: nudge })
+          }
         }
 
         // A computer-use action leaves a screenshot on the shared browser

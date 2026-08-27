@@ -15,7 +15,9 @@ npm run dev          # electron-vite dev with hot reload
 npm run typecheck    # tsc --noEmit for BOTH projects (tsconfig.node.json + tsconfig.web.json)
 npm test             # vitest run (full suite; plain Node, no Electron needed)
 npm run test:watch   # vitest watch mode
-npm run build        # typecheck + electron-vite build → out/
+npm run build        # typecheck + mobile bundle + relay bundle + electron-vite build → out/
+npm run build:mobile # just the phone web client (vite.mobile.config.ts → out/mobile)
+npm run build:relay  # just the relay server (esbuild single-file → relay/relay.mjs)
 npm run package:win  # build + electron-builder NSIS installer → release/
 ```
 
@@ -40,7 +42,7 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v36, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v38, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
 - `src/renderer/src/stores/contracts.ts` — renderer store contracts
 
@@ -76,6 +78,10 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 ### Tool system (`src/main/tools/`)
 
 One registry for built-in tools, user-defined custom HTTP tools, and real MCP servers (`@modelcontextprotocol/sdk`, stdio + HTTP transports). Everything goes through the same per-tool permission model and approval broker; sensitive/dangerous tools (`run_shell_command`, `browser`, `computer`) are opt-in via settings and filtered out of the tool list unless enabled. Browser/computer use drives a hidden sandboxed BrowserWindow (`src/main/browser/session.ts`), never the OS desktop.
+
+### Remote access / phone tunnel (`src/main/remote/`, `src/mobile/`, `relay/`)
+
+Full app access from a phone via a self-hosted relay. The desktop opens NO inbound port — it dials out to the relay (`RemoteService` + `RelayClient`, the same discipline as the Telegram bridge), phones connect to the relay, and every application frame between them is end-to-end encrypted (AES-256-GCM, HKDF-derived key from a one-time QR pairing secret; the relay sees ciphertext only — protocol in `src/shared/remote-protocol.ts`). Phones speak the renderer's own IPC dialect over the tunnel: `registerIpc` now returns its handler map (`src/main/ipc/handler-map.ts`) and `src/main/remote/router.ts` gates it behind an explicit channel allowlist. Push events flow through the main event bus (`src/main/events.ts`) that `broadcast()` publishes to (windows and tunnel are both subscribers). Paired devices live in `remote_devices` (migration v38, token hashes only); frame keys in `tool_secrets` scope `remote`. The phone web client is a second, tiny vite root (`src/mobile/` → `out/mobile`, served from the desktop through the relay so it's always version-matched); the relay itself is a dumb content-blind router in `relay/` (single-file bundle via `npm run build:relay`, `relay/README.md` for deployment).
 
 ## Testing conventions
 

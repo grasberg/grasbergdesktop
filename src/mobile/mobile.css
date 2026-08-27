@@ -1,0 +1,396 @@
+/* The mobile client — dark, thumb-friendly, deliberately plain. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: #14171b;
+  color: #e6e8eb;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+button {
+  font: inherit;
+  border: 1px solid #333941;
+  background: #1d2228;
+  color: #e6e8eb;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  background: #2f6feb;
+  border-color: #2f6feb;
+  color: #fff;
+}
+
+/* -- top-level bars -------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  border-bottom: 1px solid #262c33;
+  position: sticky;
+  top: 0;
+  background: #14171b;
+  z-index: 5;
+}
+
+.topbar .icon {
+  font-size: 1.4em;
+  padding: 2px 12px;
+}
+
+.topbar .title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar .title .sub {
+  font-size: 0.75em;
+  color: #8b949e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  border-top: 1px solid #262c33;
+  font-size: 0.8em;
+  color: #8b949e;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: #8b949e;
+}
+
+.dot.on {
+  background: #3fb950;
+}
+
+.dot.wait {
+  background: #d29922;
+}
+
+/* -- gate (unpaired / pairing / error) ------------------------------------- */
+
+.gate {
+  margin: auto;
+  padding: 32px;
+  max-width: 420px;
+  text-align: center;
+}
+
+.gate h1 {
+  font-size: 1.6em;
+  margin-bottom: 8px;
+}
+
+.gate .error {
+  color: #f85149;
+}
+
+.gate button {
+  margin-top: 16px;
+}
+
+/* -- conversation list ------------------------------------------------------ */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.list li button {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid #1d2228;
+  border-radius: 0;
+  padding: 12px 14px;
+  background: transparent;
+}
+
+.list .title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list .snippet {
+  font-size: 0.85em;
+  color: #8b949e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list .when {
+  font-size: 0.75em;
+  color: #6e7681;
+}
+
+.empty {
+  text-align: center;
+  color: #8b949e;
+  padding: 40px 24px;
+}
+
+/* -- chat -------------------------------------------------------------------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  max-width: 88%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-size: 0.95em;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.bubble.mine {
+  align-self: flex-end;
+  background: #2f6feb;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+  white-space: pre-wrap;
+}
+
+.bubble.theirs {
+  align-self: flex-start;
+  background: #1d2228;
+  border-bottom-left-radius: 4px;
+}
+
+.bubble.streaming {
+  opacity: 0.9;
+}
+
+/* Markdown inside assistant bubbles */
+.md :first-child {
+  margin-top: 0;
+}
+
+.md :last-child {
+  margin-bottom: 0;
+}
+
+.md pre {
+  background: #0f1216;
+  padding: 10px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+
+.md code {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  background: #0f1216;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.md pre code {
+  padding: 0;
+}
+
+.md table {
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.md th,
+.md td {
+  border: 1px solid #333941;
+  padding: 4px 8px;
+}
+
+/* -- composer --------------------------------------------------------------- */
+
+.composer {
+  border-top: 1px solid #262c33;
+  padding: 10px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.input-row textarea {
+  flex: 1;
+  resize: none;
+  font: inherit;
+  background: #1d2228;
+  border: 1px solid #333941;
+  border-radius: 12px;
+  color: #e6e8eb;
+  padding: 10px 12px;
+  max-height: 120px;
+}
+
+.input-row .send {
+  background: #2f6feb;
+  border-color: #2f6feb;
+  color: #fff;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 1.1em;
+  flex: none;
+}
+
+.composer .stop {
+  width: 100%;
+  background: #3a1d1d;
+  border-color: #6e2c2c;
+}
+
+.composer .regen {
+  align-self: flex-start;
+  font-size: 0.85em;
+  padding: 4px 12px;
+}
+
+/* -- interactive cards -------------------------------------------------------- */
+
+.cards {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  border: 1px solid #333941;
+  border-left: 3px solid #d29922;
+  border-radius: 10px;
+  background: #1a1f25;
+  padding: 10px 12px;
+}
+
+.card.approval {
+  border-left-color: #d29922;
+}
+
+.card.question {
+  border-left-color: #2f6feb;
+}
+
+.card p {
+  margin: 6px 0;
+  font-size: 0.9em;
+}
+
+.card .mono {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8em;
+  color: #8b949e;
+}
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.card-actions input {
+  flex: 1;
+  font: inherit;
+  font-size: 0.9em;
+  background: #0f1216;
+  border: 1px solid #333941;
+  border-radius: 8px;
+  color: #e6e8eb;
+  padding: 8px 10px;
+}
+
+/* -- toast ------------------------------------------------------------------ */
+
+.toast {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2f6feb;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 0.85em;
+  z-index: 50;
+  max-width: 90vw;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}

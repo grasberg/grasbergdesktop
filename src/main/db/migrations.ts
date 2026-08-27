@@ -949,4 +949,76 @@ export const MIGRATIONS: Migration[] = [
          WHERE role = 'assistant' AND usage_json IS NOT NULL`,
     ],
   },
+  {
+    version: 37,
+    name: 'optimizer-and-experiments',
+    // Autonomous optimizer runs (goal + eval command + accepted-version
+    // lineage, AVO-style) and a per-project experiment log injected into
+    // future sessions. project_id is intentionally NOT an FK: granted code
+    // folders are user-managed and can disappear independently; stale rows
+    // are simply never shown because every query is scoped to a live project.
+    statements: [
+      `CREATE TABLE optimizer_runs (
+         id TEXT PRIMARY KEY,
+         project_id TEXT NOT NULL,
+         goal TEXT NOT NULL,
+         eval_command TEXT NOT NULL,
+         test_command TEXT,
+         provider_id TEXT,
+         model_id TEXT,
+         max_rounds INTEGER NOT NULL DEFAULT 6,
+         status TEXT NOT NULL CHECK (status IN ('running','stopped','done','failed')),
+         rounds_done INTEGER NOT NULL DEFAULT 0,
+         best_score REAL,
+         best_version INTEGER,
+         last_error TEXT,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_optimizer_runs_project ON optimizer_runs(project_id, created_at DESC)`,
+      `CREATE TABLE optimizer_versions (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         run_id TEXT NOT NULL REFERENCES optimizer_runs(id) ON DELETE CASCADE,
+         seq INTEGER NOT NULL,
+         score REAL,
+         accepted INTEGER NOT NULL,
+         summary TEXT NOT NULL DEFAULT '',
+         commit_sha TEXT,
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_optimizer_versions ON optimizer_versions(run_id, seq)`,
+      `CREATE TABLE experiment_entries (
+         id TEXT PRIMARY KEY,
+         project_id TEXT NOT NULL,
+         title TEXT NOT NULL,
+         outcome TEXT NOT NULL CHECK (outcome IN ('improved','failed','neutral')),
+         detail TEXT NOT NULL DEFAULT '',
+         source TEXT NOT NULL DEFAULT 'manual',
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_experiment_entries ON experiment_entries(project_id, created_at DESC)`,
+    ],
+  },
+  {
+    version: 38,
+    name: 'remote-devices',
+    // Phones paired to this desktop through the relay tunnel. The device's
+    // long-lived access token is stored as a SHA-256 hash only (the plaintext
+    // leaves the machine exactly once, E2E-encrypted, at pairing); the frame
+    // key itself lives in tool_secrets (encrypted), not here. Revocation sets
+    // revoked_at — rows are kept so the settings list can show history until
+    // the user deletes the device.
+    statements: [
+      `CREATE TABLE remote_devices (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         token_hash TEXT NOT NULL,
+         key_fingerprint TEXT NOT NULL DEFAULT '',
+         created_at INTEGER NOT NULL,
+         last_seen_at INTEGER,
+         revoked_at INTEGER
+       )`,
+      `CREATE INDEX idx_remote_devices_seen ON remote_devices(revoked_at, last_seen_at DESC)`,
+    ],
+  },
 ]

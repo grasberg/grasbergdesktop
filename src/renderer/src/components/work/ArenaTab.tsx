@@ -102,6 +102,7 @@ export default function ArenaTab(): ReactElement {
 
   const [arena, setArena] = useState<ArenaState | null>(null)
   const [task, setTask] = useState('')
+  const [rounds, setRounds] = useState(1)
   const [rows, setRows] = useState<MoaModelRef[]>([
     { providerId: '', modelId: '' },
     { providerId: '', modelId: '' },
@@ -139,7 +140,12 @@ export default function ArenaTab(): ReactElement {
     setBusy(true)
     try {
       const state = await unwrap(
-        window.uld.arena.start({ conversationId, task: task.trim(), candidates: rows })
+        window.uld.arena.start({
+          conversationId,
+          task: task.trim(),
+          candidates: rows,
+          ...(rounds > 1 ? { rounds } : {}),
+        })
       )
       setArena(state)
     } catch (e) {
@@ -203,6 +209,25 @@ export default function ArenaTab(): ReactElement {
             onRemove={() => setRows((prev) => prev.filter((_, i) => i !== index))}
           />
         ))}
+        <div className="arena-candidate-row">
+          <label className="field-hint" htmlFor="arena-rounds">
+            Evolutionary rounds — after each round an LLM judge picks the winning diff and every
+            candidate of the next round starts from it:
+          </label>
+          <select
+            id="arena-rounds"
+            className="select arena-select"
+            style={{ flex: '0 0 auto' }}
+            value={rounds}
+            onChange={(e) => setRounds(Number(e.target.value))}
+          >
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="arena-actions">
           {rows.length < MAX_CANDIDATES ? (
             <button
@@ -233,6 +258,11 @@ export default function ArenaTab(): ReactElement {
         <span className="arena-board-task" title={arena.task}>
           {arena.task}
         </span>
+        {arena.totalRounds > 1 ? (
+          <span className="badge" title="Evolutionary round / total rounds">
+            round {Math.min(arena.round, arena.totalRounds)}/{arena.totalRounds}
+          </span>
+        ) : null}
         {running ? (
           <button type="button" className="btn btn-ghost" onClick={stop}>
             Stop
@@ -243,11 +273,13 @@ export default function ArenaTab(): ReactElement {
         </button>
       </header>
       <div className="arena-candidates">
-        {arena.candidates.map((candidate) => (
-          <article key={candidate.runId} className="arena-card">
+        {[...arena.candidates].reverse().map((candidate) => (
+          <article
+            key={candidate.runId}
+            className={`arena-card${candidate.runId === arena.winnerRunId ? ' winner' : ''}`}
+          >
             <header className="arena-card-head">
-              <span
-                className={`run-dot ${
+              <span className={`run-dot ${
                   candidate.status === 'done'
                     ? 'ok'
                     : candidate.status === 'running'
@@ -259,6 +291,9 @@ export default function ArenaTab(): ReactElement {
               <span className="arena-card-model mono" title={candidate.modelId}>
                 {candidate.providerLabel} · {candidate.modelId}
               </span>
+              {arena.totalRounds > 1 ? (
+                <span className="badge">r{candidate.round}</span>
+              ) : null}
               <span className="arena-card-status">{statusLabel(candidate.status)}</span>
             </header>
             {candidate.diffStat ? (

@@ -48,6 +48,8 @@ import type {
   DreamResult,
   BackupSummary,
   SetTelegramBridgeInput,
+  RemoteSetConfigInput,
+  RemoteStatus,
   Skill,
   SkillInput,
   SkillPatch,
@@ -85,6 +87,10 @@ import type {
   StreamEventEnvelope,
   ArenaStartRequest,
   ArenaState,
+  ExperimentEntry,
+  OptimizerRun,
+  OptimizerStartInput,
+  OptimizerVersion,
   InboxItem,
   InboxItemType,
   TerminalDataEvent,
@@ -279,6 +285,14 @@ export const CHANNELS = {
   imSetTelegram: 'im:setTelegram',
   imSetWebhook: 'im:setWebhook',
 
+  // Remote access (phone tunnel via relay)
+  remoteStatus: 'remote:status',
+  /** Enables/updates the tunnel config; (re)connects or disconnects. */
+  remoteSetConfig: 'remote:setConfig',
+  /** Opens a pairing offer (QR) for a new phone; cancels when called with false. */
+  remotePair: 'remote:pair',
+  remoteDeviceRevoke: 'remote:deviceRevoke',
+
   // Workflows
   workflowsList: 'workflows:list',
   workflowsGet: 'workflows:get',
@@ -325,6 +339,15 @@ export const CHANNELS = {
   arenaStop: 'arena:stop',
   arenaDiscard: 'arena:discard',
 
+  // optimizer (autonomous benchmark-improve-commit loop per project)
+  optimizerStart: 'optimizer:start',
+  optimizerStop: 'optimizer:stop',
+  optimizerList: 'optimizer:list',
+  optimizerVersions: 'optimizer:versions',
+
+  // per-project experiment log (AVO-style lineage memory)
+  experimentsList: 'experiments:list',
+
   // agent inbox (unified review queue for background results)
   inboxList: 'inbox:list',
   inboxMarkReviewed: 'inbox:markReviewed',
@@ -367,10 +390,17 @@ export const CHANNELS = {
   mainNotice: 'push:mainNotice',
   /** Sent with { arena: ArenaState } on every arena/candidate state change. */
   arenaChanged: 'push:arenaChanged',
+  /** Sent with { run: OptimizerRun } whenever an optimizer run row mutates. */
+  optimizerChanged: 'push:optimizerChanged',
   /** Sent with TerminalDataEvent for every terminal output chunk. */
   terminalData: 'push:terminalData',
   /** Sent with TerminalExitEvent when a terminal session's shell exits. */
   terminalExit: 'push:terminalExit',
+  /**
+   * Sent (no payload) whenever remote-access state changes: tunnel up/down,
+   * a device paired/revoked/seen. The Bridges tab refetches remote:status.
+   */
+  remoteChanged: 'push:remoteChanged',
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
@@ -773,6 +803,21 @@ export interface UldApi {
     discard(conversationId: string): Promise<IpcResult<void>>
     onChanged(cb: (event: { arena: ArenaState }) => void): () => void
   }
+  optimizer: {
+    /** Starts an autonomous optimize-evaluate-commit loop for a project. */
+    start(input: OptimizerStartInput): Promise<IpcResult<OptimizerRun>>
+    /** Stops a running loop; the row keeps its state and versions. */
+    stop(runId: string): Promise<IpcResult<OptimizerRun | null>>
+    /** All runs, newest first. */
+    list(): Promise<IpcResult<OptimizerRun[]>>
+    /** Accepted + rejected attempts of one run, in seq order. */
+    versions(runId: string): Promise<IpcResult<OptimizerVersion[]>>
+    onChanged(cb: (event: { run: OptimizerRun }) => void): () => void
+  }
+  experiments: {
+    /** Per-project experiment log (AVO-style lineage memory), newest first. */
+    list(projectId: string): Promise<IpcResult<ExperimentEntry[]>>
+  }
   terminal: {
     /**
      * Returns the conversation's live terminal session (with scrollback for
@@ -875,6 +920,19 @@ export interface UldApi {
     /** Token travels to main once, is encrypted immediately, never returned. */
     setTelegram(input: SetTelegramBridgeInput): Promise<IpcResult<ImBridgeStatus>>
     setWebhook(url: string | null): Promise<IpcResult<ImBridgeStatus>>
+  }
+  remote: {
+    status(): Promise<IpcResult<RemoteStatus>>
+    setConfig(input: RemoteSetConfigInput): Promise<IpcResult<RemoteStatus>>
+    /**
+     * Opens a pairing offer (returns the QR URL + expiry) or cancels the
+     * current one (false). The pairing secret is minted main-side and lives
+     * only in that URL and in memory — never stored.
+     */
+    pair(open: boolean): Promise<IpcResult<RemoteStatus>>
+    revoke(deviceId: string): Promise<IpcResult<RemoteStatus>>
+    /** Fires whenever tunnel/device state changes; returns unsubscribe. */
+    onChanged(cb: () => void): () => void
   }
   workflows: {
     list(): Promise<IpcResult<Workflow[]>>

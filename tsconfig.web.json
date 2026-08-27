@@ -22,5 +22,5 @@
       "@/*": ["src/renderer/src/*"]
     }
   },
-  "include": ["src/renderer/src/**/*", "src/shared/**/*.ts", "src/preload/api.d.ts"]
+  "include": ["src/renderer/src/**/*", "src/mobile/**/*", "src/shared/**/*.ts", "src/preload/api.d.ts", "vite.mobile.config.ts"]
 }

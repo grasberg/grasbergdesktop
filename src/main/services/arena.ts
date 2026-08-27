@@ -19,7 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import type {
   ArenaCandidateState,
@@ -43,6 +43,11 @@ const ARENA_TOOL_IDS = [
   'edit_file',
   'write_file',
 ]
+/** Hard bounds on evolutionary rounds (1 = classic single-round arena). */
+export const ARENA_MIN_ROUNDS = 1
+export const ARENA_MAX_ROUNDS = 5
+/** Diff material handed to the judge per candidate. */
+const JUDGE_DIFF_CHARS = 6_000
 
 function invalid(message: string): ProviderError {
   return new ProviderError('invalid_request', message)
@@ -60,6 +65,121 @@ export function arenaPrompt(task: string): string {
     task
   )
 }
+
+/** Round > 1 prompt: improve on the judged winner of the previous round. */
+export function arenaRoundPrompt(
+  task: string,
+  round: number,
+  parentSummary: string,
+  parentDiffStat: string
+): string {
+  return (
+    `You are one of several models improving on the WINNING solution from round ${round - 1} ` +
+    'of an evolution arena. Your worktree already contains that winning state — build on it; ' +
+    'do not undo it unless it is wrong. The same evaluation criteria apply: correctness and ' +
+    'focus beat volume.\n\n' +
+    `Original task:\n${task}\n\n` +
+    `What the previous winner did:\n${parentSummary.slice(0, SUMMARY_MAX_CHARS)}\n` +
+    (parentDiffStat ? `\nIts changed files:\n${parentDiffStat}\n` : '') +
+    '\nYour job: make this solution BETTER (fix gaps vs the original task, harden edge cases, ' +
+    'improve quality), then end with a short summary of your additional changes.'
+  )
+}
+
+/**
+ * Judge output parsing: expects a JSON object with a 1-based winning candidate
+ * index. Falls back to null so the caller can keep the previous winner (or
+ * skip seeding) rather than guessing.
+ */
+export function parseJudgeWinner(
+  text: string,
+  candidateCount: number
+): { index: number; reason: string } | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) return null
+  try {
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const record = parsed as Record<string, unknown>
+    const raw = record.winnerIndex ?? record.winner ?? record.index
+    const index = typeof raw === 'number' ? Math.trunc(raw) : Number.parseInt(String(raw), 10)
+    if (!Number.isFinite(index) || index < 1 || index > candidateCount) return null
+    const reason = typeof record.reason === 'string' ? record.reason : ''
+    return { index, reason }
+  } catch {
+    return null
+  }
+}
+
+/** The judge prompt: pick ONE winner among the round's diffs. */
+export function arenaJudgePrompt(
+  task: string,
+  candidates: Array<{ label: string; summary: string; diffStat: string; diff: string }>
+): string {
+  const parts = [
+    'You are judging a code arena. Given the ORIGINAL TASK and each candidate model\'s ' +
+      'summary plus diff, pick exactly ONE winner that best fulfills the task. Favor ' +
+      'correctness and completeness over size of the diff. Answer ONLY with JSON:',
+    '{"winnerIndex": <1-based number>, "reason": "<one sentence>"}',
+    '',
+    `TASK:\n${task}`,
+  ]
+  candidates.forEach((candidate, i) => {
+    parts.push(
+      '',
+      `--- CANDIDATE ${i + 1} (${candidate.label}) ---`,
+      `Summary: ${candidate.summary.slice(0, 2_000)}`,
+      candidate.diffStat ? `Files:\n${candidate.diffStat}` : '(no file changes)',
+      candidate.diff ? `Diff (truncated):\n${candidate.diff.slice(0, JUDGE_DIFF_CHARS)}` : ''
+    )
+  })
+  return parts.join('\n')
+}
+
+/**
+ * Seeds a fresh round-N worktree from the previous winner by copying exactly
+ * the winner's changed files onto it (deletions are skipped, mirroring how
+ * apply() behaves). Overlay semantics: only the winning DIFF propagates.
+ */
+export function seedWorktreeFromParent(
+  parentPath: string,
+  targetPath: string,
+  files: GitFileChange[]
+): { seeded: number } {
+  let seeded = 0
+  for (const file of files) {
+    if (file.status === 'D') continue
+    const src = resolveInsideRoot(parentPath, file.path)
+    const dest = resolveInsideRoot(targetPath, file.path)
+    if (!src || !dest || !existsSync(src)) continue
+    try {
+      const stat = statSync(src)
+      if (!stat.isFile() || stat.size > APPLY_FILE_MAX_BYTES || looksBinary(readFileSync(src))) {
+        continue
+      }
+      mkdirSync(path.dirname(dest), { recursive: true })
+      copyFileSync(src, dest)
+      seeded += 1
+    } catch {
+      // Unreadable file — skip it rather than fail the whole seeding.
+    }
+  }
+  return { seeded }
+}
+
+/** Resolves relPath inside root, or null when it escapes. */
+export function resolveInsideRoot(root: string, relPath: string): string | null {
+  if (relPath.includes('\0') || path.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath)) {
+    return null
+  }
+  const base = path.resolve(root)
+  const target = path.resolve(base, relPath)
+  const rel = path.relative(base, target)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null
+  return target
+}
+
 
 interface ArenaGitPort {
   createWorktree(
@@ -110,13 +230,14 @@ export interface ArenaServiceDeps {
   /** Wired to ChatService.generateForWorkflow (headless tool loop). */
   generate: (
     prompt: string,
-    providerId: string,
-    modelId: string,
+    providerId: string | undefined,
+    modelId: string | undefined,
     opts: {
       useTools: boolean
       approvedToolIds: string[]
       projectId: string
       signal?: AbortSignal
+      json?: boolean
     }
   ) => Promise<string>
 }
@@ -154,44 +275,28 @@ export class ArenaService {
     if (request.candidates.length < 2 || request.candidates.length > 4) {
       throw invalid('An arena needs 2–4 candidate models.')
     }
+    const totalRounds = Math.min(
+      Math.max(Math.trunc(request.rounds ?? 1), ARENA_MIN_ROUNDS),
+      ARENA_MAX_ROUNDS
+    )
 
     const controller = new AbortController()
     const candidates: ArenaCandidateState[] = []
     const worktreeProjects = new Map<string, string>()
 
     for (const [index, ref] of request.candidates.entries()) {
-      const provider = this.deps.db.providers.getById(ref.providerId)
-      const safeModel = ref.modelId.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 24)
-      const worktree = await this.deps.git.createWorktree(
-        project.path,
-        this.deps.worktreesDir,
+      const created = await this.createCandidate(
         project.id,
-        `arena-${index + 1}-${safeModel}`
+        project.path,
+        request.conversationId,
+        request.task,
+        ref,
+        index,
+        1,
+        null
       )
-      const worktreeProject = this.deps.code.openProject(worktree.path)
-      const run = this.deps.db.agentPlatform.runStart({
-        conversationId: request.conversationId,
-        projectId: worktreeProject.id,
-        agentName: 'arena',
-        task: request.task,
-        worktreePath: worktree.path,
-        providerId: ref.providerId,
-        modelId: ref.modelId,
-      })
-      worktreeProjects.set(run.id, worktreeProject.id)
-      candidates.push({
-        runId: run.id,
-        providerId: ref.providerId,
-        modelId: ref.modelId,
-        providerLabel: provider?.label ?? ref.providerId,
-        worktreePath: worktree.path,
-        branch: worktree.branch,
-        status: 'running',
-        summary: '',
-        diffStat: '',
-        diff: '',
-        changedFiles: [],
-      })
+      worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
+      candidates.push(created.candidate)
     }
 
     const arena: ArenaInternal = {
@@ -204,6 +309,9 @@ export class ArenaService {
         candidates,
         appliedRunId: null,
         createdAt: Date.now(),
+        totalRounds,
+        round: 1,
+        winnerRunId: null,
       },
       controller,
       worktreeProjects,
@@ -212,15 +320,158 @@ export class ArenaService {
     this.arenas.set(request.conversationId, arena)
     this.push(arena)
 
-    // Fan out WITHOUT awaiting: candidates stream to 'done' independently.
-    void Promise.allSettled(
-      candidates.map((candidate) => this.runCandidate(arena, candidate))
-    ).then(() => {
-      if (arena.state.status === 'running') arena.state.status = 'finished'
-      this.push(arena)
-    })
+    // Fan out WITHOUT awaiting: rounds stream forward independently.
+    void this.runRounds(arena, project.path, request.candidates)
 
     return arena.state
+  }
+
+  /** Creates one candidate's worktree + agent_runs row for a given round. */
+  private async createCandidate(
+    projectId: string,
+    projectPath: string,
+    conversationId: string,
+    task: string,
+    ref: { providerId: string; modelId: string },
+    index: number,
+    round: number,
+    parentRunId: string | null
+  ): Promise<{ candidate: ArenaCandidateState; worktreeProjectId: string }> {
+    const provider = this.deps.db.providers.getById(ref.providerId)
+    const safeModel = ref.modelId.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 24)
+    const worktree = await this.deps.git.createWorktree(
+      projectPath,
+      this.deps.worktreesDir,
+      projectId,
+      `arena-r${round}-${index + 1}-${safeModel}`
+    )
+    const worktreeProject = this.deps.code.openProject(worktree.path)
+    const run = this.deps.db.agentPlatform.runStart({
+      conversationId,
+      projectId: worktreeProject.id,
+      agentName: `arena-r${round}`,
+      task,
+      worktreePath: worktree.path,
+      providerId: ref.providerId,
+      modelId: ref.modelId,
+    })
+    return {
+      worktreeProjectId: worktreeProject.id,
+      candidate: {
+        runId: run.id,
+        providerId: ref.providerId,
+        modelId: ref.modelId,
+        providerLabel: provider?.label ?? ref.providerId,
+        worktreePath: worktree.path,
+        branch: worktree.branch,
+        status: 'running',
+        summary: '',
+        diffStat: '',
+        diff: '',
+        changedFiles: [],
+        round,
+        parentRunId,
+      },
+    }
+  }
+
+  /**
+   * Evolutionary loop (AVO-style): run the round's candidates in parallel,
+   * judge the diffs, seed the next round from the winner's tree.
+   */
+  private async runRounds(
+    arena: ArenaInternal,
+    projectPath: string,
+    refs: Array<{ providerId: string; modelId: string }>
+  ): Promise<void> {
+    try {
+      while (arena.state.round <= arena.state.totalRounds) {
+        if (arena.controller.signal.aborted) break
+        const currentRound = arena.state.round
+        const contenders = arena.state.candidates.filter((c) => c.round === currentRound)
+        await Promise.allSettled(contenders.map((candidate) => this.runCandidate(arena, candidate)))
+        if (arena.controller.signal.aborted) break
+
+        // Single-round arenas keep the classic human-picks flow.
+        if (arena.state.totalRounds === 1 || currentRound === arena.state.totalRounds) {
+          arena.state.status = 'finished'
+          break
+        }
+
+        const winner = await this.judgeRound(arena, contenders)
+        if (!winner || arena.controller.signal.aborted) {
+          // No verdict -> stop evolving gracefully; everything stays reviewable.
+          arena.state.status = 'finished'
+          break
+        }
+        arena.state.winnerRunId = winner.runId
+        arena.state.round = currentRound + 1
+        this.push(arena)
+
+        // Fresh worktrees per candidate, seeded with the winner's diff. They
+        // are awaited by the loop's next allSettled pass.
+        const seeded: ArenaCandidateState[] = []
+        for (const [index, ref] of refs.entries()) {
+          if (arena.controller.signal.aborted) break
+          const created = await this.createCandidate(
+            arena.state.projectId,
+            projectPath,
+            arena.state.conversationId,
+            arena.state.task,
+            ref,
+            index,
+            currentRound + 1,
+            winner.runId
+          )
+          try {
+            seedWorktreeFromParent(winner.worktreePath, created.candidate.worktreePath, winner.changedFiles)
+          } catch {
+            // Seeding is best-effort: an unseeded candidate still runs on HEAD.
+          }
+          arena.worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
+          arena.state.candidates.push(created.candidate)
+          seeded.push(created.candidate)
+        }
+        await Promise.allSettled(seeded.map((candidate) => this.runCandidate(arena, candidate)))
+      }
+    } finally {
+      if (arena.state.status === 'running') arena.state.status = 'finished'
+      this.push(arena)
+    }
+  }
+
+  /**
+   * LLM-as-judge over one finished round's diffs. Null when judging fails or
+   * the model returns garbage — the arena then simply stops evolving instead
+   * of guessing a winner.
+   */
+  private async judgeRound(
+    arena: ArenaInternal,
+    contenders: ArenaCandidateState[]
+  ): Promise<ArenaCandidateState | null> {
+    const done = contenders.filter((c) => c.status === 'done')
+    if (done.length < 2) return null
+    try {
+      const text = await this.deps.generate(
+        arenaJudgePrompt(
+          arena.state.task,
+          done.map((c) => ({
+            label: `${c.providerLabel} / ${c.modelId}`,
+            summary: c.summary,
+            diffStat: c.diffStat,
+            diff: c.diff,
+          }))
+        ),
+        undefined,
+        undefined,
+        { useTools: false, approvedToolIds: [], projectId: '', json: true, signal: arena.controller.signal }
+      )
+      const verdict = parseJudgeWinner(text, done.length)
+      if (!verdict) return null
+      return done[verdict.index - 1] ?? null
+    } catch {
+      return null
+    }
   }
 
   /** Aborts every still-running candidate (their runs settle as 'stopped'). */
@@ -320,9 +571,17 @@ export class ArenaService {
     candidate: ArenaCandidateState
   ): Promise<void> {
     const projectId = arena.worktreeProjects.get(candidate.runId)
+    const parent =
+      candidate.parentRunId !== null
+        ? arena.state.candidates.find((c) => c.runId === candidate.parentRunId)
+        : undefined
+    const prompt =
+      parent && candidate.round > 1
+        ? arenaRoundPrompt(arena.state.task, candidate.round, parent.summary, parent.diffStat)
+        : arenaPrompt(arena.state.task)
     try {
       const text = await this.deps.generate(
-        arenaPrompt(arena.state.task),
+        prompt,
         candidate.providerId,
         candidate.modelId,
         {
@@ -359,14 +618,7 @@ export class ArenaService {
   }
 
   private resolveInWorktree(worktreeRoot: string, relPath: string): string | null {
-    if (relPath.includes('\0') || path.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath)) {
-      return null
-    }
-    const root = path.resolve(worktreeRoot)
-    const target = path.resolve(root, relPath)
-    const rel = path.relative(root, target)
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null
-    return target
+    return resolveInsideRoot(worktreeRoot, relPath)
   }
 
   private push(arena: ArenaInternal): void {

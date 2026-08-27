@@ -44,10 +44,19 @@ import {
   type ScheduledTasksRepository,
 } from './repositories/scheduled-tasks'
 import { createKnowledgeRepository, type KnowledgeRepository } from './repositories/knowledge'
+import { createOptimizerRepository, type OptimizerRepository } from './repositories/optimizer'
+import {
+  createExperimentsRepository,
+  type ExperimentsRepository,
+} from './repositories/experiments'
 import {
   createAgentPlatformRepository,
   type AgentPlatformRepository,
 } from './repositories/agent-platform'
+import {
+  createRemoteDevicesRepository,
+  type RemoteDevicesRepository,
+} from './repositories/remote'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -77,6 +86,12 @@ export interface AppDatabase {
   agentPlatform: AgentPlatformRepository
   scheduledTasks: ScheduledTasksRepository
   inbox: InboxRepository
+  /** Autonomous optimize-evaluate-commit runs (per project). */
+  optimizer: OptimizerRepository
+  /** Per-project experiment log injected into future sessions. */
+  experiments: ExperimentsRepository
+  /** Phones paired through the relay tunnel (remote access). */
+  remoteDevices: RemoteDevicesRepository
   close(): void
 }
 
@@ -226,6 +241,9 @@ export function openDatabase(filePath: string): AppDatabase {
     agentPlatform: createAgentPlatformRepository(driver),
     scheduledTasks: createScheduledTasksRepository(driver),
     inbox: createInboxRepository(driver),
+    optimizer: createOptimizerRepository(driver),
+    experiments: createExperimentsRepository(driver),
+    remoteDevices: createRemoteDevicesRepository(driver),
     close() {
       driver.close()
     },

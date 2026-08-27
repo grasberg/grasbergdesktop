@@ -95,6 +95,98 @@ describe('openDatabase + migrations', () => {
     expect(Number.parseInt(row!.value, 10)).toBeGreaterThanOrEqual(1)
   })
 
+  it('v37: optimizer + experiment repositories persist across reopen', () => {
+    const run = db!.optimizer.create({
+      projectId: 'proj-x',
+      goal: 'make bench faster',
+      evalCommand: 'npm run bench',
+      testCommand: null,
+      providerId: null,
+      modelId: null,
+      maxRounds: 6,
+    })
+    db!.optimizer.appendVersion({
+      runId: run.id,
+      seq: 1,
+      score: 42.5,
+      accepted: true,
+      summary: 'memoized the hot path',
+      commitSha: 'abc123',
+    })
+    const entry = db!.experiments.add({
+      projectId: 'proj-x',
+      title: 'attempt v1',
+      outcome: 'improved',
+      detail: 'score 42.5',
+      source: 'optimizer',
+    })
+    // Reopen must keep everything and cascade-delete versions with the run.
+    const re = reopen()
+    const loaded = re.optimizer.getById(run.id)
+    expect(loaded?.status).toBe('running')
+    expect(loaded?.goal).toBe('make bench faster')
+    const versions = re.optimizer.listVersions(run.id)
+    expect(versions).toHaveLength(1)
+    expect(versions[0]).toMatchObject({ seq: 1, score: 42.5, accepted: true })
+    expect(re.experiments.listForProject('proj-x')[0]?.id).toBe(entry.id)
+  })
+
+  it('v38: remote devices persist across reopen; revocation is sticky', () => {
+    const device = db!.remoteDevices.create({
+      name: 'Pixel 8',
+      tokenHash: 'a'.repeat(64),
+      keyFingerprint: '0123456789abcdef',
+    })
+    db!.remoteDevices.touch(device.id)
+    const re = reopen()
+    const listed = re.remoteDevices.list()
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({
+      id: device.id,
+      name: 'Pixel 8',
+      keyFingerprint: '0123456789abcdef',
+      revokedAt: null,
+    })
+    expect(listed[0].lastSeenAt).not.toBeNull()
+
+    // Token-hash lookup finds the device while active, never after revoke.
+    expect(re.remoteDevices.getActiveByTokenHash('a'.repeat(64))?.id).toBe(device.id)
+    // …and the relay re-registration path sees id + hash, never after revoke.
+    expect(re.remoteDevices.listActiveTokens()).toEqual([
+      { id: device.id, tokenHash: 'a'.repeat(64) },
+    ])
+    re.remoteDevices.revoke(device.id)
+    expect(re.remoteDevices.getActiveByTokenHash('a'.repeat(64))).toBeNull()
+    expect(re.remoteDevices.listActiveTokens()).toEqual([])
+    expect(re.remoteDevices.getActiveById(device.id)).toBeNull()
+
+    // …and stays revoked across another reopen.
+    const re2 = reopen()
+    expect(re2.remoteDevices.list()[0].revokedAt).not.toBeNull()
+  })
+
+  it('v37: deleting a run cascades its versions', () => {
+    const run = db!.optimizer.create({
+      projectId: 'proj-y',
+      goal: 'g',
+      evalCommand: 'e',
+      testCommand: null,
+      providerId: null,
+      modelId: null,
+      maxRounds: 2,
+    })
+    db!.optimizer.appendVersion({
+      runId: run.id,
+      seq: 1,
+      score: null,
+      accepted: false,
+      summary: '',
+      commitSha: null,
+    })
+    db!.driver.run('DELETE FROM optimizer_runs WHERE id = ?', [run.id])
+    expect(db!.optimizer.listVersions(run.id)).toHaveLength(0)
+  })
+
   it('reopening the same file keeps data and does not re-apply migrations', () => {
     const versionBefore = db!.driver.get<{ value: string }>(
       "SELECT value FROM meta WHERE key = 'schema_version'"

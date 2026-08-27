@@ -16,6 +16,7 @@ import { useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
 import { useWorkflowsStore } from '@/stores/workflows'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
+import { useOptimizerStore } from '@/stores/optimizer'
 
 const ChatView = lazy(() => import('@/components/chat/ChatView'))
 const WorkView = lazy(() => import('@/components/work/WorkView'))
@@ -131,6 +132,10 @@ export default function App(): React.JSX.Element {
     const unsubscribeScheduledTasks = window.uld.scheduledTasks.onChanged((event) => {
       useScheduledTasksStore.getState().handleChanged(event)
     })
+    // Optimizer run rows mutate on every round (roundsDone/best/status).
+    const unsubscribeOptimizer = window.uld.optimizer.onChanged((event) => {
+      useOptimizerStore.getState().handleChanged(event)
+    })
     // Standing approval rules can be created from an approval dialog in this
     // window or another one; keep Settings -> Tools in step either way.
     const unsubscribeToolRules = window.uld.tools.onRulesChanged(() => {
@@ -150,6 +155,7 @@ export default function App(): React.JSX.Element {
       unsubscribeMcp()
       unsubscribeRuns()
       unsubscribeScheduledTasks()
+      unsubscribeOptimizer()
       unsubscribeToolRules()
       unsubscribeNotices()
     }
