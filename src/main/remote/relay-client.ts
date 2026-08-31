@@ -1,8 +1,7 @@
 /**
  * Outbound relay tunnel: one WebSocket from the desktop to the relay, held
  * open with reconnect/backoff. The relay routes three kinds of traffic over
- * it — frames to/from paired phones, pairing-role frames, and HTTP asset
- * requests for the phone's browser — all defined in @shared/remote-protocol.
+ * it — encrypted frames to/from paired phones and pairing-role frames.
  *
  * The desktop NEVER listens: this connection out is the whole network surface
  * of remote access, which is what lets it work behind CGNAT and firewalls.
@@ -47,8 +46,6 @@ export interface RelayClientDeps {
    * device-online/offline events missed during a tunnel flap are gone.
    */
   onDevicesOnline: (deviceIds: string[]) => void
-  /** The phone's browser asked for a bundle asset. */
-  onHttp: (req: { reqId: string; method: string; path: string }) => void
   socketFactory: TunnelSocketFactory
   /** Reconnect backoff base in milliseconds; small in tests, default 3 s. */
   backoffBaseMs?: number
@@ -222,9 +219,6 @@ export class RelayClient {
       deviceIds?: unknown
       from?: string
       frame?: unknown
-      reqId?: string
-      method?: string
-      path?: string
     }
     try {
       frame = JSON.parse(raw)
@@ -246,15 +240,6 @@ export class RelayClient {
         this.deps.onDevicesOnline(ids.filter((id): id is string => typeof id === 'string'))
         break
       }
-      case 'http':
-        if (frame.reqId && frame.path) {
-          this.deps.onHttp({
-            reqId: frame.reqId,
-            method: frame.method ?? 'GET',
-            path: frame.path,
-          })
-        }
-        break
       default:
         // welcome/pong/error bookkeeping stays relay-internal.
         break

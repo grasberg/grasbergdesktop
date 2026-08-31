@@ -110,7 +110,12 @@ describe('generate_image execution', () => {
     })
 
     expect(approval).toHaveBeenCalledTimes(1)
-    expect(generate).toHaveBeenCalledWith({ prompt: 'a red fox', count: 1, size: 'square' })
+    expect(generate).toHaveBeenCalledWith({
+      prompt: 'a red fox',
+      count: 1,
+      size: 'square',
+      spaceId: null,
+    })
     expect(received).toEqual([stored])
     expect(result).toContain('Generated 1 image')
     expect(result).toContain('img-model')
@@ -143,7 +148,7 @@ describe('generate_image execution', () => {
       approval: vi.fn(async () => APPROVE),
       onAttachment: () => undefined,
     })
-    expect(generate).toHaveBeenCalledWith({ prompt: 'x', count: 4, size: 'auto' })
+    expect(generate).toHaveBeenCalledWith({ prompt: 'x', count: 4, size: 'auto', spaceId: null })
   })
 
   it('reports unavailable without the dep or the onAttachment sink', async () => {

@@ -147,6 +147,26 @@
   align-self: center;
 }
 
+/* Reliability fallback chains (Defaults tab). */
+.failover-chain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.failover-chain-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.failover-row-actions {
+  display: flex;
+  gap: 4px;
+}
+
 /* "Load models" row under the Default model field in the add-provider form. */
 .provider-model-load {
   display: flex;
@@ -1341,4 +1361,96 @@
 
 .remote-dot.on {
   background: #3fb950;
+}
+
+/* -- Voice tab -------------------------------------------------------------- */
+.voice-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.voice-model-row .voice-model-pick {
+  flex: 1;
+  margin-bottom: 0;
+}
+.voice-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+/* -- Quick assistant tab ---------------------------------------------------- */
+.quick-shortcut-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.quick-shortcut-row .input {
+  flex: 1;
+}
+.quick-action-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.quick-action-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.quick-action-head .input {
+  flex: 1;
+}
+.quick-action-model {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.quick-actions-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* -- App lock + private spaces (Privacy tab, v45) -- */
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  margin: 10px 0 14px;
+}
+.space-row {
+  margin-bottom: 10px;
+  padding: 10px;
+}
+.space-row-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.space-row-head .input {
+  flex: 1;
+}
+.space-row-head .btn {
+  white-space: nowrap;
+}
+.space-allowlist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.space-allowlist-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.85rem;
 }

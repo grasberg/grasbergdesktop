@@ -20,5 +20,14 @@ export default defineConfig({
     // deadlock still fails the run.
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // Cap worker threads. node-sqlite3-wasm blocks its worker thread
+    // synchronously through a whole migration/VACUUM, and one busy worker per
+    // core (24 on a workstation) starves vitest's worker→main progress RPC,
+    // surfacing as a nondeterministic "Timeout calling onTaskUpdate" that can
+    // flip the run's exit code even though every test passed. A modest ceiling
+    // gives each worker enough CPU to stay responsive; lower-core CI runners
+    // are under this cap already, so they are unaffected.
+    maxWorkers: 8,
+    minWorkers: 1,
   },
 })

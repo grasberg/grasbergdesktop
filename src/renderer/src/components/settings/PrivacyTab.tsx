@@ -1,22 +1,29 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { Space } from '@shared/types'
 import { Switch } from '@/components/common/controls'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useConversationsStore } from '@/stores/conversations'
+import { useLockStore } from '@/stores/lock'
 import { useProjectsStore } from '@/stores/projects'
+import { useProvidersStore } from '@/stores/providers'
 import { useMemoriesStore } from '@/stores/memories'
 import { useSkillsStore } from '@/stores/skills'
+import { useSpacesStore } from '@/stores/spaces'
 import { useUiStore } from '@/stores/ui'
 import { toNormalized, unwrap } from '@/api/uld'
 
 function BackupSection() {
   const toast = useUiStore((s) => s.toast)
   const [busy, setBusy] = useState(false)
+  const [includePrivate, setIncludePrivate] = useState(false)
 
   const runExport = async (): Promise<void> => {
     setBusy(true)
     try {
-      const result = await unwrap(window.uld.backup.export())
+      const result = await unwrap(
+        window.uld.backup.export(includePrivate ? { includePrivateSpaces: true } : undefined)
+      )
       if (!result.canceled) toast(`Backup saved to ${result.path}`, 'success')
     } catch (e) {
       toast(toNormalized(e).message, 'error')
@@ -73,6 +80,20 @@ function BackupSection() {
             Import…
           </button>
         </div>
+      </div>
+      <div className="toggle-row">
+        <div className="toggle-row-text">
+          <span className="toggle-row-title">Include private spaces in export</span>
+          <span className="field-hint">
+            Off by default. When on, the export also contains private-space conversations and the
+            space definitions; on import, spaces merge by name.
+          </span>
+        </div>
+        <Switch
+          checked={includePrivate}
+          onChange={setIncludePrivate}
+          label="Include private spaces in export"
+        />
       </div>
     </>
   )
@@ -141,6 +162,294 @@ function DeleteAllSection() {
   )
 }
 
+const IDLE_OPTIONS: Array<{ value: number | null; label: string }> = [
+  { value: null, label: 'Never' },
+  { value: 5, label: 'After 5 minutes' },
+  { value: 15, label: 'After 15 minutes' },
+  { value: 30, label: 'After 30 minutes' },
+  { value: 60, label: 'After 1 hour' },
+]
+
+function AppLockSection() {
+  const toast = useUiStore((s) => s.toast)
+  const settings = useSettingsStore((s) => s.settings)
+  const status = useLockStore((s) => s.status)
+  const persist = usePersistSettings()
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void useLockStore.getState().load()
+  }, [])
+
+  const configured = status?.configured ?? false
+
+  const save = async (removing: boolean): Promise<void> => {
+    if (!removing) {
+      if (next.length < 6) {
+        toast('The passphrase needs at least 6 characters.', 'error')
+        return
+      }
+      if (next !== confirm) {
+        toast('The passphrases do not match.', 'error')
+        return
+      }
+    }
+    setBusy(true)
+    try {
+      await useLockStore.getState().setPassphrase({
+        ...(configured ? { current } : {}),
+        next: removing ? null : next,
+      })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+      toast(removing ? 'App lock removed.' : 'Passphrase set.', 'success')
+    } catch (e) {
+      toast(toNormalized(e).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <header className="tab-header">
+        <div>
+          <h3>App lock</h3>
+        </div>
+      </header>
+      <div className="callout">
+        <p>
+          An optional passphrase locks the window on launch and after idle. A privacy screen for
+          shared desks — it does not encrypt the data on disk, and remote access (phone, Telegram)
+          keeps working while locked.
+        </p>
+      </div>
+      <div className="toggle-row">
+        <div className="toggle-row-text">
+          <span className="toggle-row-title">
+            {configured ? 'Passphrase is set' : 'No passphrase set'}
+          </span>
+          <span className="field-hint">
+            {configured
+              ? 'Grasberg locks on launch. Change or remove the passphrase below.'
+              : 'Set a passphrase to enable the lock.'}
+          </span>
+        </div>
+        {configured ? (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void useLockStore.getState().lockNow()}
+          >
+            Lock now
+          </button>
+        ) : null}
+      </div>
+      <div className="form-grid">
+        {configured ? (
+          <input
+            type="password"
+            className="input"
+            placeholder="Current passphrase"
+            aria-label="Current passphrase"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+          />
+        ) : null}
+        <input
+          type="password"
+          className="input"
+          placeholder="New passphrase (min 6 characters)"
+          aria-label="New passphrase"
+          value={next}
+          onChange={(e) => setNext(e.target.value)}
+        />
+        <input
+          type="password"
+          className="input"
+          placeholder="Confirm new passphrase"
+          aria-label="Confirm new passphrase"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
+        <div className="prompt-form-actions">
+          <button type="button" className="btn" disabled={busy || !next} onClick={() => void save(false)}>
+            {configured ? 'Change passphrase' : 'Set passphrase'}
+          </button>
+          {configured ? (
+            <button
+              type="button"
+              className="btn btn-danger"
+              disabled={busy || !current}
+              onClick={() => void save(true)}
+            >
+              Remove
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {configured ? (
+        <div className="toggle-row">
+          <div className="toggle-row-text">
+            <span className="toggle-row-title">Auto-lock when idle</span>
+            <span className="field-hint">Locks after the system has been idle this long.</span>
+          </div>
+          <select
+            className="input"
+            aria-label="Auto-lock when idle"
+            value={settings?.appLockIdleMinutes ?? ''}
+            onChange={(e) =>
+              void persist({
+                appLockIdleMinutes: e.target.value === '' ? null : Number(e.target.value),
+              })
+            }
+          >
+            {IDLE_OPTIONS.map((opt) => (
+              <option key={opt.label} value={opt.value ?? ''}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function SpaceRow({ space }: { space: Space }) {
+  const providers = useProvidersStore((s) => s.providers)
+  const [name, setName] = useState(space.name)
+  const [editingAllowlist, setEditingAllowlist] = useState(false)
+  const allowAll = space.providerAllowlist === null
+
+  const toggleProvider = (providerId: string, checked: boolean): void => {
+    const currentIds = space.providerAllowlist ?? providers.map((p) => p.id)
+    const nextIds = checked
+      ? [...new Set([...currentIds, providerId])]
+      : currentIds.filter((id) => id !== providerId)
+    // An empty selection would brick the space — treat it as "all providers".
+    void useSpacesStore
+      .getState()
+      .setAllowlist(space.id, nextIds.length === 0 || nextIds.length === providers.length ? null : nextIds)
+  }
+
+  return (
+    <div className="card space-row">
+      <div className="space-row-head">
+        <input
+          className="input"
+          aria-label={`Rename space ${space.name}`}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => {
+            const trimmed = name.trim()
+            if (trimmed && trimmed !== space.name) {
+              void useSpacesStore.getState().rename(space.id, trimmed)
+            } else {
+              setName(space.name)
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setEditingAllowlist((v) => !v)}
+        >
+          {allowAll ? 'All providers' : `${space.providerAllowlist?.length} providers`}
+        </button>
+        <button
+          type="button"
+          className="btn btn-danger"
+          title="A space can only be deleted when it has no conversations."
+          onClick={() => void useSpacesStore.getState().remove(space.id)}
+        >
+          Delete
+        </button>
+      </div>
+      {editingAllowlist ? (
+        <div className="space-allowlist">
+          <label className="space-allowlist-item">
+            <input
+              type="checkbox"
+              checked={allowAll}
+              onChange={(e) => {
+                if (e.target.checked) void useSpacesStore.getState().setAllowlist(space.id, null)
+              }}
+            />
+            All providers
+          </label>
+          {providers.map((provider) => (
+            <label key={provider.id} className="space-allowlist-item">
+              <input
+                type="checkbox"
+                checked={allowAll || (space.providerAllowlist?.includes(provider.id) ?? false)}
+                onChange={(e) => toggleProvider(provider.id, e.target.checked)}
+              />
+              {provider.label}
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function PrivateSpacesSection() {
+  const spaces = useSpacesStore((s) => s.spaces)
+  const [newName, setNewName] = useState('')
+
+  useEffect(() => {
+    void useSpacesStore.getState().load()
+    void useProvidersStore.getState().load()
+  }, [])
+
+  const createSpace = (): void => {
+    const name = newName.trim()
+    if (!name) return
+    setNewName('')
+    void useSpacesStore.getState().create(name)
+  }
+
+  return (
+    <>
+      <header className="tab-header">
+        <div>
+          <h3>Private spaces</h3>
+        </div>
+      </header>
+      <div className="callout">
+        <p>
+          Conversations in a private space are excluded from backups (unless explicitly included),
+          remote/phone access, Telegram, and notification previews. Switch spaces from the sidebar;
+          every launch starts in the default space.
+        </p>
+      </div>
+      {spaces.map((space) => (
+        <SpaceRow key={space.id} space={space} />
+      ))}
+      <div className="prompt-form-actions">
+        <input
+          className="input"
+          placeholder="New space name"
+          aria-label="New space name"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') createSpace()
+          }}
+        />
+        <button type="button" className="btn" disabled={!newName.trim()} onClick={createSpace}>
+          New space
+        </button>
+      </div>
+    </>
+  )
+}
+
 export default function PrivacyTab() {
   const settings = useSettingsStore((s) => s.settings)
   const persist = usePersistSettings()
@@ -194,6 +503,8 @@ export default function PrivacyTab() {
 
       <BackupSection />
       <DeleteAllSection />
+      <AppLockSection />
+      <PrivateSpacesSection />
     </section>
   )
 }

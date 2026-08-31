@@ -1,9 +1,11 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  MAX_AUDIO_BYTES,
   MAX_IMAGE_BYTES,
+  MAX_PDF_BYTES,
   readAttachment,
   readStoredImage,
   storePastedImage,
@@ -60,6 +62,69 @@ describe('readAttachment — images', () => {
     writeFileSync(src, Buffer.from([1, 2, 3]))
     const att = await readAttachment(src)
     expect(att?.kind).toBeUndefined()
+  })
+})
+
+describe('readAttachment — pdfs', () => {
+  it('stores a PDF as kind pdf with a storageKey and no inline content', async () => {
+    const src = join(dir, 'report.pdf')
+    writeFileSync(src, Buffer.from('%PDF-1.4 test'))
+
+    const att = await readAttachment(src, imageDir)
+    expect(att?.kind).toBe('pdf')
+    expect(att?.mimeType).toBe('application/pdf')
+    expect(att?.storageKey).toMatch(/\.pdf$/)
+    expect(att?.dataUrl).toBeUndefined()
+    expect(att?.textContent).toBeUndefined()
+    expect(existsSync(join(imageDir, att!.storageKey!))).toBe(true)
+  })
+
+  it('an oversized PDF keeps metadata only', async () => {
+    const src = join(dir, 'big.pdf')
+    writeFileSync(src, Buffer.alloc(MAX_PDF_BYTES + 1))
+    const att = await readAttachment(src, imageDir)
+    expect(att?.kind).toBeUndefined()
+    expect(att?.storageKey).toBeUndefined()
+  })
+
+  it('without an imageDir, PDFs are metadata-only (KB-import regression)', async () => {
+    const src = join(dir, 'report.pdf')
+    writeFileSync(src, Buffer.from('%PDF-1.4 test'))
+    const att = await readAttachment(src)
+    expect(att?.kind).toBeUndefined()
+    expect(att?.storageKey).toBeUndefined()
+  })
+})
+
+describe('readAttachment — audio', () => {
+  it('stores a WAV as kind audio with a storageKey holding identical bytes', async () => {
+    const src = join(dir, 'memo.wav')
+    const bytes = Buffer.from('RIFF....WAVEfake audio payload')
+    writeFileSync(src, bytes)
+
+    const att = await readAttachment(src, imageDir)
+    expect(att?.kind).toBe('audio')
+    expect(att?.mimeType).toBe('audio/wav')
+    expect(att?.storageKey).toMatch(/\.wav$/)
+    expect(att?.dataUrl).toBeUndefined()
+    expect(att?.textContent).toBeUndefined()
+    expect(readFileSync(join(imageDir, att!.storageKey!))).toEqual(bytes)
+  })
+
+  it('an oversized audio file keeps metadata only', async () => {
+    const src = join(dir, 'big.mp3')
+    writeFileSync(src, Buffer.alloc(MAX_AUDIO_BYTES + 1))
+    const att = await readAttachment(src, imageDir)
+    expect(att?.kind).toBeUndefined()
+    expect(att?.storageKey).toBeUndefined()
+  })
+
+  it('without an imageDir, audio is metadata-only (no copy)', async () => {
+    const src = join(dir, 'memo.wav')
+    writeFileSync(src, Buffer.from('RIFF....WAVE'))
+    const att = await readAttachment(src)
+    expect(att?.kind).toBeUndefined()
+    expect(att?.storageKey).toBeUndefined()
   })
 })
 

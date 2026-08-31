@@ -276,6 +276,18 @@ describe('CodeService.registerProposedChanges + apply/reject', () => {
     expectInvalid(() => service.applyChange(del.id))
   })
 
+  it('preflights an apply batch so a stale later file leaves every file untouched', () => {
+    const project = openTestProject()
+    const conversation = createCodeConversation(project.id)
+    const readme = service.proposeChange(conversation.id, 'README.md', 'edit', '# changed\n')
+    const app = service.proposeChange(conversation.id, 'src/app.ts', 'edit', 'console.log(2)\n')
+    writeFileSync(join(projectDir, 'src', 'app.ts'), 'user edit\n', 'utf8')
+
+    expectInvalid(() => service.applyChangesAtomically([readme.id, app.id]), 'changed on disk')
+    expect(readFileSync(join(projectDir, 'README.md'), 'utf8')).toBe('# Readme\nold line\n')
+    expect(readFileSync(join(projectDir, 'src', 'app.ts'), 'utf8')).toBe('user edit\n')
+  })
+
   it('refuses to apply an edit when the file changed on disk since the proposal', () => {
     const project = openTestProject()
     const conversation = createCodeConversation(project.id)

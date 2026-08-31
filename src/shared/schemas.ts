@@ -213,6 +213,25 @@ export const memoryPatchSchema = z
   })
   .strict()
 
+// ---------------------------------------------------------------------------
+// Notebooks (Home-level living Markdown docs). Caps are mirrored as error
+// strings in the edit_document tool handler (tools/executor.ts).
+// ---------------------------------------------------------------------------
+
+export const notebookDocInputSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    content: z.string().max(200_000).optional(),
+  })
+  .strict()
+
+export const notebookDocPatchSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    content: z.string().max(200_000).optional(),
+  })
+  .strict()
+
 /**
  * A standing approval rule from the renderer. Note what is NOT here: the rule
  * can only ever say "ask" or "skip the dialog" — there is no shape in which it
@@ -386,6 +405,25 @@ export const workflowGraphSchema = z
   })
   .strict()
 
+/** One Reliability Autopilot chain entry — both parts required. */
+const failoverChainEntrySchema = z
+  .object({
+    providerId: z.string().min(1).max(200),
+    modelId: z.string().min(1).max(200),
+  })
+  .strict()
+
+/** One quick-assistant action (a button in the quick mini window). */
+export const quickActionSchema = z
+  .object({
+    id: z.string().min(1).max(100),
+    label: z.string().trim().min(1).max(60),
+    prompt: z.string().min(1).max(20_000),
+    providerId: z.string().min(1).max(200).optional(),
+    modelId: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+
 export const settingsPatchSchema = z
   .object({
     theme: z.enum(['system', 'light', 'dark']),
@@ -426,6 +464,13 @@ export const settingsPatchSchema = z
     autoRoutingEnabled: z.boolean(),
     autoRoutingPolicy: z.enum(['balanced', 'lowest_cost', 'highest_quality', 'local_only']),
     autoRoutingMaxCostUsd: z.number().positive().max(10_000).nullable(),
+    monthlyBudgetUsd: z.number().positive().max(1_000_000).nullable(),
+    failoverChains: z
+      .object({
+        interactive: z.array(failoverChainEntrySchema).max(5).optional(),
+        headless: z.array(failoverChainEntrySchema).max(5).optional(),
+      })
+      .strict(),
     projectHooks: z.array(z.object({
       id: z.string().min(1).max(200),
       name: z.string().trim().min(1).max(200),
@@ -450,9 +495,115 @@ export const settingsPatchSchema = z
     // remoteDesktopId is deliberately absent too: the routing id is minted by
     // main when the tunnel is first enabled. The relay/desktop auth token and
     // per-device keys never appear here — they live in encrypted storage.
+    morningBrief: z
+      .object({
+        enabled: z.boolean(),
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        agentId: z.string().min(1).nullable(),
+        deliverTelegram: z.boolean(),
+        deliverNotification: z.boolean(),
+      })
+      .strict()
+      .nullable(),
+    // morningBriefHistory is deliberately absent: the stored briefs are written
+    // only by main (BriefService); accepting them here would let the renderer —
+    // or an imported backup — fabricate or truncate the digest history.
+    voiceInputEnabled: z.boolean(),
+    voiceReadAloudEnabled: z.boolean(),
+    voiceModelId: z.enum(['tiny', 'base']),
+    quickActions: z.array(quickActionSchema).max(50),
+    // Empty string = the quick-assistant shortcut is disabled.
+    quickAssistantShortcut: z.string().max(64),
+    // appLockHash is deliberately absent: the scrypt verifier is minted and
+    // checked only by main (the lock:setPassphrase handler). Accepting it here
+    // would let a renderer — or a replayed IPC payload — swap the app-lock
+    // passphrase for one of its own choosing.
+    appLockIdleMinutes: z.number().int().min(1).max(1440).nullable(),
+    // voiceWhisperBinaryPath is deliberately absent: the executable main spawns
+    // for transcription is chosen only through the voice:pickBinary handler's
+    // native dialog and written to the settings repo main-side. Accepting it
+    // here would let a renderer — or an imported backup — point main at an
+    // arbitrary binary.
   })
   .partial()
   .strict()
+
+// ---------------------------------------------------------------------------
+// Private spaces + app lock (v45 — IPC boundary)
+// ---------------------------------------------------------------------------
+
+export const spaceCreateSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+})
+
+export const spaceUpdateSchema = z.object({
+  id: z.string().min(1),
+  patch: z
+    .object({
+      name: z.string().trim().min(1).max(60).optional(),
+      // null = all providers; a present list must name at least one.
+      providerAllowlist: z
+        .array(z.string().min(1).max(100))
+        .min(1)
+        .max(100)
+        .nullable()
+        .optional(),
+    })
+    .strict(),
+})
+
+export const appLockUnlockSchema = z.object({
+  passphrase: z.string().min(1).max(500),
+})
+
+export const appLockSetPassphraseSchema = z.object({
+  current: z.string().max(500).optional(),
+  // null removes the lock; a new passphrase needs at least 6 chars.
+  next: z.string().min(6).max(500).nullable(),
+})
+
+export const backupExportOptionsSchema = z
+  .object({
+    includePrivateSpaces: z.boolean().optional(),
+  })
+  .optional()
+
+// ---------------------------------------------------------------------------
+// Voice (offline whisper.cpp STT — IPC boundary)
+// ---------------------------------------------------------------------------
+
+export const voiceModelIdSchema = z.enum(['tiny', 'base'])
+
+/** One chunk of a push-to-talk STT session (Uint8Array survives structured clone). */
+export const voiceSttChunkSchema = z
+  .object({
+    sessionId: z.string().min(1).max(100),
+    chunk: z
+      .instanceof(Uint8Array)
+      .refine((c) => c.byteLength > 0 && c.byteLength <= 8 * 1024 * 1024, {
+        message: 'Audio chunk must be 1 byte to 8 MB',
+      }),
+  })
+  .strict()
+
+export const voiceSttSessionSchema = z
+  .object({ sessionId: z.string().min(1).max(100) })
+  .strict()
+
+/** messageId/attachmentId travel together: both = persist the transcript onto the message. */
+export const voiceTranscribeAttachmentSchema = z
+  .object({
+    storageKey: z
+      .string()
+      .max(300)
+      .refine(isValidStorageKey, { message: 'Invalid attachment storage key' }),
+    messageId: z.string().min(1).max(200).optional(),
+    attachmentId: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+  .refine((v) => (v.messageId === undefined) === (v.attachmentId === undefined), {
+    message: 'messageId and attachmentId must be given together',
+  })
 
 // ---------------------------------------------------------------------------
 // OpenAI-compatible API responses (adapter-side validation).

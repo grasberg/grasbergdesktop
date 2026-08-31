@@ -12,6 +12,7 @@ import type {
   WorkflowRun,
   WorkflowRunListItem,
   WorkflowSchedule,
+  WorkflowWatchConfig,
 } from '@shared/types'
 import { WORKFLOW_RUN_SNIPPET_MAX } from '@shared/workflow-status'
 import type { SqliteDriver } from '../driver'
@@ -55,8 +56,11 @@ export interface WorkflowsRepository {
     schedule: WorkflowSchedule
     scheduleEnabled: true
     lastRunAt: number | null
+    scheduleUpdatedAt: number
     updatedAt: number
   }>
+  /** Watch fields only, for the folder watcher's sync: enabled configs only. */
+  listWatchedLite(): Array<{ id: string; watch: WorkflowWatchConfig }>
   /** Records that a run started (drives the scheduler's due check). */
   touchLastRun(id: string, startedAtMs: number): void
   /** Persists a finished run and prunes history beyond the per-workflow cap. */
@@ -78,7 +82,10 @@ interface WorkflowRow {
   schedule_json: string | null
   schedule_enabled: number
   webhook_enabled: number
+  watch_json: string | null
+  budget_usd: number | null
   last_run_at: number | null
+  schedule_updated_at: number
   created_at: number
   updated_at: number
 }
@@ -135,6 +142,28 @@ function parseSchedule(text: string | null): WorkflowSchedule | null {
   return null
 }
 
+/**
+ * Reads a stored watch config, tolerating corrupt JSON the way parseSchedule
+ * does: anything that cannot fire safely reads back as null.
+ */
+function parseWatch(text: string | null): WorkflowWatchConfig | null {
+  const v = parseJson<unknown>(text ?? null, undefined)
+  if (!v || typeof v !== 'object') return null
+  const raw = v as Partial<WorkflowWatchConfig>
+  if (typeof raw.folderPath !== 'string' || raw.folderPath.length === 0) return null
+  if (raw.event !== 'created' && raw.event !== 'changed') return null
+  const watch: WorkflowWatchConfig = {
+    enabled: raw.enabled === true,
+    folderPath: raw.folderPath,
+    glob: typeof raw.glob === 'string' ? raw.glob : '',
+    event: raw.event,
+  }
+  if (typeof raw.debounceMs === 'number' && Number.isFinite(raw.debounceMs) && raw.debounceMs >= 100) {
+    watch.debounceMs = Math.floor(raw.debounceMs)
+  }
+  return watch
+}
+
 function toWorkflow(row: WorkflowRow): Workflow {
   return {
     id: row.id,
@@ -143,7 +172,10 @@ function toWorkflow(row: WorkflowRow): Workflow {
     schedule: parseSchedule(row.schedule_json),
     scheduleEnabled: row.schedule_enabled === 1,
     webhookEnabled: row.webhook_enabled === 1,
+    watch: parseWatch(row.watch_json),
+    budgetUsd: row.budget_usd ?? null,
     lastRunAt: row.last_run_at,
+    scheduleUpdatedAt: row.schedule_updated_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -157,6 +189,13 @@ function scheduleColumn(schedule: WorkflowSchedule | null | undefined): string |
 
 function flagColumn(value: boolean | undefined): number | undefined {
   return value === undefined ? undefined : value ? 1 : 0
+}
+
+function watchColumn(
+  watch: WorkflowWatchConfig | null | undefined
+): string | null | undefined {
+  if (watch === undefined) return undefined
+  return watch ? JSON.stringify(watch) : null
 }
 
 function toRun(row: WorkflowRunRow): WorkflowRun {
@@ -196,15 +235,18 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
         schedule: input.schedule ?? null,
         scheduleEnabled: input.scheduleEnabled === true,
         webhookEnabled: input.webhookEnabled === true,
+        watch: input.watch ?? null,
+        budgetUsd: input.budgetUsd ?? null,
         lastRunAt: null,
+        scheduleUpdatedAt: now,
         createdAt: now,
         updatedAt: now,
       }
       driver.run(
         `INSERT INTO workflows
            (id, name, graph_json, schedule_json, schedule_enabled, webhook_enabled,
-            last_run_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            watch_json, budget_usd, last_run_at, schedule_updated_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           workflow.id,
           workflow.name,
@@ -212,7 +254,10 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
           workflow.schedule ? JSON.stringify(workflow.schedule) : null,
           workflow.scheduleEnabled ? 1 : 0,
           workflow.webhookEnabled ? 1 : 0,
+          workflow.watch ? JSON.stringify(workflow.watch) : null,
+          workflow.budgetUsd ?? null,
           null,
+          now,
           now,
           now,
         ]
@@ -221,6 +266,7 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
     },
 
     update(id, patch) {
+      const scheduleChanged = patch.schedule !== undefined || patch.scheduleEnabled !== undefined
       updateById(
         driver,
         'workflows',
@@ -230,7 +276,10 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
           graph_json: patch.graph === undefined ? undefined : JSON.stringify(patch.graph),
           schedule_json: scheduleColumn(patch.schedule),
           schedule_enabled: flagColumn(patch.scheduleEnabled),
+          schedule_updated_at: scheduleChanged ? Date.now() : undefined,
           webhook_enabled: flagColumn(patch.webhookEnabled),
+          watch_json: watchColumn(patch.watch),
+          budget_usd: patch.budgetUsd,
         },
         { touchUpdatedAt: true }
       )
@@ -252,15 +301,19 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
 
     listScheduledLite() {
       const rows = driver.all<
-        Pick<WorkflowRow, 'id' | 'schedule_json' | 'last_run_at' | 'updated_at'>
+        Pick<
+          WorkflowRow,
+          'id' | 'schedule_json' | 'last_run_at' | 'schedule_updated_at' | 'updated_at'
+        >
       >(
-        'SELECT id, schedule_json, last_run_at, updated_at FROM workflows WHERE schedule_enabled = 1 AND schedule_json IS NOT NULL'
+        'SELECT id, schedule_json, last_run_at, schedule_updated_at, updated_at FROM workflows WHERE schedule_enabled = 1 AND schedule_json IS NOT NULL'
       )
       const result: Array<{
         id: string
         schedule: WorkflowSchedule
         scheduleEnabled: true
         lastRunAt: number | null
+        scheduleUpdatedAt: number
         updatedAt: number
       }> = []
       for (const row of rows) {
@@ -271,8 +324,21 @@ export function createWorkflowsRepository(driver: SqliteDriver): WorkflowsReposi
           schedule,
           scheduleEnabled: true,
           lastRunAt: row.last_run_at ?? null,
+          scheduleUpdatedAt: row.schedule_updated_at,
           updatedAt: row.updated_at,
         })
+      }
+      return result
+    },
+
+    listWatchedLite() {
+      const rows = driver.all<Pick<WorkflowRow, 'id' | 'watch_json'>>(
+        'SELECT id, watch_json FROM workflows WHERE watch_json IS NOT NULL'
+      )
+      const result: Array<{ id: string; watch: WorkflowWatchConfig }> = []
+      for (const row of rows) {
+        const watch = parseWatch(row.watch_json)
+        if (watch !== null && watch.enabled) result.push({ id: row.id, watch })
       }
       return result
     },

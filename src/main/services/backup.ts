@@ -29,8 +29,12 @@ import type { AppDatabase } from '../db/database'
 export const BACKUP_FORMAT = 'grasberg-backup'
 /** Pre-rebrand marker ("Grasberg"); still accepted on import. */
 export const LEGACY_BACKUP_FORMAT = 'grasberg-desktop-backup'
-/** v3: the two-mode model — legacy modes remap to 'work' on import. */
-export const BACKUP_VERSION = 3
+/**
+ * v3: the two-mode model — legacy modes remap to 'work' on import.
+ * v4: private spaces — a `spaces` section and conversation `spaceId`, present
+ * only when the export explicitly opted private spaces in.
+ */
+export const BACKUP_VERSION = 4
 
 /** A conversation with its transcript, as exported. */
 interface BackupConversation extends Conversation {
@@ -54,12 +58,26 @@ export interface BackupFile {
   conversations: BackupConversation[]
   prompts: { title: string; body: string }[]
   workflows: { name: string; graph: unknown }[]
+  /** Present only when the export explicitly included private spaces (v4). */
+  spaces?: { id: string; name: string; providerAllowlist: string[] | null }[]
 }
 
-/** Collects the current user data into a backup object. */
-export function buildBackup(db: AppDatabase): BackupFile {
+/**
+ * Collects the current user data into a backup object. Private-space
+ * conversations are EXCLUDED unless `includePrivateSpaces` is set — the
+ * repository's default listing already scopes to the default space.
+ */
+export function buildBackup(
+  db: AppDatabase,
+  opts?: { includePrivateSpaces?: boolean }
+): BackupFile {
+  const includePrivate = opts?.includePrivateSpaces === true
   const conversations: BackupConversation[] = []
-  for (const summary of db.conversations.list()) {
+  // includeBots: bot chats and group-room transcripts (v46) are hidden from
+  // the sidebar listing but must never be lost from an exported backup.
+  for (const summary of db.conversations.list(
+    includePrivate ? { allSpaces: true, includeBots: true } : { includeBots: true }
+  )) {
     const conversation = db.conversations.getById(summary.id)
     if (!conversation) continue
     conversations.push({
@@ -90,6 +108,15 @@ export function buildBackup(db: AppDatabase): BackupFile {
     conversations,
     prompts: db.prompts.list().map((p) => ({ title: p.title, body: p.body })),
     workflows: db.workflows.list().map((w) => ({ name: w.name, graph: w.graph })),
+    ...(includePrivate
+      ? {
+          spaces: db.spaces.list().map((s) => ({
+            id: s.id,
+            name: s.name,
+            providerAllowlist: s.providerAllowlist,
+          })),
+        }
+      : {}),
   }
 }
 
@@ -106,6 +133,7 @@ const envelopeSchema = z
     conversations: z.array(z.unknown()).max(100_000).optional(),
     prompts: z.array(z.unknown()).max(100_000).optional(),
     workflows: z.array(z.unknown()).max(100_000).optional(),
+    spaces: z.array(z.unknown()).max(1000).optional(),
   })
   .passthrough()
 
@@ -158,6 +186,15 @@ const conversationItemSchema = z
     moaPresetId: z.string().max(100).nullable().optional(),
     params: z.unknown().optional(),
     messages: z.array(z.unknown()).max(100_000).optional(),
+    spaceId: z.string().max(100).nullable().optional(),
+  })
+  .passthrough()
+
+const spaceItemSchema = z
+  .object({
+    id: z.string().min(1).max(100).regex(BACKUP_ID_PATTERN),
+    name: z.string().trim().min(1).max(60),
+    providerAllowlist: z.array(z.string().max(100)).nullable().optional(),
   })
   .passthrough()
 
@@ -307,6 +344,30 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
     summary.skillsImported += 1
   }
 
+  // Spaces (v4): match an existing space by case-insensitive name (reusing its
+  // id), else recreate it. Allowlists reference provider ids that don't
+  // survive backups, so they import as null (= all providers).
+  const spaceIdMap = new Map<string, string>()
+  for (const item of data.spaces ?? []) {
+    const parsed = spaceItemSchema.safeParse(item)
+    if (!parsed.success) {
+      summary.skippedItems += 1
+      continue
+    }
+    const s = parsed.data
+    const existing = db.spaces.list().find((x) => x.name.toLowerCase() === s.name.toLowerCase())
+    if (existing) {
+      spaceIdMap.set(s.id, existing.id)
+      continue
+    }
+    const created = db.spaces.create({
+      id: db.spaces.getById(s.id) ? undefined : s.id,
+      name: s.name,
+      providerAllowlist: null,
+    })
+    spaceIdMap.set(s.id, created.id)
+  }
+
   // Conversations keep their original ids so a re-import recognizes (and
   // skips) them. Workspace/project links are dropped — those entities aren't
   // part of the backup, and dangling references would break their views.
@@ -336,6 +397,8 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
           modelId: c.modelId ?? null,
           systemPrompt: c.systemPrompt ?? null,
           moaPresetId: c.moaPresetId ?? null,
+          // Unknown spaceIds land in the default space rather than dangling.
+          spaceId: c.spaceId ? (spaceIdMap.get(c.spaceId) ?? null) : null,
         })
         const params = parseObjectOf(chatParamsSchema, c.params)
         if (params && Object.keys(params).length > 0) {

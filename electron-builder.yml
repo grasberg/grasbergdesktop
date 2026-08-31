@@ -19,6 +19,12 @@ extraResources:
 
 asar: true
 
+# tesseract.js spawns a worker_thread whose script cannot reliably load from
+# inside app.asar; pdfjs-dist needs no unpack (plain module load, fake worker).
+asarUnpack:
+  - node_modules/tesseract.js/**
+  - node_modules/tesseract.js-core/**
+
 win:
   icon: build/icon.ico
   target:

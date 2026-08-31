@@ -1,6 +1,6 @@
 /**
  * The Work panel's Optimizer tab: an AVO-style autonomous loop per project.
- * The agent edits the working tree; main runs the eval command after every
+ * The agent edits an app-owned worktree; main runs the eval command after every
  * round and only accepts versions that pass correctness AND match-or-beat the
  * best score so far (accepted rounds become git commits; rejected ones are
  * rolled back and logged in the experiment log).
@@ -29,9 +29,13 @@ function RunRow({ run }: { run: OptimizerRun }): ReactElement {
   const stop = useOptimizerStore((s) => s.stop)
   const [open, setOpen] = useState(false)
 
+  // Load on first expand, then refresh whenever a round completes (roundsDone
+  // changes) or the run finishes — otherwise an expanded running run shows a
+  // version list frozen at first-open for the whole run. loadVersions replaces
+  // in place, so there's no flicker.
   useEffect(() => {
-    if (open && !versions) void loadVersions(run.id)
-  }, [open, versions, run.id, loadVersions])
+    if (open) void loadVersions(run.id)
+  }, [open, run.id, run.roundsDone, run.status, loadVersions])
 
   return (
     <div className="opt-run">
@@ -102,6 +106,7 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
   const [evalCommand, setEvalCommand] = useState('')
   const [testCommand, setTestCommand] = useState('')
   const [maxRounds, setMaxRounds] = useState(6)
+  const [direction, setDirection] = useState<'maximize' | 'minimize'>('maximize')
   const [allowShell, setAllowShell] = useState(false)
   const [busy, setBusy] = useState(false)
   const [experiments, setExperiments] = useState<ExperimentEntry[]>([])
@@ -146,6 +151,7 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
       evalCommand,
       ...(testCommand.trim() ? { testCommand } : {}),
       maxRounds,
+      direction,
       allowShell,
     })
       .finally(() => setBusy(false))
@@ -166,7 +172,8 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
           onChange={(e) => setGoal(e.target.value)}
         />
         <label className="opt-label" htmlFor="opt-eval">
-          Evaluation command — its exit code gates correctness; the last printed number is the score
+          Evaluation command — its exit code gates correctness; the last number it prints on stdout
+          is the score
         </label>
         <input
           id="opt-eval"
@@ -175,6 +182,20 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
           value={evalCommand}
           onChange={(e) => setEvalCommand(e.target.value)}
         />
+        <div className="opt-row">
+          <label className="opt-label" htmlFor="opt-direction">
+            Better score is
+          </label>
+          <select
+            id="opt-direction"
+            className="select opt-select"
+            value={direction}
+            onChange={(e) => setDirection(e.target.value as 'maximize' | 'minimize')}
+          >
+            <option value="maximize">higher (throughput, ops/sec, accuracy)</option>
+            <option value="minimize">lower (runtime, latency, memory, errors)</option>
+          </select>
+        </div>
         <label className="opt-label" htmlFor="opt-test">
           Optional test gate (must also pass for a version to be kept)
         </label>
@@ -207,7 +228,7 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
               checked={allowShell}
               onChange={(e) => setAllowShell(e.target.checked)}
             />
-            let the agent run shell commands
+            allow unrestricted host shell commands in the isolated worktree
           </label>
         </div>
         <button
@@ -218,6 +239,11 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
         >
           {anyRunning ? 'A run is active' : busy ? 'Starting…' : 'Start optimizing'}
         </button>
+        <p className="opt-empty-hint">
+          The loop works on an isolated branch and evaluates the untouched baseline first. When it
+          finishes, accepted commits are fast-forwarded into this folder only if its branch and
+          files are unchanged; otherwise the recovery branch is preserved for you.
+        </p>
       </section>
 
       {projectRuns.length > 0 ? (

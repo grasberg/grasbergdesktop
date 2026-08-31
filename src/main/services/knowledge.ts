@@ -17,8 +17,17 @@ const MAX_CHUNKS_PER_DOCUMENT = 2000
 
 export interface KnowledgeServiceDeps {
   db: AppDatabase
-  /** Embeds texts with the given provider/model (one vector per text). */
-  embed: (providerId: string, modelId: string, texts: string[]) => Promise<number[][]>
+  /**
+   * Embeds texts with the given provider/model (one vector per text). The
+   * optional spaceId carries the originating conversation's private space so
+   * the provider allowlist is enforced on the embeddings call too.
+   */
+  embed: (
+    providerId: string,
+    modelId: string,
+    texts: string[],
+    spaceId?: string | null
+  ) => Promise<number[][]>
 }
 
 /**
@@ -106,12 +115,17 @@ export class KnowledgeService {
   }
 
   /** Top-K chunks by cosine similarity to the query. */
-  async search(kbId: string, query: string, topK = 5): Promise<KnowledgeSearchHit[]> {
+  async search(
+    kbId: string,
+    query: string,
+    topK = 5,
+    spaceId?: string | null
+  ): Promise<KnowledgeSearchHit[]> {
     const kb = this.deps.db.knowledge.getById(kbId)
     if (!kb) throw new Error('Knowledge base not found.')
     const trimmed = query.trim()
     if (trimmed.length === 0) return []
-    const [queryVector] = await this.deps.embed(kb.providerId, kb.modelId, [trimmed])
+    const [queryVector] = await this.deps.embed(kb.providerId, kb.modelId, [trimmed], spaceId)
     // Without a query vector every chunk scores 0 and the top-K would be
     // storage order — arbitrary context presented as relevant hits.
     if (!queryVector || queryVector.length === 0) {

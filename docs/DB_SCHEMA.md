@@ -29,7 +29,8 @@ version is stored in the `meta` table under key `schema_version`. Adding a
 schema change means appending a new migration object — never editing an
 existing one.
 
-The schema is currently at **version 10**:
+The schema is currently at **version 46** (`src/main/db/migrations.ts` is the
+authoritative, append-only list; the table below is a summary and may lag it):
 
 | Version | Name | Adds |
 |---|---|---|
@@ -48,6 +49,25 @@ The schema is currently at **version 10**:
 | 18 | `code-change-reverted-status` | widens `code_changes.status` CHECK with `'reverted'` (in-app undo of applied changes; table rebuild — no FK-off dance needed, `code_changes` has no FK children) |
 | 24 | `two-modes-delete-legacy-content` | the five modes collapse into `chat`/`work`: DELETES all cowork/code/write/design conversations (messages/documents/code_changes included), all workspaces + items, and non-chat projects (explicit product decision; chat content and `code_projects` grants survive) |
 | 25 | `two-modes-drop-mode-checks` | drops the mode CHECK on `conversations` and `projects` entirely (v13 pattern — zod enforces the enum; FK-safe rebuild for conversations) |
+| 26 | `agent-platform` | `agent_runs` (background delegate control plane), `checkpoints` (pre-edit snapshots), project hooks |
+| 27–29 | `scheduled-tasks` | `scheduled_tasks` (standalone prompt tasks) + per-task pre-approved tools and working folder |
+| 30 | `inbox-state` | `inbox_state` (reviewed-state for the Home agent inbox; no FKs by design) |
+| 31 | `tool-rules` | `tool_rules` (persisted "always allow"/"always ask" standing approvals) |
+| 32 | `agent-owned-memory` | `agents` as owners: `scheduled_tasks.agent_id`, `memories.agent_id` |
+| 33 | `calendar-schedules` | calendar schedules + `scheduled_task_runs`/`workflow` run history |
+| 34 | `activity-log` | `activity_log` (every tool call + the reason it was allowed; redacted, capped, no FKs) |
+| 35 | `workflow-webhooks` | per-workflow `webhookEnabled` for the loopback trigger endpoint |
+| 36 | `messages-usage-index` | partial index on `messages(created_at)` for the Usage view |
+| 37 | `optimizer-and-experiments` | `optimizer_runs`, `optimizer_versions`, `experiment_entries` (AVO-style autonomous optimizer + per-project experiment log) |
+| 38 | `remote-devices` | `remote_devices` (phones paired through the relay tunnel; token stored as SHA-256 hash only) |
+| 39 | `optimizer-direction` | `optimizer_runs.direction` (`maximize`/`minimize`; ADD COLUMN, defaults `maximize`) |
+| 40 | `review-hardening-state` | Remote request anti-replay counter and forced re-pair, workflow schedule-edit anchor, optimizer worktree/recovery metadata |
+| 41 | `conversation-forking` | `conversations.parent_conversation_id` + `forked_at_message_id` (fork provenance; plain nullable pointers, not FKs — a fork outlives its parent) + `idx_conversations_parent` |
+| 42 | `workflow-watch-trigger` | `workflows.watch_json` (folder-watch trigger config; nullable ADD COLUMN, enabled flag inside the JSON) |
+| 43 | `notebooks` | rebuild `documents` (leaf): `conversation_id` nullable, `kind` CHECK dropped (zod enforces); new `document_versions` table, capped at 20 per doc by the repository |
+| 44 | `budget-guardrails` | new `headless_usage` spend ledger (no FKs — a row outlives its run); nullable `budget_usd` REAL on `conversations`/`workflows`/`scheduled_tasks` (month-to-date estimated-spend caps) |
+| 45 | `app-lock-private-spaces` | new `spaces` table; nullable `conversations.space_id` (NULL = default space; no FK — delete is app-guarded to empty spaces) + `idx_conversations_space` |
+| 46 | `bot-mode` | Bot Mode (Hermes-style): `agents.title`/`avatar_json`/`hidden`/`chat_conversation_id`; `conversations.agent_id` (canonical bot chat, excluded from the sidebar listing) + `idx_conversations_agent`; `messages.agent_id` (author attribution); new `bot_groups` + `bot_group_members` tables (group rooms; one shared transcript conversation per room). All pointers deliberately without FKs — the app cleans up on delete |
 
 ## Tables
 
@@ -109,23 +129,41 @@ non-secret env/headers are stored here.
 | `enabled` | INTEGER | 0/1, default 1 |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
-### `documents` (v9 — DORMANT since v24/v25)
+### `documents` (v9, revived as Notebooks in v43)
 
-The table remains (append-only migrations) but has no reader or writer since
-the two-mode collapse: Work-mode deliverables are real files on disk. Old rows
-were deleted by v24. Originally: Write-mode Markdown documents and Design-mode
-HTML prototypes, keyed to a
-conversation. A conversation has at most one `doc` and any number of `html`
-prototypes.
+Originally Write-mode documents / Design-mode HTML prototypes (dormant after
+the v24/v25 two-mode collapse); v43 rebuilt the table into Home-level living
+Markdown notebooks: `conversation_id` became nullable (a notebook belongs to
+no conversation and carries NULL; legacy conversation-keyed rows keep their
+CASCADE lifecycle) and the `kind` CHECK was dropped (zod enforces
+`doc`/`html` at the boundary). The Notes card and the
+`list_documents`/`read_document`/`edit_document` tools read/write kind `doc`
+rows only; surviving `html` rows are never listed.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `conversation_id` | TEXT FK → `conversations(id)` ON DELETE CASCADE | |
-| `kind` | TEXT | `doc` \| `html` (CHECK) |
+| `conversation_id` | TEXT nullable FK → `conversations(id)` ON DELETE CASCADE | NULL for notebooks (v43); legacy rows keep their conversation |
+| `kind` | TEXT | `doc` \| `html` (zod-enforced since v43) |
 | `title` | TEXT | |
-| `content` | TEXT | Markdown (doc) or full HTML (prototype) |
+| `content` | TEXT | Markdown (doc) or full HTML (legacy prototype) |
 | `created_at`, `updated_at` | INTEGER | unix ms |
+
+### `document_versions` (v43)
+
+Snapshot history behind notebook edits — the repository writes the PREVIOUS
+content here before every content change (model tool edits, manual UI edits
+and reverts all pass through the same path), then prunes past 20 versions per
+document (oldest first; the AUTOINCREMENT id makes ordering tie-proof).
+Revert snapshots the current content before restoring, so a revert is itself
+undoable.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK AUTOINCREMENT | monotonic → "newest first" is `id DESC` |
+| `document_id` | TEXT FK → `documents(id)` ON DELETE CASCADE | |
+| `content` | TEXT | the snapshotted (previous) Markdown |
+| `created_at` | INTEGER | unix ms |
 
 ### `workflows` (v10)
 
@@ -138,6 +176,8 @@ ai_agent, http_request, output).
 | `id` | TEXT PK | UUID |
 | `name` | TEXT | |
 | `graph_json` | TEXT | `{nodes,edges}` JSON, default empty graph |
+| `schedule_updated_at` | INTEGER nullable | last schedule/schedule-enabled edit (v40); calendar cadence anchor independent of unrelated workflow edits |
+| `watch_json` | TEXT nullable | `WorkflowWatchConfig` JSON (v42): `{enabled, folderPath, glob, event: created\|changed, debounceMs?}` — folder-watch trigger, enabled flag inside; fired runs record trigger `watch` |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
 ### `providers`
@@ -192,11 +232,17 @@ One row per conversation in any mode (maps to `Conversation`).
 | `moa_preset_id` | TEXT nullable | Mixture-of-Agents preset this conversation runs through (v17); NULL = ordinary single-model. The preset itself lives in `settings.moaPresets` |
 | `summary_text` | TEXT nullable | context-compaction summary of older turns (v6) |
 | `summary_through_seq` | INTEGER nullable | highest message seq the summary covers (v6) |
+| `parent_conversation_id` | TEXT nullable | conversation this one was forked from (v41); plain pointer, not an FK — the parent may be deleted |
+| `forked_at_message_id` | TEXT nullable | id of the SOURCE message the fork was taken at (v41; message ids are regenerated in the fork) |
+| `space_id` | TEXT nullable | private space this conversation belongs to (v45); NULL = default space; no FK (spaces delete only when empty) |
+| `agent_id` | TEXT nullable | Bot Mode (v46): the agent profile owning this canonical bot chat; NULL = ordinary conversation. Bot-owned conversations (this column set, or referenced by `bot_groups.conversation_id`) are excluded from the default listing (`includeBots` opts back in for backups) |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
 Indexes: `idx_conversations_updated (updated_at DESC)` for the sidebar list,
 `idx_conversations_mode (mode, updated_at DESC)` for per-mode filtering,
-`idx_conversations_project (project_ref)` for per-project filtering (v16).
+`idx_conversations_project (project_ref)` for per-project filtering (v16),
+`idx_conversations_parent (parent_conversation_id)` for the sibling-fork lookup (v41),
+`idx_conversations_space (space_id)` for space scoping (v45).
 
 ### `projects` (v16)
 
@@ -236,8 +282,9 @@ covers audit needs where they matter.
 | `status` | TEXT | `complete` \| `streaming` \| `error` \| `stopped` (CHECK) |
 | `error_json` | TEXT nullable | `NormalizedError` JSON (already redacted) |
 | `provider_id`, `model_id` | TEXT nullable | provider/model actually used for this message (the aggregator model for a MoA message) |
-| `usage_json` | TEXT nullable | `TokenUsage` JSON |
+| `usage_json` | TEXT nullable | `TokenUsage` JSON; may additionally carry a `failedOverFrom` key (`FailoverAttempt[]`, Reliability Autopilot hops) that the messages repository splits back out of the parsed value — its compose/split helpers are the only (de)serialization point for this column |
 | `moa_references_json` | TEXT nullable | `MoaReferenceOutput[]` JSON — the advisor model outputs behind a Mixture-of-Agents answer (v17) |
+| `agent_id` | TEXT nullable | Bot Mode (v46): the agent profile that authored this message (group-room turns, bot-chat turns); no FK — an unknown id renders as an unknown author |
 | `seq` | INTEGER | order within the conversation |
 | `created_at` | INTEGER | unix ms |
 
@@ -384,3 +431,102 @@ constraints) so a conversation can outlive its workspace/project gracefully.
 # Agent platform (v26)
 
 `agent_runs` persists background delegate status/results for the Agent Control Center. `checkpoints` stores the pre-edit file payload and conversation sequence associated with each applied code change. Both are local-only and contain no provider credentials.
+
+# Budget guardrails (v44)
+
+### `headless_usage` (v44)
+
+Per-run token/cost ledger for headless generation (workflow nodes, scheduled
+tasks, arena candidates, IM-bridge replies). No FKs by design — a row outlives
+the run it describes (the `inbox_state`/`activity_log` precedent).
+`est_cost_usd` is NULL for unpriced models; NULL rows are excluded from every
+cap and total (`SUM` skips them). A `run_kind = 'other'` row that refs a LIVE
+conversation is excluded from combined message+headless aggregates — its
+`generateHeadless` reply is already counted as a message; producers of spend
+NOT persisted on messages must use their own run_kind.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `run_kind` | TEXT | `workflow` \| `scheduled_task` \| `agent_run` \| `arena` \| `brief` \| `other` |
+| `ref_id` | TEXT nullable | workflow/task/conversation id the run belongs to; plain pointer, not an FK |
+| `provider_id` | TEXT | provider used (plain pointer) |
+| `model_id` | TEXT | |
+| `prompt_tokens` | INTEGER | default 0 |
+| `completion_tokens` | INTEGER | default 0 |
+| `cached_tokens` | INTEGER | default 0 (cache-hit prompt tokens) |
+| `est_cost_usd` | REAL nullable | NULL = unpriced model, excluded from caps |
+| `created_at` | INTEGER | unix ms; indexed (`idx_headless_usage_created`, `idx_headless_usage_ref`) |
+
+### Monthly caps (v44)
+
+`conversations.budget_usd`, `workflows.budget_usd` and
+`scheduled_tasks.budget_usd` are nullable REAL columns holding a month-to-date
+estimated-spend cap in USD (NULL = no cap); `AppSettings.monthlyBudgetUsd` is
+the global one. Caps count only priced spend.
+
+# App lock & private spaces (v45)
+
+### `spaces` (v45)
+
+Named partitions of the conversation list. A conversation's membership is
+stamped at creation (`conversations.space_id`, NULL = the default space) and
+never moves in v1. Private-space conversations are excluded from the default
+repository listing, backups (unless explicitly included), the phone tunnel,
+the Telegram bridge, notification bodies and inbox previews. NOT encryption at
+rest — the SQLite file stays readable on disk.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID (backup import may preserve the original id) |
+| `name` | TEXT | case-insensitively unique (enforced by the IPC handler) |
+| `provider_allowlist_json` | TEXT nullable | JSON array of provider ids generation in this space may use; NULL = all providers. `providers:delete` scrubs the id, collapsing an empty list to NULL |
+| `created_at` | INTEGER | unix ms |
+
+The app-lock passphrase verifier lives in settings (`appLockHash`, scrypt
+params + hash, main-owned, never the passphrase, never exported), not in a
+table of its own.
+
+# Bot Mode (v46)
+
+Hermes-style bots built on agent profiles. A bot **is** an `agents` row: v46
+adds `title` (role designation), `avatar_json` (`{emoji?, color?}`), `hidden`
+(display-only roster flag — mentions, group memberships and routines keep
+working) and `chat_conversation_id` (the bot's canonical chat, created lazily
+by `BotService.ensureBotChat`). Deleting a profile also deletes its canonical
+chat and removes it from every room (app-level cleanup — no FKs anywhere in
+Bot Mode by the v30/v34 precedent).
+
+### `bot_groups` (v46)
+
+Group rooms of 2–6 bots. Each room's transcript is ONE ordinary
+`conversations` row (`conversation_id`); member turns are assistant messages
+attributed via `messages.agent_id`. Rounds are orchestrated by `BotService`:
+up to 3 serial reply-or-pass rounds per user send, capped at 10 bot messages,
+round 1 scoped to @mentioned members, settled by a full silent round. A member
+escalating with `@user` sets `needs_user` (the "needs you" badge, cleared when
+the room is opened).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID — the room's durable identity (rename changes only the display name; disband is permanent) |
+| `name` | TEXT | display name (also mirrored to the transcript conversation's title) |
+| `conversation_id` | TEXT | the room transcript conversation; no FK — disband removes both |
+| `needs_user` | INTEGER | 1 = a member @user-escalated since the room was last opened |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+### `bot_group_members` (v46)
+
+| Column | Type | Notes |
+|---|---|---|
+| `group_id` | TEXT FK → `bot_groups(id)` ON DELETE CASCADE | |
+| `agent_id` | TEXT | member profile; no FK — profile deletion removes rows app-side |
+| `added_at` | INTEGER | unix ms (also the display order) |
+
+PK `(group_id, agent_id)`.
+
+Bot-to-bot messaging (`message_agent` tool, canonical bot chats only) keeps NO
+tables: deliveries are in-memory queues in `BotService` (fire-and-forget; the
+reply routes back through the completion-hook, with a single transient-failure
+retry, typed failure reasons and a hop cap of 6). A queued delivery lost to an
+app restart simply never lands — the sender's chat shows no reply.

@@ -34,9 +34,9 @@ function WelcomeStep() {
       </div>
       <h1>Grasberg</h1>
       <p className="wizard-pitch">
-        One fast, local-first desktop client for DeepSeek, GLM, MiniMax and any OpenAI-compatible
-        endpoint — chat with the model you want, switch providers mid-project, and keep everything
-        on your own machine.
+        One fast, local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedrock,
+        DeepSeek, GLM, MiniMax and 120+ OpenAI-compatible providers — chat with the model you want,
+        switch providers mid-project, and keep everything on your own machine.
       </p>
       <ul className="wizard-bullets">
         <li>Conversations and settings are stored locally, never on our servers.</li>

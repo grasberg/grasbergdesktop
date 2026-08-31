@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import {
   BrowserWindow,
   app,
@@ -25,6 +25,7 @@ import type {
   AppSettings,
   Attachment,
   ConversationMode,
+  QuickContext,
   ScheduledTaskInput,
   ScheduledTasksChangedEvent,
   ToolPermissionDecision,
@@ -33,14 +34,19 @@ import type {
   WorkflowSchedule,
   WorkflowsOverview,
   WorkflowTriggerInfo,
+  WorkflowWatchConfig,
+  WorkflowWatchStatus,
   WorkspaceItemKind,
 } from '@shared/types'
 import { makeDryRunDeps, runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
 import type { WorkspaceRootService } from '../code/workspace-root'
 import type { TerminalService } from '../terminal/terminal-service'
+import type { VoiceService } from '../audio/voice-service'
 import type { KnowledgeService } from '../services/knowledge'
+import type { BotService } from '../services/bots'
 import type { DreamingService } from '../services/dreaming'
+import type { BriefService } from '../services/brief'
 import {
   CHATGPT_OAUTH_DEFAULT_MODEL,
   PROVIDER_TYPES,
@@ -51,9 +57,11 @@ import {
 import { presetMeta } from '@shared/presets'
 import { buildUsageSummary } from '@shared/usage-summary'
 import { collectInboxItems } from '../services/inbox'
+import { conversationCostSummary } from '../services/budget'
 import type { ArenaService } from '../services/arena'
 import type { OptimizerService } from '../services/optimizer'
 import { modeModelDefault } from '@shared/mode-models'
+import { QUICK_SELECTION_MAX_CHARS } from '@shared/quick-actions'
 import {
   apiKeySchema,
   chatParamsSchema,
@@ -64,6 +72,8 @@ import {
   mcpServerPatchSchema,
   memoryInputSchema,
   memoryPatchSchema,
+  notebookDocInputSchema,
+  notebookDocPatchSchema,
   outboundWebhookUrlSchema,
   promptTemplateInputSchema,
   promptTemplatePatchSchema,
@@ -77,6 +87,15 @@ import {
   researchDepthSchema,
   settingsPatchSchema,
   workflowGraphSchema,
+  voiceModelIdSchema,
+  voiceSttChunkSchema,
+  voiceSttSessionSchema,
+  voiceTranscribeAttachmentSchema,
+  spaceCreateSchema,
+  spaceUpdateSchema,
+  appLockUnlockSchema,
+  appLockSetPassphraseSchema,
+  backupExportOptionsSchema,
   KEYLESS_API_KEY,
   isLoopbackBaseUrl,
   isValidStorageKey,
@@ -91,11 +110,13 @@ import { customToolDbId, type ToolSystem } from '../tools'
 import type { McpManager } from '../tools/mcp/manager'
 import type { ImBridgeManager } from '../im/manager'
 import type { RemoteService } from '../remote/service'
+import type { AppLockService } from '../services/app-lock'
 import type { ApprovalBroker } from '../services/approval-broker'
 import {
   generateTriggerToken,
   type WorkflowTriggerServer,
 } from '../workflows/trigger-server'
+import type { WorkflowWatcherService } from '../workflows/watcher'
 import type { QuestionBroker } from '../services/question-broker'
 import { getAdapter, resolveAdapter } from '../providers/registry'
 import type { OpenAiOAuthManager } from '../providers/openai-oauth'
@@ -111,8 +132,10 @@ import {
   readStoredImage,
   storePastedImage,
 } from './attachments'
+import { extractAttachment } from '../attachments/extract'
+import { setOcrCacheDir } from '../attachments/ocr'
 import { copyFile, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 export interface RegisterIpcDeps {
   db: AppDatabase
@@ -126,6 +149,8 @@ export interface RegisterIpcDeps {
   notifier?: { refreshBadge(): void }
   /** Local trigger endpoint, for its status/URL and token rotation. */
   triggerServer?: WorkflowTriggerServer
+  /** Folder-watch triggers — re-synced after every workflow save/delete. */
+  workflowWatcher?: WorkflowWatcherService
   questionBroker: QuestionBroker
   mcpManager: McpManager
   imBridgeManager: ImBridgeManager
@@ -139,6 +164,10 @@ export interface RegisterIpcDeps {
   workspaceRoots: WorkspaceRootService
   /** Memory consolidation ("dreaming") — the manual Consolidate-now action. */
   dreamingService: DreamingService
+  /** Bot Mode (v46): roster, canonical bot chats, group rooms. */
+  botService?: BotService
+  /** Morning brief: stored digests + dismissal (state lives in settings, main-owned). */
+  briefService: Pick<BriefService, 'list' | 'dismiss'>
   /** Knowledge-base chunking/embedding/retrieval. */
   knowledgeService: KnowledgeService
   /** Directory where image attachments are stored on disk. */
@@ -147,10 +176,25 @@ export interface RegisterIpcDeps {
   worktreesDir: string
   /** User-driven Work-view terminal sessions (pipes-based, per conversation). */
   terminalService: TerminalService
+  /** Offline voice: whisper download/management + STT sessions. */
+  voiceService: VoiceService
   /** Code Arena: N models racing the same task in isolated worktrees. */
   arenaService: ArenaService
   /** Autonomous optimize-evaluate-commit loops per project. */
   optimizerService: OptimizerService
+  /**
+   * Quick-assistant mini window (structural type, not the class — unit tests
+   * register with partial deps and no Electron).
+   */
+  quickWindow?: {
+    getContext(): QuickContext
+    hide(): void
+    sendToQuick(channel: string, payload: unknown): void
+  }
+  /** Restores + focuses the main window (quick promote navigates there). */
+  summonMainWindow?: () => void
+  /** Re-registers the quick-assistant accelerator after a settings change. */
+  syncQuickShortcut?: () => void
   /**
    * Remote access (phone tunnel). Resolved lazily: the service needs this
    * function's RETURN VALUE (the handler map), so it is constructed after
@@ -158,6 +202,11 @@ export interface RegisterIpcDeps {
    */
   getRemoteService: () => RemoteService | null
   getWindows: () => BrowserWindow[]
+  /**
+   * App lock (optional so partial-deps tests keep working). While locked, the
+   * wiring loop below refuses every channel outside LOCK_EXEMPT_CHANNELS.
+   */
+  appLock?: Pick<AppLockService, 'isLocked' | 'status' | 'lock' | 'unlock' | 'setPassphrase'>
 }
 
 const TEST_CONNECTION_TIMEOUT_MS = 15_000
@@ -239,6 +288,9 @@ const convListSchema = z
     search: z.string().max(500).optional(),
     projectRef: z.string().min(1).max(200).optional(),
     limit: z.number().int().positive().max(1000).optional(),
+    // Private space to list; omitted = the default space. `allSpaces` is a
+    // repository-only option this schema deliberately never accepts.
+    spaceId: z.string().min(1).max(100).optional(),
   })
   .optional()
 
@@ -252,6 +304,7 @@ const convCreateSchema = z.object({
   projectId: z.string().nullable().optional(),
   projectRef: z.string().min(1).nullable().optional(),
   moaPresetId: z.string().min(1).nullable().optional(),
+  spaceId: z.string().min(1).max(100).nullable().optional(),
 })
 
 const convUpdateSchema = z.object({
@@ -267,6 +320,7 @@ const convUpdateSchema = z.object({
     projectRef: z.string().min(1).nullable().optional(),
     moaPresetId: z.string().min(1).nullable().optional(),
     knowledgeBaseId: z.string().min(1).nullable().optional(),
+    budgetUsd: z.number().positive().max(100_000).nullable().optional(),
   }),
 })
 
@@ -292,8 +346,12 @@ const attachmentSchema = z.object({
   name: z.string().min(1).max(500),
   mimeType: z.string().max(200),
   sizeBytes: z.number().int().nonnegative(),
-  kind: z.enum(['text', 'image']).optional(),
+  kind: z.enum(['text', 'image', 'pdf', 'audio']).optional(),
   textContent: z.string().max(2_000_000).optional(),
+  // 200k extraction cap + truncation-note margin.
+  extractedText: z.string().max(220_000).optional(),
+  extraction: z.enum(['text', 'ocr', 'transcript', 'none']).optional(),
+  rawAttach: z.boolean().optional(),
   // Only the app-generated '<uuid>.<ext>' shape is a valid key; enforcing it
   // here keeps traversal-shaped keys out of the persisted message row.
   storageKey: z
@@ -342,6 +400,23 @@ const chatEditAndRerunSchema = z.object({
   messageId: z.string().min(1),
   newContent: z.string().max(1_000_000),
 })
+
+const quickRunSchema = z
+  .object({
+    actionId: z.string().min(1).max(100),
+    selection: z.string().max(QUICK_SELECTION_MAX_CHARS),
+  })
+  .strict()
+
+const quickPromoteSchema = z
+  .object({
+    userText: z.string().min(1).max(100_000),
+    answer: z.string().min(1).max(1_000_000),
+    providerId: z.string().min(1).max(200),
+    modelId: z.string().min(1).max(200),
+    title: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
 
 const workspaceCreateSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -431,9 +506,23 @@ const appSaveAttachmentAsSchema = z.object({
   suggestedName: z.string().max(200).optional(),
 })
 
+const appExtractAttachmentSchema = z.object({
+  storageKey: z
+    .string()
+    .max(300)
+    .refine(isValidStorageKey, { message: 'Invalid attachment storage key' }),
+  method: z.enum(['text', 'ocr']),
+})
+
 const convForkSchema = z.object({
   id: z.string().min(1),
-  throughSeq: z.number().int().positive().optional(),
+  /** Fork point: copy messages up to and including this one (omit = whole transcript). */
+  messageId: z.string().min(1).optional(),
+})
+
+const documentsRevertSchema = z.object({
+  id: z.string().min(1),
+  versionId: z.number().int().positive(),
 })
 
 const gitCommitSchema = z.object({ projectId: z.string().min(1), message: z.string().min(1).max(5000) })
@@ -515,6 +604,7 @@ const optimizerStartSchema = z.object({
   providerId: z.string().min(1).nullable().optional(),
   modelId: z.string().min(1).max(200).nullable().optional(),
   maxRounds: z.number().int().min(1).max(40).optional(),
+  direction: z.enum(['maximize', 'minimize']).optional(),
   allowShell: z.boolean().optional(),
 })
 
@@ -584,6 +674,12 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const handlers: IpcHandlerMap = new Map()
 
   const register = (channel: ChannelName, fn: IpcHandler): void => {
+    // Restore the loud guard the old ipcMain.handle path gave for free: a
+    // duplicate registration is a copy-paste bug, and last-write-wins would
+    // silently drop one handler's logic. Fail at startup instead.
+    if (handlers.has(channel)) {
+      throw new Error(`IPC channel registered twice: ${channel}`)
+    }
     handlers.set(channel, fn)
   }
 
@@ -658,6 +754,13 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     readStoredImage(deps.attachmentsDir, requireString(storageKey, 'Attachment key'))
   )
 
+  // Guarded: unit tests register with partial deps and no attachments dir.
+  if (deps.attachmentsDir) setOcrCacheDir(join(deps.attachmentsDir, '.ocr-cache'))
+  register(CHANNELS.appExtractAttachmentText, async (req) => {
+    const parsed = parseInput(appExtractAttachmentSchema, req)
+    return extractAttachment(deps.attachmentsDir, parsed.storageKey, parsed.method)
+  })
+
   register(CHANNELS.appSaveAttachmentAs, async (req) => {
     const parsed = parseInput(appSaveAttachmentAsSchema, req)
     // Same gate as readStoredImage: only app-shaped keys, only image mimes.
@@ -692,6 +795,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     if (parsed.workflowWebhookEnabled !== undefined || parsed.workflowWebhookPort !== undefined) {
       deps.triggerServer?.sync()
     }
+    // Re-register the quick-assistant accelerator the moment it changes.
+    if (parsed.quickAssistantShortcut !== undefined) deps.syncQuickShortcut?.()
     return updated
   })
 
@@ -746,6 +851,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       const patch = providerRefsCleared(db.settings.get(), providerId)
       if (Object.keys(patch).length > 0) db.settings.update(patch)
       db.conversations.clearProvider(providerId)
+      // A space allowlist naming only this provider collapses to null (= all
+      // providers) rather than leaving a space that can never generate.
+      db.spaces.removeProviderFromAllowlists(providerId)
       db.providers.remove(providerId)
     })
     return undefined
@@ -893,6 +1001,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   register(CHANNELS.convCreate, (req) => {
     const parsed = parseInput(convCreateSchema, req)
+    if (parsed.spaceId) found(db.spaces.getById(parsed.spaceId), 'Space')
     // Stamp the per-mode default provider/model onto the new conversation when
     // the caller didn't specify one and the feature is on for this mode.
     if (parsed.providerId == null && parsed.modelId == null) {
@@ -959,6 +1068,15 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.convFork, (req) => {
     const parsed = parseInput(convForkSchema, req)
     const source = found(db.conversations.getById(parsed.id), 'Conversation')
+    const messages = db.messages.listByConversation(source.id)
+    // Scoping the find to the source's own messages doubles as an ownership
+    // check: a messageId from another conversation is simply "not found".
+    const target =
+      parsed.messageId === undefined
+        ? undefined
+        : found(messages.find((m) => m.id === parsed.messageId), 'Message')
+    const copied = target ? messages.filter((m) => m.seq <= target.seq) : messages
+    const forkPoint = target ?? copied[copied.length - 1]
     // One transaction: a fork is the conversation AND its transcript — a
     // partially copied fork would look like a valid (silently truncated) one.
     return db.driver.transaction(() => {
@@ -977,16 +1095,122 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
         // KB attachment is steering config like the model choice: a fork keeps
         // it (the base is only ever nulled here if it was already deleted).
         knowledgeBaseId: source.knowledgeBaseId,
+        // Provenance stores SOURCE ids (message ids are regenerated below).
+        parentConversationId: source.id,
+        forkedAtMessageId: forkPoint?.id ?? null,
+        // A fork of a private conversation stays in its space (v45).
+        spaceId: source.spaceId,
       })
-      const messages = db.messages
-        .listByConversation(source.id)
-        .filter((message) => parsed.throughSeq === undefined || message.seq <= parsed.throughSeq)
-      for (const message of messages) {
-        db.messages.insert({ ...message, id: randomUUID(), conversationId: fork.id })
+      if (Object.keys(source.params).length > 0) {
+        db.conversations.update(fork.id, { params: source.params })
       }
-      return fork
+      // Keep the compaction summary only when the fork contains everything it
+      // covers; forking before the compaction point drops it.
+      if (
+        source.summaryText != null &&
+        source.summaryThroughSeq != null &&
+        (forkPoint?.seq ?? 0) >= source.summaryThroughSeq
+      ) {
+        db.conversations.setSummary(fork.id, source.summaryText, source.summaryThroughSeq)
+      }
+      for (const message of copied) {
+        db.messages.insert({
+          ...message,
+          id: randomUUID(),
+          conversationId: fork.id,
+          // Cost attribution stays with the source: copying usage would make
+          // the month-to-date budget aggregates count the same tokens twice.
+          usage: undefined,
+          // A copied row mid-generation can never resume (backup-import rule).
+          status: message.status === 'streaming' ? 'stopped' : message.status,
+        })
+      }
+      return db.conversations.getById(fork.id)!
     })
   })
+
+  register(CHANNELS.convForkLineage, (id) => {
+    const conversation = found(
+      db.conversations.getById(requireString(id, 'Conversation id')),
+      'Conversation'
+    )
+    const parentId = conversation.parentConversationId ?? null
+    if (!parentId) return { parent: null, siblings: [] }
+    // Provenance is not an FK: the parent may be gone, but its other forks
+    // still resolve through the (dangling) pointer.
+    const parent = db.conversations.getById(parentId)
+    return {
+      parent: parent ? { id: parent.id, title: parent.title } : null,
+      siblings: db.conversations.listForks(parentId).filter((f) => f.id !== conversation.id),
+    }
+  })
+
+  // -- private spaces (v45) ---------------------------------------------------
+
+  const rejectDuplicateSpaceName = (name: string, excludeId?: string): void => {
+    const lower = name.toLowerCase()
+    if (db.spaces.list().some((s) => s.id !== excludeId && s.name.toLowerCase() === lower)) {
+      throw invalid('A space with that name already exists.')
+    }
+  }
+
+  register(CHANNELS.spacesList, () => db.spaces.list())
+
+  register(CHANNELS.spacesCreate, (req) => {
+    const parsed = parseInput(spaceCreateSchema, req)
+    rejectDuplicateSpaceName(parsed.name)
+    return db.spaces.create({ name: parsed.name })
+  })
+
+  register(CHANNELS.spacesUpdate, (req) => {
+    const parsed = parseInput(spaceUpdateSchema, req)
+    if (parsed.patch.name !== undefined) rejectDuplicateSpaceName(parsed.patch.name, parsed.id)
+    if (parsed.patch.providerAllowlist) {
+      for (const providerId of parsed.patch.providerAllowlist) {
+        if (!db.providers.getById(providerId)) throw invalid('Unknown provider in allowlist.')
+      }
+    }
+    return found(db.spaces.update(parsed.id, parsed.patch), 'Space')
+  })
+
+  register(CHANNELS.spacesDelete, (id) => {
+    const spaceId = requireString(id, 'Space id')
+    found(db.spaces.getById(spaceId), 'Space')
+    if (db.spaces.countConversations(spaceId) > 0) {
+      throw invalid(
+        'Delete or finish its conversations first — a space can only be deleted when empty.'
+      )
+    }
+    db.spaces.remove(spaceId)
+    return undefined
+  })
+
+  // -- app lock ---------------------------------------------------------------
+
+  const requireLock = (): NonNullable<RegisterIpcDeps['appLock']> => {
+    if (!deps.appLock) throw invalid('App lock is unavailable.')
+    return deps.appLock
+  }
+
+  register(CHANNELS.lockStatus, () =>
+    deps.appLock
+      ? deps.appLock.status()
+      : { configured: false, locked: false, idleMinutes: null }
+  )
+
+  register(CHANNELS.lockUnlock, (req) =>
+    requireLock().unlock(parseInput(appLockUnlockSchema, req).passphrase)
+  )
+
+  register(CHANNELS.lockNow, () => {
+    const lock = requireLock()
+    lock.lock()
+    return lock.status()
+  })
+
+  register(CHANNELS.lockSetPassphrase, (req) =>
+    requireLock().setPassphrase(parseInput(appLockSetPassphraseSchema, req))
+  )
 
   // -- projects (per-mode organizational grouping) ---------------------------------
 
@@ -1068,6 +1292,39 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.chatPickCompareWinner, (req) =>
     chatService.pickCompareWinner(parseInput(chatPickCompareWinnerSchema, req))
   )
+
+  // -- quick assistant (clipboard mini window) --------------------------------
+  // Deliberately NOT in the remote router's allowlists: quick content is
+  // desktop-local and its stream events are targeted, never broadcast.
+
+  register(CHANNELS.quickRun, (req) => {
+    const parsed = parseInput(quickRunSchema, req)
+    const action = db.settings.get().quickActions.find((a) => a.id === parsed.actionId)
+    if (!action) throw invalid('Quick action not found.')
+    return chatService.startQuickStream({
+      action,
+      selection: parsed.selection,
+      emit: (envelope) => deps.quickWindow?.sendToQuick(CHANNELS.quickStreamEvent, envelope),
+    })
+  })
+
+  register(
+    CHANNELS.quickGetContext,
+    (): QuickContext => deps.quickWindow?.getContext() ?? { selectionText: '', truncated: false }
+  )
+
+  register(CHANNELS.quickHide, () => {
+    deps.quickWindow?.hide()
+    return undefined
+  })
+
+  register(CHANNELS.quickPromote, (req) => {
+    const parsed = parseInput(quickPromoteSchema, req)
+    const conversation = chatService.promoteQuick(parsed)
+    deps.summonMainWindow?.()
+    deps.quickWindow?.hide()
+    return { conversationId: conversation.id }
+  })
 
   // -- cowork workspaces --------------------------------------------------------------
 
@@ -1338,6 +1595,14 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     deps.notifier?.refreshBadge()
   })
 
+  // -- morning brief (daily digest generated main-side) -------------------------
+
+  register(CHANNELS.briefList, () => deps.briefService.list())
+
+  register(CHANNELS.briefDismiss, (id) => {
+    deps.briefService.dismiss(requireString(id, 'Brief id'))
+  })
+
   // -- usage (local, estimate-only spend summary) -------------------------------
 
   register(CHANNELS.usageSummary, (days) => {
@@ -1358,6 +1623,20 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       ]
     })
     return buildUsageSummary(rows)
+  })
+
+  register(CHANNELS.usageConversationCost, (conversationId) => {
+    const conversation = found(
+      db.conversations.getById(requireString(conversationId, 'Conversation id')),
+      'Conversation'
+    )
+    return conversationCostSummary(db, conversation)
+  })
+
+  register(CHANNELS.usageHeadless, (days) => {
+    const window = typeof days === 'number' && days >= 1 && days <= 365 ? days : 30
+    const since = Date.now() - window * 24 * 60 * 60 * 1000
+    return db.headlessUsage.summarySince(since)
   })
 
   // -- terminal (user-driven Work-view terminal; the click IS the consent) ------
@@ -1383,6 +1662,66 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   register(CHANNELS.terminalDispose, (sessionId) => {
     deps.terminalService.dispose(requireString(sessionId, 'Session id'))
+  })
+
+  // -- voice (offline whisper.cpp STT; desktop-local, never on the phone allowlist) --
+
+  register(CHANNELS.voiceStatus, () => deps.voiceService.status())
+
+  register(CHANNELS.voiceDownload, (req) => {
+    const parsed = parseInput(z.object({ modelId: voiceModelIdSchema }).strict(), req)
+    if (deps.voiceService.downloading) throw invalid('A voice download is already in progress.')
+    // Fire-and-forget the long download: progress and failures ride the
+    // push:voiceDownloadProgress channel (a terminal event is always sent).
+    void deps.voiceService.download(parsed.modelId).catch(() => undefined)
+    return deps.voiceService.status()
+  })
+
+  register(CHANNELS.voiceDownloadCancel, () => {
+    deps.voiceService.cancelDownload()
+    return deps.voiceService.status()
+  })
+
+  register(CHANNELS.voiceRemove, async (req) => {
+    const parsed = parseInput(z.object({ modelId: voiceModelIdSchema }).strict(), req)
+    await deps.voiceService.remove(parsed.modelId)
+    return deps.voiceService.status()
+  })
+
+  register(CHANNELS.voicePickBinary, async (clear) => {
+    // The chosen executable path is written to settings by MAIN only — it is
+    // deliberately absent from settingsPatchSchema and backup import.
+    if (requireBoolean(clear, 'clear')) {
+      db.settings.update({ voiceWhisperBinaryPath: null })
+      return deps.voiceService.status()
+    }
+    const result = await showOpen({ properties: ['openFile'] })
+    if (!result.canceled && result.filePaths.length > 0) {
+      db.settings.update({ voiceWhisperBinaryPath: result.filePaths[0] })
+    }
+    return deps.voiceService.status()
+  })
+
+  register(CHANNELS.voiceSttBegin, () => deps.voiceService.sttBegin())
+
+  register(CHANNELS.voiceSttChunk, (req) => {
+    const parsed = parseInput(voiceSttChunkSchema, req)
+    deps.voiceService.sttChunk(parsed.sessionId, parsed.chunk)
+  })
+
+  register(CHANNELS.voiceSttEnd, (req) => {
+    const parsed = parseInput(voiceSttSessionSchema, req)
+    return deps.voiceService.sttEnd(parsed.sessionId)
+  })
+
+  register(CHANNELS.voiceSttCancel, (req) => {
+    const parsed = parseInput(voiceSttSessionSchema, req)
+    deps.voiceService.sttCancel(parsed.sessionId)
+  })
+
+  register(CHANNELS.voiceTranscribeAttachment, (req) => {
+    const parsed = parseInput(voiceTranscribeAttachmentSchema, req)
+    return deps.voiceService.transcribeAttachment(parsed)
   })
 
   // -- tools --------------------------------------------------------------------
@@ -1573,6 +1912,48 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   // Manual "Consolidate now": forced dream, bypassing the auto-run gates.
   register(CHANNELS.memoriesDream, () => deps.dreamingService.dreamNow(true))
 
+  // -- notebooks ----------------------------------------------------------------
+
+  register(CHANNELS.documentsList, () => db.documents.list())
+
+  register(CHANNELS.documentsGet, (id) =>
+    found(db.documents.getById(requireString(id, 'Document id')), 'Document')
+  )
+
+  register(CHANNELS.documentsCreate, (input) =>
+    db.documents.create(parseInput(notebookDocInputSchema, input))
+  )
+
+  register(CHANNELS.documentsUpdate, (id, patch) => {
+    const documentId = requireString(id, 'Document id')
+    return found(
+      db.documents.update(documentId, parseInput(notebookDocPatchSchema, patch)),
+      'Document'
+    )
+  })
+
+  register(CHANNELS.documentsDelete, (id) => {
+    db.documents.remove(requireString(id, 'Document id'))
+    return undefined
+  })
+
+  register(CHANNELS.documentsListVersions, (id) =>
+    // Summaries only: the history panel shows a length and restores by id —
+    // up to 20 full contents (megabytes) over IPC would be dead weight.
+    db.documents.listVersionSummaries(requireString(id, 'Document id'))
+  )
+
+  register(CHANNELS.documentsRevert, (req) => {
+    const parsed = parseInput(documentsRevertSchema, req)
+    return found(db.documents.revert(parsed.id, parsed.versionId), 'Document version')
+  })
+
+  register(CHANNELS.documentsExport, async (id) => {
+    const doc = found(db.documents.getById(requireString(id, 'Document id')), 'Document')
+    const base = doc.title.replace(/[^\w\-. ]+/g, '').trim().slice(0, 60) || 'notebook'
+    return saveTextFile(`${base}.md`, [{ name: 'Markdown', extensions: ['md'] }], doc.content)
+  })
+
   // -- skills -------------------------------------------------------------------
 
   register(CHANNELS.skillsList, () => db.skills.list())
@@ -1608,12 +1989,17 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   // -- backup (settings + memories + skills) ------------------------------------
 
-  register(CHANNELS.backupExport, async () => {
+  register(CHANNELS.backupExport, async (req) => {
+    const parsed = parseInput(backupExportOptionsSchema, req)
     const date = new Date().toISOString().slice(0, 10)
     return saveTextFile(
       `grasberg-backup-${date}.json`,
       [{ name: 'JSON', extensions: ['json'] }],
-      JSON.stringify(buildBackup(db), null, 2)
+      JSON.stringify(
+        buildBackup(db, { includePrivateSpaces: parsed?.includePrivateSpaces === true }),
+        null,
+        2
+      )
     )
   })
 
@@ -1681,9 +2067,18 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   register(CHANNELS.imStatus, () => imBridgeManager.status())
 
-  register(CHANNELS.imSetTelegram, (input) =>
-    imBridgeManager.setTelegram(parseInput(imTelegramSchema, input))
-  )
+  register(CHANNELS.imSetTelegram, (input) => {
+    const parsed = parseInput(imTelegramSchema, input)
+    // A private-space conversation must never be reachable over Telegram; the
+    // runtime backstop in ImBridgeManager.handleInbound covers pre-v45 binds.
+    if (parsed.conversationId) {
+      const conversation = found(db.conversations.getById(parsed.conversationId), 'Conversation')
+      if (conversation.spaceId) {
+        throw invalid('A conversation in a private space cannot be bridged to Telegram.')
+      }
+    }
+    return imBridgeManager.setTelegram(parsed)
+  })
 
   // Delivery drops a webhook that isn't https (or http on localhost), so the
   // same rule is enforced here — a webhook that can never fire is rejected.
@@ -1701,6 +2096,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const remoteSetConfigSchema = z.object({
     enabled: z.boolean(),
     relayUrl: z.string().trim().max(500).nullable().optional(),
+    clientUrl: z.string().trim().max(500).nullable().optional(),
   })
 
   register(CHANNELS.remoteStatus, () => remote().status())
@@ -1732,12 +2128,22 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     }),
   ])
 
+  const workflowWatchSchema = z.object({
+    enabled: z.boolean(),
+    folderPath: z.string().min(1).max(1000),
+    glob: z.string().max(200),
+    event: z.enum(['created', 'changed']),
+    debounceMs: z.number().int().min(100).max(60_000).optional(),
+  })
+
   const workflowInputSchema = z.object({
     name: z.string().trim().min(1).max(200),
     graph: workflowGraphSchema,
     schedule: workflowScheduleSchema.nullish(),
     scheduleEnabled: z.boolean().optional(),
     webhookEnabled: z.boolean().optional(),
+    watch: workflowWatchSchema.nullish(),
+    budgetUsd: z.number().positive().max(100_000).nullable().optional(),
   })
 
   /**
@@ -1781,16 +2187,38 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     }
   }
 
+  /**
+   * The folder must be a real directory chosen with the OS folder picker.
+   * Enforced server-side regardless of what the UI does: an enabled watch on a
+   * relative or missing path would silently never fire (or worse, the wrong
+   * dir). Disabled configs pass — the path is kept, just not watched.
+   */
+  const assertWatchCanFire = (watch: WorkflowWatchConfig | null | undefined): void => {
+    if (watch?.enabled !== true) return
+    if (!isAbsolute(watch.folderPath)) {
+      throw invalid('Pick a folder with the folder picker before turning the watch on.')
+    }
+    try {
+      if (!statSync(watch.folderPath).isDirectory()) throw new Error('not a directory')
+    } catch {
+      throw invalid('The watched folder no longer exists — pick it again.')
+    }
+  }
+
   const asWorkflowInput = (value: unknown): WorkflowInput => {
     const parsed = parseInput(workflowInputSchema, value)
     const schedule = asSchedule(parsed.schedule)
     assertScheduleCanFire(parsed.scheduleEnabled, schedule)
+    const watch = parsed.watch ?? null
+    assertWatchCanFire(watch)
     return {
       name: parsed.name,
       graph: parsed.graph as WorkflowGraph,
       schedule,
       scheduleEnabled: parsed.scheduleEnabled === true,
       webhookEnabled: parsed.webhookEnabled === true,
+      watch,
+      budgetUsd: parsed.budgetUsd ?? null,
     }
   }
 
@@ -1802,6 +2230,13 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     if (parsed.schedule !== undefined) patch.schedule = asSchedule(parsed.schedule)
     if (parsed.scheduleEnabled !== undefined) patch.scheduleEnabled = parsed.scheduleEnabled
     if (parsed.webhookEnabled !== undefined) patch.webhookEnabled = parsed.webhookEnabled
+    if (parsed.watch !== undefined) {
+      // No merge needed: enabled travels inside the config, so a patch either
+      // replaces the whole object or omits it (undefined keeps the stored one).
+      patch.watch = parsed.watch ?? null
+      assertWatchCanFire(patch.watch)
+    }
+    if (parsed.budgetUsd !== undefined) patch.budgetUsd = parsed.budgetUsd
     return patch
   }
 
@@ -1810,6 +2245,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.workflowsCreate, (input) => {
     const workflow = db.workflows.create(asWorkflowInput(input))
     deps.wakeWorkflowScheduler?.()
+    deps.workflowWatcher?.sync()
     return workflow
   })
   register(CHANNELS.workflowsUpdate, (id, input) => {
@@ -1824,11 +2260,13 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     )
     const workflow = found(db.workflows.update(workflowId, patch), 'Workflow')
     deps.wakeWorkflowScheduler?.()
+    deps.workflowWatcher?.sync()
     return workflow
   })
   register(CHANNELS.workflowsDelete, (id) => {
     db.workflows.remove(requireString(id, 'Workflow id'))
     deps.wakeWorkflowScheduler?.()
+    deps.workflowWatcher?.sync()
     return undefined
   })
   register(CHANNELS.workflowsRun, (graph, opts) => {
@@ -1879,6 +2317,15 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   }
 
   register(CHANNELS.workflowsTriggerInfo, (workflowId) => triggerInfo(workflowId))
+
+  register(
+    CHANNELS.workflowsWatchInfo,
+    (workflowId): WorkflowWatchStatus =>
+      deps.workflowWatcher?.statusFor(requireString(workflowId, 'Workflow id')) ?? {
+        watching: false,
+        lastError: null,
+      }
+  )
 
   register(CHANNELS.workflowsTriggerRegenerate, () => {
     // Rotating the token is the revoke button: every hook using the old URL
@@ -1970,6 +2417,15 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     deps.wakeScheduledTaskScheduler?.()
     return task
   })
+  register(CHANNELS.scheduledTasksSetBudget, (id, budgetUsd) => {
+    const parsed = parseInput(z.number().positive().max(100_000).nullable(), budgetUsd)
+    const task = found(
+      db.scheduledTasks.setBudget(requireString(id, 'Scheduled task id'), parsed),
+      'Scheduled task'
+    )
+    signalScheduledTasksChanged({ type: 'upsert', task })
+    return task
+  })
   register(CHANNELS.scheduledTaskRuns, (taskId) =>
     db.scheduledTaskRuns.list(requireString(taskId, 'Scheduled task id'))
   )
@@ -1992,6 +2448,16 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     toolIds: z.array(z.string().max(200)).max(200).nullable().optional(),
     maxRounds: z.number().int().min(1).max(40).nullable().optional(),
     enabled: z.boolean().optional(),
+    // Bot Mode (v46): role title, roster avatar, display-only hidden flag.
+    title: z.string().max(200).optional(),
+    avatar: z
+      .object({
+        emoji: z.string().max(16).nullable().optional(),
+        color: z.string().max(32).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    hidden: z.boolean().optional(),
   })
 
   register(CHANNELS.agentsList, () => db.agents.list())
@@ -2014,7 +2480,12 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     return found(db.agents.update(agentId, parsed), 'Agent')
   })
   register(CHANNELS.agentsDelete, (id) => {
-    db.agents.remove(requireString(id, 'Agent id'))
+    const agentId = requireString(id, 'Agent id')
+    const agent = db.agents.getById(agentId)
+    db.agents.remove(agentId)
+    // Bot Mode cleanup: canonical chat + group memberships go with the
+    // profile (Hermes "Delete Profile" semantics).
+    if (agent) deps.botService?.cleanupDeletedAgent(agent)
     return undefined
   })
   register(CHANNELS.agentRunsList, (conversationId) =>
@@ -2025,6 +2496,55 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.agentRunStop, (runId) =>
     chatService.stopAgentRun(requireString(runId, 'Agent run id'))
   )
+
+  // -- Bot Mode (v46) ----------------------------------------------------------
+
+  const requireBots = (): BotService => {
+    if (!deps.botService) throw invalid('Bot Mode is unavailable in this build.')
+    return deps.botService
+  }
+  const groupPatchSchema = z.object({
+    name: z.string().trim().min(1).max(200).optional(),
+    memberIds: z.array(z.string().min(1).max(100)).max(12).optional(),
+  })
+
+  register(CHANNELS.botsRoster, () => requireBots().roster())
+  register(CHANNELS.botsOpenChat, (agentId) => {
+    const conversation = requireBots().ensureBotChat(requireString(agentId, 'Agent id'))
+    return { conversationId: conversation.id }
+  })
+  register(CHANNELS.botGroupCreate, (input) => {
+    const parsed = parseInput(
+      z.object({
+        name: z.string().trim().min(1).max(200),
+        memberIds: z.array(z.string().min(1).max(100)).max(12),
+      }),
+      input
+    )
+    return requireBots().createGroup(parsed)
+  })
+  register(CHANNELS.botGroupUpdate, (id, patch) =>
+    requireBots().updateGroup(requireString(id, 'Group id'), parseInput(groupPatchSchema, patch))
+  )
+  register(CHANNELS.botGroupDelete, (id) => {
+    requireBots().deleteGroup(requireString(id, 'Group id'))
+    return undefined
+  })
+  register(CHANNELS.botGroupSend, (groupId, content) => {
+    requireBots().groupSend(
+      requireString(groupId, 'Group id'),
+      requireString(content, 'Message')
+    )
+    return undefined
+  })
+  register(CHANNELS.botGroupStop, (groupId) => {
+    requireBots().stopGroup(requireString(groupId, 'Group id'))
+    return undefined
+  })
+  register(CHANNELS.botGroupMarkSeen, (groupId) => {
+    requireBots().markGroupSeen(requireString(groupId, 'Group id'))
+    return undefined
+  })
 
   const packHookSchema = z.object({
     id: z.string().min(1).max(200),
@@ -2138,11 +2658,29 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     return { canceled: false, imported, chunks, skipped }
   })
 
+  // While the app is locked, the renderer transport serves nothing but the
+  // lock screen's own two channels — the single choke point, so no handler
+  // needs its own check. The phone tunnel invokes handlers directly (its own
+  // 256-bit pairing auth; private-space exclusions cover it independently),
+  // so remote access deliberately keeps working while the desktop is locked.
+  const LOCK_EXEMPT_CHANNELS: ReadonlySet<ChannelName> = new Set([
+    CHANNELS.lockStatus,
+    CHANNELS.lockUnlock,
+    // Dismissing a quick window opened pre-lock exposes nothing (hide + abort);
+    // gating it would leave Esc/✕ dead while the window stays on top.
+    CHANNELS.quickHide,
+  ])
+
   // Wire every collected handler to ipcMain with the shared normalization:
   // renderer invoke → IpcResult, never a thrown exception across the boundary.
   for (const [channel, fn] of handlers) {
     ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
       try {
+        if (deps.appLock?.isLocked() && !LOCK_EXEMPT_CHANNELS.has(channel)) {
+          throw new ProviderError('auth', 'Grasberg is locked. Unlock to continue.', {
+            retryable: false,
+          })
+        }
         return ok(await fn(...args))
       } catch (e) {
         return err(toNormalizedError(e))

@@ -1051,7 +1051,8 @@ kbd {
 
 .sched-popover-item {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto auto;
+  /* dot · title · pause · cap · remove */
+  grid-template-columns: 8px minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 5px;
   min-height: 44px;
@@ -1144,6 +1145,20 @@ kbd {
   width: 22px;
   padding: 0;
   font-size: 0.9rem;
+}
+
+/* Inline monthly-cap editor under a task row (v44). */
+.sched-budget-edit {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 4px 13px;
+}
+
+.sched-budget-edit .input {
+  flex: 1;
+  min-width: 0;
 }
 
 .sidebar-footer {
@@ -1445,4 +1460,47 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* -- App lock (v45): full-window overlay; must not depend on loaded settings -- */
+.lock-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+.lock-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, 86vw);
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.lock-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.lock-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.lock-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+/* -- Private-space switcher (sidebar, v45) -- */
+.sidebar-space-switcher {
+  width: 100%;
+}
+.sidebar-space-switcher.space-private {
+  border-color: var(--accent);
 }

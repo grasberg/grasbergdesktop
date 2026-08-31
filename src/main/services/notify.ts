@@ -118,6 +118,18 @@ export function resultNotification(
   }
 }
 
+/**
+ * Title-only variant for private-space conversations: the shell's notification
+ * centre persists bodies long after the app forgets them, so a private
+ * conversation's content never becomes one.
+ */
+export function titleOnlyForPrivateSpace(
+  notification: DesktopNotification,
+  isPrivate: boolean
+): DesktopNotification {
+  return isPrivate ? { ...notification, body: '' } : notification
+}
+
 /** Notification copy for a tool call waiting on the user. */
 export function approvalNotification(
   toolName: string,

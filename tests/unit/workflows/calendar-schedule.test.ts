@@ -25,7 +25,9 @@ function workflow(overrides: Partial<Workflow> = {}): Workflow {
     schedule: { kind: 'calendar', days: [], time: '08:00' },
     scheduleEnabled: true,
     webhookEnabled: false,
+    watch: null,
     lastRunAt: null,
+    scheduleUpdatedAt: at(2026, 8, 20, 14, 0),
     createdAt: 0,
     updatedAt: at(2026, 8, 20, 14, 0),
     ...overrides,
@@ -82,6 +84,15 @@ describe('nextRunAt — anchoring', () => {
     expect(nextRunAt(ran, at(2026, 8, 20, 9, 0))).toBe(at(2026, 8, 21, 8, 0))
   })
 
+  it('anchors on a later schedule edit instead of firing a past slot', () => {
+    const edited = workflow({
+      lastRunAt: at(2026, 8, 17, 8, 0),
+      scheduleUpdatedAt: at(2026, 8, 20, 14, 0),
+    })
+    expect(nextRunAt(edited, at(2026, 8, 20, 14, 0))).toBe(at(2026, 8, 21, 8, 0))
+    expect(isDue(edited, at(2026, 8, 20, 14, 0))).toBe(false)
+  })
+
   it('is null while paused', () => {
     expect(nextRunAt(workflow({ scheduleEnabled: false }), at(2026, 8, 20, 9, 0))).toBeNull()
   })
@@ -90,7 +101,10 @@ describe('nextRunAt — anchoring', () => {
 describe('catch-up', () => {
   it('runs a slot missed while the app was closed, once', () => {
     // Ran Monday 08:00, then the app was closed until Thursday lunchtime.
-    const missed = workflow({ lastRunAt: at(2026, 8, 17, 8, 0) })
+    const missed = workflow({
+      lastRunAt: at(2026, 8, 17, 8, 0),
+      scheduleUpdatedAt: at(2026, 8, 16, 12, 0),
+    })
     const backOnThursday = at(2026, 8, 20, 12, 0)
     expect(isDue(missed, backOnThursday)).toBe(true)
 

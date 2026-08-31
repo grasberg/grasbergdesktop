@@ -7,11 +7,14 @@ import { modKeyLabel } from '@/lib/platform'
 import ScheduledTasks from '@/components/ScheduledTasks'
 import { useConversationsStore } from '@/stores/conversations'
 import { useProjectsStore } from '@/stores/projects'
+import { useSpacesStore } from '@/stores/spaces'
 import { toastError, useUiStore } from '@/stores/ui'
 import appIcon from '@/assets/icon.png'
 
 /** Collapse key for the catch-all standalone Tasks group. */
 const NO_PROJECT_KEY = '__no_project__'
+/** Sentinel value for the switcher's "Manage spaces…" entry. */
+const MANAGE_SPACES_VALUE = '__manage__'
 const NO_PROJECT_LABEL = 'Tasks'
 
 const MODE_TABS: ReadonlyArray<{ key: ConversationMode; label: string }> = [
@@ -471,12 +474,19 @@ export default function Sidebar(): React.JSX.Element {
   const loaded = useConversationsStore((s) => s.loaded)
   const projects = useProjectsStore((s) => s.projects)
   const view = useUiStore((s) => s.view)
+  const spaces = useSpacesStore((s) => s.spaces)
+  const activeSpaceId = useSpacesStore((s) => s.activeSpaceId)
   const [query, setQuery] = useState(useConversationsStore.getState().search)
 
   // Load this mode's projects on mount and whenever the current mode changes.
   useEffect(() => {
     void useProjectsStore.getState().load(modeFilter)
   }, [modeFilter])
+
+  // Spaces feed the switcher; cheap and only re-fetched on mount.
+  useEffect(() => {
+    void useSpacesStore.getState().load()
+  }, [])
 
   // Debounced search -> store + reload.
   useEffect(() => {
@@ -556,10 +566,60 @@ export default function Sidebar(): React.JSX.Element {
             <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
           </svg>
         </button>
+        <button
+          type="button"
+          className={`btn-icon sidebar-home-btn${view === 'bots' ? ' active' : ''}`}
+          aria-label="Bots"
+          aria-current={view === 'bots' ? 'page' : undefined}
+          title="Bots"
+          onClick={() => useUiStore.getState().setView('bots')}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="5" y="8" width="14" height="11" rx="2" />
+            <path d="M12 8V4" />
+            <circle cx="12" cy="3" r="1" />
+            <circle cx="9.5" cy="13" r="0.5" />
+            <circle cx="14.5" cy="13" r="0.5" />
+            <path d="M9.5 16.5h5" />
+          </svg>
+        </button>
         <ScheduledTasks />
       </div>
 
       <div className="sidebar-controls">
+        {spaces.length > 0 ? (
+          <select
+            className={`input sidebar-space-switcher${activeSpaceId ? ' space-private' : ''}`}
+            aria-label="Space"
+            value={activeSpaceId ?? ''}
+            onChange={(e) => {
+              const value = e.target.value
+              if (value === MANAGE_SPACES_VALUE) {
+                useUiStore.getState().openSettings(true)
+                return
+              }
+              useSpacesStore.getState().setActive(value === '' ? null : value)
+            }}
+          >
+            <option value="">Default space</option>
+            {spaces.map((space) => (
+              <option key={space.id} value={space.id}>
+                {`🔒 ${space.name}`}
+              </option>
+            ))}
+            <option value={MANAGE_SPACES_VALUE}>Manage spaces…</option>
+          </select>
+        ) : null}
         <input
           type="search"
           className="input sidebar-search"

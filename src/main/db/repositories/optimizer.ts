@@ -19,6 +19,11 @@ export interface OptimizerStartRow {
   providerId: string | null
   modelId: string | null
   maxRounds: number
+  direction: OptimizerRun['direction']
+  worktreePath?: string | null
+  worktreeBranch?: string | null
+  baseBranch?: string | null
+  baseSha?: string | null
 }
 
 export interface OptimizerPatch {
@@ -38,11 +43,16 @@ interface RunRow {
   provider_id: string | null
   model_id: string | null
   max_rounds: number
+  direction: string
   status: string
   rounds_done: number
   best_score: number | null
   best_version: number | null
   last_error: string | null
+  worktree_path: string | null
+  worktree_branch: string | null
+  base_branch: string | null
+  base_sha: string | null
   created_at: number
   updated_at: number
 }
@@ -57,11 +67,16 @@ function toRun(row: RunRow): OptimizerRun {
     providerId: row.provider_id,
     modelId: row.model_id,
     maxRounds: row.max_rounds,
+    direction: (row.direction === 'minimize' ? 'minimize' : 'maximize'),
     status: row.status as OptimizerRun['status'],
     roundsDone: row.rounds_done,
     bestScore: row.best_score,
     bestVersion: row.best_version,
     lastError: row.last_error,
+    worktreePath: row.worktree_path,
+    worktreeBranch: row.worktree_branch,
+    baseBranch: row.base_branch,
+    baseSha: row.base_sha,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -73,6 +88,13 @@ export interface OptimizerRepository {
   list(): OptimizerRun[]
   /** Patches mutable columns and bumps updated_at; returns the fresh row. */
   update(id: string, patch: OptimizerPatch): OptimizerRun | null
+  /**
+   * Boot recovery: a crash or hard quit leaves the in-memory loop dead but the
+   * row still 'running', which permanently locks the project out of new runs
+   * (start() refuses, stop() can't reach a controller). Reset those to
+   * 'stopped'. Returns how many rows were healed.
+   */
+  markDanglingRunsAsStopped(): number
   appendVersion(input: {
     runId: string
     seq: number
@@ -94,9 +116,10 @@ export function createOptimizerRepository(driver: SqliteDriver): OptimizerReposi
       driver.run(
         `INSERT INTO optimizer_runs
            (id, project_id, goal, eval_command, test_command, provider_id, model_id,
-            max_rounds, status, rounds_done, best_score, best_version, last_error,
+            max_rounds, direction, status, rounds_done, best_score, best_version, last_error,
+            worktree_path, worktree_branch, base_branch, base_sha,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, NULL, NULL, NULL, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           input.projectId,
@@ -106,6 +129,11 @@ export function createOptimizerRepository(driver: SqliteDriver): OptimizerReposi
           input.providerId,
           input.modelId,
           input.maxRounds,
+          input.direction,
+          input.worktreePath ?? null,
+          input.worktreeBranch ?? null,
+          input.baseBranch ?? null,
+          input.baseSha ?? null,
           ts,
           ts,
         ]
@@ -152,7 +180,21 @@ export function createOptimizerRepository(driver: SqliteDriver): OptimizerReposi
       return this.getById(id)
     },
 
+    markDanglingRunsAsStopped() {
+      const ts = now()
+      const result = driver.run(
+        `UPDATE optimizer_runs
+            SET status = 'stopped',
+                last_error = COALESCE(last_error, 'Interrupted by an app restart.'),
+                updated_at = ?
+          WHERE status = 'running'`,
+        [ts]
+      )
+      return result.changes ?? 0
+    },
+
     appendVersion(input) {
+      const ts = now()
       driver.run(
         `INSERT INTO optimizer_versions
            (run_id, seq, score, accepted, summary, commit_sha, created_at)
@@ -164,7 +206,7 @@ export function createOptimizerRepository(driver: SqliteDriver): OptimizerReposi
           input.accepted ? 1 : 0,
           input.summary,
           input.commitSha,
-          now(),
+          ts,
         ]
       )
       return {
@@ -174,7 +216,7 @@ export function createOptimizerRepository(driver: SqliteDriver): OptimizerReposi
         accepted: input.accepted,
         summary: input.summary,
         commitSha: input.commitSha,
-        createdAt: now(),
+        createdAt: ts,
       }
     },
 

@@ -5,6 +5,7 @@
 
 import type {
   Attachment,
+  FailoverAttempt,
   Message,
   MessageRole,
   MessageStatus,
@@ -36,10 +37,14 @@ export interface MessagePatch {
   /** Re-attribute the message (compare winner pick). */
   providerId?: string
   modelId?: string
+  /** Reliability failover hops (stored inside usage_json); null clears. */
+  failedOverFrom?: FailoverAttempt[] | null
 }
 
 export interface MessagesRepository {
   listByConversation(conversationId: string): Message[]
+  /** One message by id, or null when unknown. */
+  getById(id: string): Message | null
   insert(message: Message): void
   /** Returns the updated message, or null when id is unknown. */
   update(id: string, patch: MessagePatch): Message | null
@@ -51,6 +56,11 @@ export interface MessagesRepository {
   /** Highest seq in the conversation, or null when it has no messages. */
   lastSeq(conversationId: string): number | null
   /**
+   * Latest non-empty, non-streaming message (Bot Mode roster previews) —
+   * content is pre-trimmed to 400 chars in SQL to keep the roster cheap.
+   */
+  lastSnippet(conversationId: string): { content: string; createdAt: number } | null
+  /**
    * Marks any message still in status 'streaming' as 'stopped' — recovery for
    * generations interrupted by a crash/quit. Called at app boot. Returns the
    * number of messages fixed.
@@ -58,6 +68,11 @@ export interface MessagesRepository {
   markDanglingStreamingAsStopped(): number
   /** Assistant messages' usage since `sinceMs` (for the local usage summary). */
   usageSince(
+    sinceMs: number
+  ): Array<{ providerId: string; modelId: string; usage: TokenUsage }>
+  /** Same rows scoped to one conversation (month-to-date budget/HUD math). */
+  usageForConversationSince(
+    conversationId: string,
     sinceMs: number
   ): Array<{ providerId: string; modelId: string; usage: TokenUsage }>
 }
@@ -78,6 +93,7 @@ interface MessageRow {
   moa_references_json: string | null
   compare_json: string | null
   research_json: string | null
+  agent_id: string | null
   seq: number
   created_at: number
 }
@@ -86,7 +102,39 @@ function parseJsonColumn<T>(text: string | null): T | undefined {
   return parseJson<T | undefined>(text, undefined)
 }
 
+/**
+ * `failedOverFrom` rides inside usage_json (Reliability Autopilot, no
+ * migration): the stored value is the TokenUsage fields plus an optional
+ * `failedOverFrom` key. These two helpers are the ONLY (de)serialization
+ * point for that column — writing usage_json any other way would silently
+ * drop the hops. Legacy bare-TokenUsage rows parse unchanged.
+ */
+function splitUsageJson(text: string | null): {
+  usage?: TokenUsage
+  failedOverFrom?: FailoverAttempt[]
+} {
+  const parsed = parseJson<Record<string, unknown> | undefined>(text, undefined)
+  if (!parsed || typeof parsed !== 'object') return {}
+  const { failedOverFrom, ...rest } = parsed as {
+    failedOverFrom?: FailoverAttempt[]
+  } & TokenUsage
+  return {
+    ...(Object.keys(rest).length > 0 ? { usage: rest as TokenUsage } : {}),
+    ...(Array.isArray(failedOverFrom) && failedOverFrom.length > 0 ? { failedOverFrom } : {}),
+  }
+}
+
+function composeUsageJson(
+  usage: TokenUsage | null | undefined,
+  failedOverFrom: FailoverAttempt[] | null | undefined
+): string | null {
+  const hops = failedOverFrom && failedOverFrom.length > 0 ? failedOverFrom : undefined
+  if (!usage && !hops) return null
+  return JSON.stringify({ ...(usage ?? {}), ...(hops ? { failedOverFrom: hops } : {}) })
+}
+
 function toMessage(row: MessageRow): Message {
+  const { usage, failedOverFrom } = splitUsageJson(row.usage_json)
   return {
     id: row.id,
     conversationId: row.conversation_id,
@@ -99,10 +147,12 @@ function toMessage(row: MessageRow): Message {
     error: parseJsonColumn<NormalizedError>(row.error_json),
     providerId: row.provider_id ?? undefined,
     modelId: row.model_id ?? undefined,
-    usage: parseJsonColumn<TokenUsage>(row.usage_json),
+    usage,
+    failedOverFrom,
     moaReferences: parseJsonColumn<MoaReferenceOutput[]>(row.moa_references_json),
     compare: parseJsonColumn<Message['compare']>(row.compare_json),
     research: parseJsonColumn<ResearchRunInfo>(row.research_json),
+    agentId: row.agent_id ?? undefined,
     seq: row.seq,
     createdAt: row.created_at,
   }
@@ -115,6 +165,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
   }
 
   return {
+    getById,
+
     usageSince(sinceMs) {
       const rows = driver.all<Pick<MessageRow, 'provider_id' | 'model_id' | 'usage_json'>>(
         `SELECT provider_id, model_id, usage_json FROM messages
@@ -123,7 +175,25 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
       )
       const result: Array<{ providerId: string; modelId: string; usage: TokenUsage }> = []
       for (const row of rows) {
-        const usage = parseJsonColumn<TokenUsage>(row.usage_json)
+        // A failover-only usage_json row carries hops but no token counts —
+        // it must never inflate the usage summary.
+        const usage = splitUsageJson(row.usage_json).usage
+        if (!usage || !row.provider_id || !row.model_id) continue
+        result.push({ providerId: row.provider_id, modelId: row.model_id, usage })
+      }
+      return result
+    },
+
+    usageForConversationSince(conversationId, sinceMs) {
+      const rows = driver.all<Pick<MessageRow, 'provider_id' | 'model_id' | 'usage_json'>>(
+        `SELECT provider_id, model_id, usage_json FROM messages
+          WHERE conversation_id = ? AND role = 'assistant'
+            AND usage_json IS NOT NULL AND created_at >= ?`,
+        [conversationId, sinceMs]
+      )
+      const result: Array<{ providerId: string; modelId: string; usage: TokenUsage }> = []
+      for (const row of rows) {
+        const usage = splitUsageJson(row.usage_json).usage
         if (!usage || !row.provider_id || !row.model_id) continue
         result.push({ providerId: row.provider_id, modelId: row.model_id, usage })
       }
@@ -143,8 +213,8 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         `INSERT INTO messages
            (id, conversation_id, role, content, reasoning, attachments_json,
             tool_calls_json, status, error_json, provider_id, model_id,
-            usage_json, moa_references_json, compare_json, research_json, seq, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            usage_json, moa_references_json, compare_json, research_json, agent_id, seq, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           message.id,
           message.conversationId,
@@ -157,10 +227,11 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           message.error ? JSON.stringify(message.error) : null,
           message.providerId ?? null,
           message.modelId ?? null,
-          message.usage ? JSON.stringify(message.usage) : null,
+          composeUsageJson(message.usage, message.failedOverFrom),
           message.moaReferences ? JSON.stringify(message.moaReferences) : null,
           message.compare ? JSON.stringify(message.compare) : null,
           message.research ? JSON.stringify(message.research) : null,
+          message.agentId ?? null,
           message.seq,
           message.createdAt,
         ]
@@ -168,6 +239,21 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
     },
 
     update(id, patch) {
+      // usage and failedOverFrom share the usage_json column: when either half
+      // is patched, the other half is read from the stored row and preserved
+      // (undefined keeps, null clears — per half).
+      let usageJson: string | null | undefined
+      if (patch.usage !== undefined || patch.failedOverFrom !== undefined) {
+        const row = driver.get<Pick<MessageRow, 'usage_json'>>(
+          'SELECT usage_json FROM messages WHERE id = ?',
+          [id]
+        )
+        const current = splitUsageJson(row?.usage_json ?? null)
+        usageJson = composeUsageJson(
+          patch.usage === undefined ? current.usage : patch.usage,
+          patch.failedOverFrom === undefined ? current.failedOverFrom : patch.failedOverFrom
+        )
+      }
       // messages has no updated_at column, so no touch.
       updateById(driver, 'messages', id, {
         content: patch.content,
@@ -176,7 +262,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           patch.attachments == null ? patch.attachments : JSON.stringify(patch.attachments),
         status: patch.status,
         error_json: patch.error == null ? patch.error : JSON.stringify(patch.error),
-        usage_json: patch.usage == null ? patch.usage : JSON.stringify(patch.usage),
+        usage_json: usageJson,
         tool_calls_json: patch.toolCalls == null ? patch.toolCalls : JSON.stringify(patch.toolCalls),
         moa_references_json:
           patch.moaReferences == null ? patch.moaReferences : JSON.stringify(patch.moaReferences),
@@ -214,6 +300,16 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         [conversationId]
       )
       return row?.seq ?? null
+    },
+
+    lastSnippet(conversationId) {
+      const row = driver.get<{ content: string; created_at: number }>(
+        `SELECT substr(content, 1, 400) AS content, created_at FROM messages
+          WHERE conversation_id = ? AND status <> 'streaming' AND TRIM(content) <> ''
+          ORDER BY seq DESC LIMIT 1`,
+        [conversationId]
+      )
+      return row ? { content: row.content, createdAt: row.created_at } : null
     },
 
     markDanglingStreamingAsStopped() {

@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CHANNELS } from '@shared/ipc'
 import type { IpcResult } from '@shared/ipc'
 import { publishMainEvent } from '../../../src/main/events'
@@ -17,6 +17,7 @@ import {
 import {
   RemoteService,
   relayHttpOrigin,
+  remoteClientUrl,
 } from '../../../src/main/remote/service'
 import { relayWsUrl, type TunnelSocket } from '../../../src/main/remote/relay-client'
 import type { PairPaired, InnerRes, InnerPush, SealedFrame } from '@shared/remote-protocol'
@@ -86,16 +87,12 @@ const until = async (probe: () => boolean): Promise<void> => {
 let dir: string
 let dbFile: string
 let db: AppDatabase | null = null
-let mobileDir: string
 const sockets: FakeSocket[] = []
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'uld-remote-test-'))
   dbFile = join(dir, 'app.db')
   db = openDatabase(dbFile)
-  mobileDir = join(dir, 'mobile')
-  mkdirSync(mobileDir)
-  writeFileSync(join(mobileDir, 'index.html'), '<html>mobile app</html>')
   sockets.length = 0
 })
 
@@ -115,7 +112,6 @@ function makeService(handlers?: IpcHandlerMap): RemoteService {
     db: db!,
     keystore: fakeKeystore,
     handlers: map,
-    mobileDir,
     appVersion: '1.2.3-test',
     socketFactory: () => {
       const socket = new FakeSocket()
@@ -129,7 +125,11 @@ function makeService(handlers?: IpcHandlerMap): RemoteService {
 /** Enabled + connected service with one socket ready, plus its settings. */
 async function connectedService(): Promise<RemoteService> {
   const service = makeService()
-  const status = service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com' })
+  const status = service.setConfig({
+    enabled: true,
+    relayUrl: 'https://relay.example.com',
+    clientUrl: 'https://mobile.example.com',
+  })
   expect(status.enabled).toBe(true)
   await until(() => sockets.length === 1)
   sockets[0].emit('open')
@@ -140,7 +140,7 @@ async function connectedService(): Promise<RemoteService> {
 /** Pairs one phone through the socket; returns device + frame key. */
 async function pairPhone(service: RemoteService): Promise<{ deviceId: string; token: string; key: Buffer }> {
   const status = service.pair(true)
-  const secret = status.pairing!.url.split('#p=')[1]
+  const secret = new URLSearchParams(new URL(status.pairing!.url).hash.slice(1)).get('p')!
   sockets[0].deliver({
     t: 'from',
     deviceId: null,
@@ -182,15 +182,35 @@ describe('relay URL policy', () => {
 describe('RemoteService config', () => {
   it('refuses to enable without a relay URL', () => {
     const service = makeService()
-    expect(() => service.setConfig({ enabled: true, relayUrl: null })).toThrow(/relay URL/)
+    expect(() =>
+      service.setConfig({ enabled: true, relayUrl: null, clientUrl: 'https://mobile.example.com' })
+    ).toThrow(/relay URL/)
   })
 
   it('refuses non-https, non-loopback relay URLs before storing them', () => {
     const service = makeService()
-    expect(() => service.setConfig({ enabled: true, relayUrl: 'http://evil.example.com' })).toThrow(
-      /https/
-    )
+    expect(() =>
+      service.setConfig({
+        enabled: true,
+        relayUrl: 'http://evil.example.com',
+        clientUrl: 'https://mobile.example.com',
+      })
+    ).toThrow(/https/)
     expect(db!.settings.get().remoteRelayUrl).toBeNull()
+  })
+
+  it('requires the mobile client to use a separate trusted origin', () => {
+    const service = makeService()
+    expect(() =>
+      service.setConfig({
+        enabled: true,
+        relayUrl: 'https://relay.example.com',
+        clientUrl: 'https://relay.example.com/mobile',
+      })
+    ).toThrow(/different origin/i)
+    expect(remoteClientUrl('https://mobile.example.com/app/')).toBe(
+      'https://mobile.example.com/app/'
+    )
   })
 
   it('disabling keeps the URL but stops the tunnel', async () => {
@@ -271,7 +291,7 @@ describe('RemoteService tunnel protocol', () => {
     const handlers: IpcHandlerMap = new Map()
     handlers.set(CHANNELS.appGetInfo, () => ({ version: '9.9.9', platform: 'linux' }))
     const service = makeService(handlers)
-    service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com' })
+    service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com', clientUrl: 'https://mobile.example.com' })
     await until(() => sockets.length === 1)
     sockets[0].emit('open')
     await until(() => service.status().connected)
@@ -281,7 +301,13 @@ describe('RemoteService tunnel protocol', () => {
       t: 'from',
       deviceId,
       from: 'conn-2',
-      frame: sealFrame(key, { t: 'req', id: 'req-1', channel: CHANNELS.appGetInfo, args: [] }),
+      frame: sealFrame(key, {
+        t: 'req',
+        id: 'req-1',
+        seq: 1,
+        channel: CHANNELS.appGetInfo,
+        args: [],
+      }),
     })
     await until(() => sockets[0].of('to').some((f) => f.deviceId === deviceId))
     const sealed = sockets[0]
@@ -300,7 +326,7 @@ describe('RemoteService tunnel protocol', () => {
     const handlers: IpcHandlerMap = new Map()
     handlers.set(CHANNELS.settingsGet, () => ({ secret: 'nope' }))
     const service = makeService(handlers)
-    service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com' })
+    service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com', clientUrl: 'https://mobile.example.com' })
     await until(() => sockets.length === 1)
     sockets[0].emit('open')
     await until(() => service.status().connected)
@@ -310,7 +336,13 @@ describe('RemoteService tunnel protocol', () => {
       t: 'from',
       deviceId,
       from: 'conn-2',
-      frame: sealFrame(key, { t: 'req', id: 'req-2', channel: CHANNELS.settingsGet, args: [] }),
+      frame: sealFrame(key, {
+        t: 'req',
+        id: 'req-2',
+        seq: 1,
+        channel: CHANNELS.settingsGet,
+        args: [],
+      }),
     })
     await until(() => sockets[0].of('to').some((f) => f.deviceId === deviceId))
     const sealed = sockets[0].of('to').find((f) => f.deviceId === deviceId)!.frame as never
@@ -340,6 +372,29 @@ describe('RemoteService tunnel protocol', () => {
     expect(sockets[0].of('to')).toHaveLength(before)
   })
 
+  it('executes an authenticated request sequence only once', async () => {
+    const handler = vi.fn(() => ({ ok: true }))
+    const handlers: IpcHandlerMap = new Map([[CHANNELS.appGetInfo, handler]])
+    const service = makeService(handlers)
+    service.setConfig({ enabled: true, relayUrl: 'https://relay.example.com', clientUrl: 'https://mobile.example.com' })
+    await until(() => sockets.length === 1)
+    sockets[0].emit('open')
+    await until(() => service.status().connected)
+    const { deviceId, key } = await pairPhone(service)
+    const captured = sealFrame(key, {
+      t: 'req',
+      id: 'captured',
+      seq: 1,
+      channel: CHANNELS.appGetInfo,
+      args: [],
+    })
+    sockets[0].deliver({ t: 'from', deviceId, from: 'conn-replay', frame: captured })
+    sockets[0].deliver({ t: 'from', deviceId, from: 'conn-replay', frame: captured })
+    await until(() => handler.mock.calls.length === 1)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
   it('rebuilds the online set from the relay snapshot (devices-online)', async () => {
     const service = await connectedService()
     const { deviceId, key } = await pairPhone(service)
@@ -365,13 +420,16 @@ describe('RemoteService tunnel protocol', () => {
     expect(service.status().devices).toHaveLength(1)
   })
 
-  it('mints pairing QR URLs of origin/desktopId/#secret shape', async () => {
+  it('mints pairing QR URLs on the trusted client with relay data only in the fragment', async () => {
     const service = await connectedService()
     const status = service.pair(true)
     const desktopId = service.status().desktopId!
-    expect(status.pairing?.url).toMatch(
-      new RegExp(`^https://relay\\.example\\.com/${desktopId}/#p=[A-Za-z0-9_-]{43}$`)
-    )
+    const url = new URL(status.pairing!.url)
+    const params = new URLSearchParams(url.hash.slice(1))
+    expect(url.origin).toBe('https://mobile.example.com')
+    expect(params.get('desktop')).toBe(desktopId)
+    expect(params.get('relay')).toBe('https://relay.example.com')
+    expect(params.get('p')).toMatch(/^[A-Za-z0-9_-]{43}$/)
   })
 
   it('re-upserts device registrations on every tunnel connect', async () => {
@@ -383,7 +441,7 @@ describe('RemoteService tunnel protocol', () => {
     // happens after a relay restart or app relaunch): the stored device's
     // token hash must reach the relay again so the phone keeps authenticating.
     const second = makeService()
-    second.setConfig({ enabled: true, relayUrl: 'https://relay.example.com' })
+    second.setConfig({ enabled: true, relayUrl: 'https://relay.example.com', clientUrl: 'https://mobile.example.com' })
     await until(() => sockets.length === 2)
     sockets[1].emit('open')
     await until(() => second.status().connected)
@@ -391,16 +449,6 @@ describe('RemoteService tunnel protocol', () => {
     expect(adds).toHaveLength(1)
     expect(adds[0]).toMatchObject({ deviceId, tokenHash: hashToken(token) })
     second.stopAll()
-  })
-
-  it('serves tunnelled asset requests from the mobile bundle', async () => {
-    const service = await connectedService()
-    sockets[0].deliver({ t: 'http', reqId: 'r9', method: 'GET', path: '/' })
-    await until(() => sockets[0].of('http-res').length > 0)
-    const res = sockets[0].of('http-res')[0]
-    expect(res.status).toBe(200)
-    expect(res.contentType).toBe('text/html; charset=utf-8')
-    expect(Buffer.from(res.body as string, 'base64').toString()).toContain('mobile app')
   })
 
   it('revoking a device drops its key, notifies the relay and cuts it off', async () => {
@@ -421,7 +469,13 @@ describe('RemoteService tunnel protocol', () => {
       t: 'from',
       deviceId,
       from: 'conn-3',
-      frame: sealFrame(deriveFrameKey('irrelevant'), { t: 'req', id: 'x', channel: CHANNELS.convList, args: [] }),
+      frame: sealFrame(deriveFrameKey('irrelevant'), {
+        t: 'req',
+        id: 'x',
+        seq: 1,
+        channel: CHANNELS.convList,
+        args: [],
+      }),
     })
     expect(sockets[0].of('to')).toHaveLength(0)
   })

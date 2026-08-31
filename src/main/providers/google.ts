@@ -42,7 +42,12 @@ function inlineData(url: string): Part {
 
 function userParts(content: string | ContentPart[]): Part[] {
   if (typeof content === 'string') return [{ text: content }]
-  return content.map((p) => (p.type === 'text' ? { text: p.text } : inlineData(p.image_url.url)))
+  return content.map((p) => {
+    if (p.type === 'text') return { text: p.text }
+    // Gemini accepts application/pdf inlineData natively.
+    if (p.type === 'document') return { inlineData: { mimeType: p.mediaType, data: p.dataBase64 } }
+    return inlineData(p.image_url.url)
+  })
 }
 
 export function buildGeminiBody(req: AdapterChatRequest): Record<string, unknown> {

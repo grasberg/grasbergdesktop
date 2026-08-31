@@ -2,8 +2,8 @@
  * Shell command execution for the opt-in run_shell_command tool.
  *
  * SAFETY: this is the ONLY module in the app that spawns a shell, and it runs
- * only when the user has enabled shell execution AND approved the specific
- * call. The command runs in the granted project folder, with a timeout and
+ * only when the user has enabled shell execution, selected the unrestricted
+ * Full sandbox posture, AND approved the specific call. It has a timeout and
  * output caps, and its process tree is killed on timeout/abort.
  */
 
@@ -48,8 +48,17 @@ export async function runShell(
   timeoutMs: number,
   signal?: AbortSignal,
   /** Called with each output chunk (stdout + stderr interleaved), up to the cap. */
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  /**
+   * Keep the LAST bytes instead of the first when output exceeds the cap.
+   * The default (head) is right for a human/model reading a command's start;
+   * the optimizer needs the tail because the score it parses is printed last.
+   * Incompatible with onChunk (a sliding tail window can't stream), so tail
+   * mode ignores it.
+   */
+  opts?: { keepTail?: boolean }
 ): Promise<ShellResult> {
+  const keepTail = opts?.keepTail === true
   return new Promise<ShellResult>((resolve) => {
     const child = spawn(command, {
       shell: true,
@@ -65,8 +74,12 @@ export async function runShell(
     let settled = false
 
     const append = (buf: string, chunk: Buffer): string => {
-      if (buf.length >= MAX_OUTPUT_BYTES) return buf
       const text = chunk.toString('utf8')
+      if (keepTail) {
+        // Slide a window over the END of the stream so the final bytes survive.
+        return (buf + text).slice(-MAX_OUTPUT_BYTES)
+      }
+      if (buf.length >= MAX_OUTPUT_BYTES) return buf
       const next = (buf + text).slice(0, MAX_OUTPUT_BYTES)
       if (onChunk && next.length > buf.length) {
         try {

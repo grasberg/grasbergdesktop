@@ -43,7 +43,7 @@ describe('parsePorcelainStatus (pure)', () => {
   it('consumes the rename source record', () => {
     const raw = 'R  new-name.ts\0old-name.ts\0?? other.txt\0'
     const parsed = parsePorcelainStatus(raw)
-    expect(parsed.staged).toEqual([{ path: 'new-name.ts', status: 'R' }])
+    expect(parsed.staged).toEqual([{ path: 'new-name.ts', status: 'R', oldPath: 'old-name.ts' }])
     expect(parsed.untracked).toEqual(['other.txt'])
   })
 
@@ -51,8 +51,8 @@ describe('parsePorcelainStatus (pure)', () => {
     const raw = ' R new-name.ts\0old-name.ts\0 C copy.ts\0origin.ts\0?? other.txt\0'
     const parsed = parsePorcelainStatus(raw)
     expect(parsed.unstaged).toEqual([
-      { path: 'new-name.ts', status: 'R' },
-      { path: 'copy.ts', status: 'C' },
+      { path: 'new-name.ts', status: 'R', oldPath: 'old-name.ts' },
+      { path: 'copy.ts', status: 'C', oldPath: 'origin.ts' },
     ])
     // The source paths must never leak in as records of their own.
     expect(parsed.staged).toEqual([])
@@ -171,7 +171,7 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
     git(dir, 'add', '-N', 'b.txt') // intent-to-add: git then reports ' R b.txt\0a.txt'
 
     const status = await service.status(dir)
-    expect(status.unstaged).toEqual([{ path: 'b.txt', status: 'R' }])
+    expect(status.unstaged).toEqual([{ path: 'b.txt', oldPath: 'a.txt', status: 'R' }])
     expect(status.staged).toEqual([])
     expect(status.untracked).toEqual([])
   })
@@ -316,6 +316,25 @@ describe.skipIf(!gitAvailable)('GitService (real temp repos)', () => {
       expect(created.branch).toMatch(/^grasberg\/review-task-/)
       expect(git(created.path, 'branch', '--show-current').trim()).toBe(created.branch)
       expect(git(dir, 'branch', '--show-current').trim()).toBe('main')
+
+      writeFileSync(join(created.path, 'a.txt'), 'optimized\n')
+      await service.stage(created.path, ['a.txt'])
+      await service.commit(created.path, 'optimize')
+      const optimizerRevision = await service.revision(created.path)
+
+      const baseRevision = await service.revision(dir)
+      await service.fastForwardWorktree(dir, created.branch, 'main', baseRevision)
+      expect(await service.revision(dir)).toBe(optimizerRevision)
+      expect(readFileSync(join(dir, 'a.txt'), 'utf8').trim()).toBe('optimized')
+
+      await expect(
+        service.fastForwardWorktree(dir, created.branch, 'main', baseRevision)
+      ).rejects.toThrow('branch changed after the optimizer started')
+
+      writeFileSync(join(dir, 'a.txt'), 'local edit\n')
+      await expect(
+        service.fastForwardWorktree(dir, created.branch, 'main', optimizerRevision)
+      ).rejects.toThrow('uncommitted changes')
     } finally {
       // Remove through git first so the source repo does not retain metadata.
       const listed = git(dir, 'worktree', 'list', '--porcelain')

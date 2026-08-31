@@ -30,6 +30,7 @@ import type {
   WorkflowRun,
   WorkflowRunResult,
   WorkflowSchedule,
+  WorkflowWatchStatus,
 } from '@shared/types'
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from '@shared/workflow-templates'
 import { validateWorkflowGraph } from '@shared/workflow-validate'
@@ -138,6 +139,15 @@ export default function WorkflowsView(): ReactElement {
   const [scheduleDays, setScheduleDays] = useState<number[]>([])
   const [webhookEnabled, setWebhookEnabled] = useState(false)
   const [triggerUrl, setTriggerUrl] = useState<string | null>(null)
+  const [watchEnabled, setWatchEnabled] = useState(false)
+  const [watchFolder, setWatchFolder] = useState<string | null>(null)
+  const [watchGlob, setWatchGlob] = useState('')
+  const [watchEvent, setWatchEvent] = useState<'created' | 'changed'>('created')
+  // Not editable in the UI, but a stored debounceMs must survive a re-save
+  // (the update path replaces the whole watch object).
+  const [watchDebounceMs, setWatchDebounceMs] = useState<number | undefined>(undefined)
+  const [watchStatus, setWatchStatus] = useState<WorkflowWatchStatus | null>(null)
+  const [budgetUsd, setBudgetUsd] = useState('')
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [agents, setAgents] = useState<AgentProfile[]>([])
 
@@ -169,6 +179,21 @@ export default function WorkflowsView(): ReactElement {
       if (res.ok) setTriggerUrl(res.data.url)
     })
   }, [webhookEnabled, workflowId])
+
+  // Watcher status is a pull: fetched when the panel is relevant and again
+  // after each save (the save's sync() may have just started or failed it).
+  const refreshWatchStatus = useCallback(async (id: string | null, enabled: boolean) => {
+    if (!enabled || !id) {
+      setWatchStatus(null)
+      return
+    }
+    const res = await window.uld.workflows.watchInfo(id)
+    if (res.ok) setWatchStatus(res.data)
+  }, [])
+
+  useEffect(() => {
+    void refreshWatchStatus(workflowId, watchEnabled)
+  }, [refreshWatchStatus, watchEnabled, workflowId])
 
   // Deep link from the sidebar's "Scheduled tasks" section: open that
   // workflow, then clear the pointer (openWorkflows without an id) so
@@ -269,6 +294,14 @@ export default function WorkflowsView(): ReactElement {
     setScheduleDays([])
     // The trigger opt-in is per workflow; a new one must never inherit it.
     setWebhookEnabled(false)
+    // Same for the watch: a new workflow must never inherit a folder grant.
+    setWatchEnabled(false)
+    setWatchFolder(null)
+    setWatchGlob('')
+    setWatchEvent('created')
+    setWatchDebounceMs(undefined)
+    setWatchStatus(null)
+    setBudgetUsd('')
     setRuns([])
   }
 
@@ -285,6 +318,12 @@ export default function WorkflowsView(): ReactElement {
       setResult(null)
       setScheduleEnabled(res.data.scheduleEnabled)
       setWebhookEnabled(res.data.webhookEnabled)
+      setWatchEnabled(res.data.watch?.enabled === true)
+      setWatchFolder(res.data.watch?.folderPath ?? null)
+      setWatchGlob(res.data.watch?.glob ?? '')
+      setWatchEvent(res.data.watch?.event ?? 'created')
+      setWatchDebounceMs(res.data.watch?.debounceMs)
+      setBudgetUsd(res.data.budgetUsd != null ? String(res.data.budgetUsd) : '')
       const saved = res.data.schedule
       setScheduleKind(saved?.kind === 'calendar' ? 'calendar' : 'interval')
       setEveryMinutes(String(saved?.kind === 'interval' ? saved.everyMinutes : 60))
@@ -309,6 +348,16 @@ export default function WorkflowsView(): ReactElement {
       schedule,
       scheduleEnabled,
       webhookEnabled,
+      watch: watchFolder
+        ? {
+            enabled: watchEnabled,
+            folderPath: watchFolder,
+            glob: watchGlob.trim(),
+            event: watchEvent,
+            ...(watchDebounceMs !== undefined ? { debounceMs: watchDebounceMs } : {}),
+          }
+        : null,
+      budgetUsd: Number(budgetUsd) > 0 ? Number(budgetUsd) : null,
     }
     const res = workflowId
       ? await window.uld.workflows.update(workflowId, input)
@@ -316,6 +365,7 @@ export default function WorkflowsView(): ReactElement {
     if (res.ok) {
       setWorkflowId(res.data.id)
       await loadList()
+      void refreshWatchStatus(res.data.id, watchEnabled)
       if (!silent) {
         const errorCount = issues.filter((i) => i.level === 'error').length
         if (errorCount > 0) {
@@ -811,6 +861,100 @@ export default function WorkflowsView(): ReactElement {
                   <p className="field-hint">Save the workflow to get its trigger URL.</p>
                 ) : null}
               </div>
+
+              <h4 className="section-subhead">Watch folder</h4>
+              <div className="field">
+                <Switch
+                  checked={watchEnabled}
+                  onChange={setWatchEnabled}
+                  disabled={!watchFolder}
+                  label="Run when a file appears or changes in a folder"
+                />
+                <div className="field">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      void window.uld.app.pickFolder().then((res) => {
+                        if (res.ok && res.data) setWatchFolder(res.data)
+                      })
+                    }}
+                  >
+                    Pick folder…
+                  </button>
+                  {watchFolder ? (
+                    // Read-only on purpose: the OS picker is the grant, the
+                    // path is never typed.
+                    <input className="input mono" readOnly value={watchFolder} />
+                  ) : (
+                    <p className="field-hint">Pick a folder to enable the watch.</p>
+                  )}
+                </div>
+                <label className="field">
+                  <span className="field-label">Fire on</span>
+                  <select
+                    className="select"
+                    value={watchEvent}
+                    disabled={!watchFolder}
+                    onChange={(e) => setWatchEvent(e.target.value === 'changed' ? 'changed' : 'created')}
+                  >
+                    <option value="created">File created</option>
+                    <option value="changed">File changed</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field-label">Pattern</span>
+                  <input
+                    className="input mono"
+                    value={watchGlob}
+                    disabled={!watchFolder}
+                    placeholder="*.csv"
+                    onChange={(e) => setWatchGlob(e.target.value)}
+                  />
+                  <p className="field-hint">
+                    Optional pattern like *.csv — empty matches every file. Patterns with / match
+                    the path inside the folder.
+                  </p>
+                </label>
+                {watchEnabled ? (
+                  watchStatus?.lastError ? (
+                    <p className="mcp-item-error">{watchStatus.lastError}</p>
+                  ) : watchStatus?.watching ? (
+                    <p className="field-hint">Watching.</p>
+                  ) : (
+                    <p className="field-hint">Save to start watching.</p>
+                  )
+                ) : null}
+                <p className="field-hint">
+                  The file event becomes this workflow&apos;s Input node output — JSON with path,
+                  name, event, size, and the text content of small text files.
+                </p>
+                {watchEnabled && scheduleEnabled && scheduleKind === 'calendar' ? (
+                  <p className="field-hint">
+                    Note: any run (including a watch fire) counts as the last run for the calendar
+                    schedule — a watch run near a scheduled time can stand in for that day&apos;s
+                    slot.
+                  </p>
+                ) : null}
+              </div>
+
+              <h4 className="section-subhead">Monthly budget</h4>
+              <label className="field">
+                <span className="field-label">Cap (USD)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="No cap"
+                  value={budgetUsd}
+                  onChange={(e) => setBudgetUsd(e.target.value)}
+                />
+                <p className="field-hint">
+                  Runs are skipped (recorded as failed) once this workflow&apos;s month-to-date
+                  estimated spend reaches the cap. Estimates only — unpriced models excluded.
+                </p>
+              </label>
 
               <h4 className="section-subhead">Run history</h4>
               {runs.length === 0 ? (

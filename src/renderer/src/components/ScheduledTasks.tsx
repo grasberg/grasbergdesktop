@@ -7,6 +7,7 @@ import type {
   ScheduledTaskRecurrence,
   ScheduledTaskRun,
 } from '@shared/types'
+import { formatCost } from '@shared/pricing'
 import { unwrap } from '@/api/uld'
 import { useNow } from '@/hooks/useNow'
 import { dateTime } from '@/lib/format'
@@ -56,6 +57,8 @@ export default function ScheduledTasks(): React.JSX.Element {
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const [budgetEditId, setBudgetEditId] = useState<string | null>(null)
+  const [budgetDraft, setBudgetDraft] = useState('')
   const [historyId, setHistoryId] = useState<string | null>(null)
   const [history, setHistory] = useState<ScheduledTaskRun[]>([])
   const menuRef = useRef<HTMLDivElement>(null)
@@ -78,6 +81,27 @@ export default function ScheduledTasks(): React.JSX.Element {
     setGrantIds((ids) =>
       ids.includes(toolId) ? ids.filter((id) => id !== toolId) : [...ids, toolId]
     )
+  }
+
+  /** Toggles the inline monthly-cap editor for one task. */
+  const toggleBudgetEdit = (taskId: string, current: number | null | undefined): void => {
+    if (budgetEditId === taskId) {
+      setBudgetEditId(null)
+      return
+    }
+    setBudgetEditId(taskId)
+    setBudgetDraft(current != null ? String(current) : '')
+  }
+
+  const saveBudget = async (taskId: string): Promise<void> => {
+    const value = Number(budgetDraft)
+    const res = await window.uld.scheduledTasks.setBudget(
+      taskId,
+      budgetDraft.trim() && Number.isFinite(value) && value > 0 ? value : null
+    )
+    // The scheduledTasksChanged push re-syncs the list on success.
+    if (!res.ok) useUiStore.getState().toast(res.error.message, 'error')
+    setBudgetEditId(null)
   }
 
   /** Expands one task's recorded runs (collapsing whichever was open). */
@@ -346,7 +370,7 @@ export default function ScheduledTasks(): React.JSX.Element {
                       <span className="sched-item-meta">
                         {completed
                           ? 'Completed'
-                          : `${RECURRENCE_LABEL[task.recurrence]} · ${nextRun}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.enabled ? '' : ' · paused'}`}
+                          : `${RECURRENCE_LABEL[task.recurrence]} · ${nextRun}${task.approvedToolIds.length > 0 ? ` · ${task.approvedToolIds.length} ${task.approvedToolIds.length === 1 ? 'tool' : 'tools'}` : ''}${task.budgetUsd != null ? ` · cap ${formatCost(task.budgetUsd)}` : ''}${task.enabled ? '' : ' · paused'}`}
                       </span>
                     </button>
                     {!completed ? (
@@ -361,6 +385,17 @@ export default function ScheduledTasks(): React.JSX.Element {
                         }
                       >
                         {task.enabled ? 'Pause' : 'Resume'}
+                      </button>
+                    ) : null}
+                    {!completed ? (
+                      <button
+                        type="button"
+                        className="sched-action"
+                        title="Monthly spend cap (USD) — runs are skipped past it"
+                        aria-expanded={budgetEditId === task.id}
+                        onClick={() => toggleBudgetEdit(task.id, task.budgetUsd)}
+                      >
+                        Cap
                       </button>
                     ) : null}
                     {confirming ? (
@@ -395,6 +430,27 @@ export default function ScheduledTasks(): React.JSX.Element {
                         {TrashIcon}
                       </button>
                     )}
+                    {budgetEditId === task.id ? (
+                      <div className="sched-budget-edit">
+                        <input
+                          className="input"
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          placeholder="No cap"
+                          value={budgetDraft}
+                          aria-label={`Monthly budget for ${task.title} (USD)`}
+                          onChange={(event) => setBudgetDraft(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="sched-action"
+                          onClick={() => void saveBudget(task.id)}
+                        >
+                          Save
+                        </button>
+                      </div>
+                    ) : null}
                     {historyId === task.id ? (
                       <ul className="sched-history">
                         {history.length === 0 ? (

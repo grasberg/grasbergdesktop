@@ -4,8 +4,8 @@
  * Design role: a DUMB, untrusted-for-content router. The desktop connects
  * outbound and stays connected; phones connect here and everything they
  * exchange with the desktop is end-to-end encrypted (AES-256-GCM under keys
- * derived from the pairing QR). This server routes opaque JSON frames and
- * tunnels HTTP asset requests; it can see metadata (who is connected) but
+ * derived from the pairing QR). This server routes opaque JSON frames; it can
+ * see metadata (who is connected) but
  * never message content.
  *
  * Trust model, deliberately narrow:
@@ -46,8 +46,6 @@ interface DeviceEntry {
 
 /** Frame cap: large enough for tunneled asset responses (~5 MB base64). */
 const MAX_FRAME_BYTES = 8 * 1024 * 1024
-/** How long a tunneled HTTP request may take before the relay answers 504. */
-const HTTP_TIMEOUT_MS = 15_000
 const PING_INTERVAL_MS = 30_000
 const PONG_GRACE_MS = 15_000
 
@@ -65,6 +63,8 @@ export interface RelayServerDeps {
    * resource pump. Short in tests, generous in production.
    */
   helloTimeoutMs?: number
+  /** Exact trusted static-client origin allowed for browser WebSockets. */
+  mobileOrigin?: string
   onError?: (message: string) => void
 }
 
@@ -91,13 +91,10 @@ export class RelayServer {
   private readonly devices = new Map<string, Map<string, DeviceEntry>>()
   /** Pairing-role connections by relay connection id (the return address). */
   private readonly pairConns = new Map<string, { socket: WebSocket; desktopId: string }>()
-  private readonly httpPending = new Map<
-    string,
-    { res: ServerResponse; timer: NodeJS.Timeout; head: boolean }
-  >()
   private server: Server | null = null
   private wss: WebSocketServer | null = null
   private boundPort: number | null = null
+  private readonly pongTimers = new WeakMap<WebSocket, NodeJS.Timeout>()
   private readonly state: StoredState = { desktops: {}, devices: {} }
 
   constructor(private readonly deps: RelayServerDeps) {
@@ -114,15 +111,15 @@ export class RelayServer {
       server.on('error', (e: NodeJS.ErrnoException) => reject(e))
       const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES })
       server.on('upgrade', (req, socket, head) => {
-        // Same-origin only for browser clients: a page on another origin must
-        // not be able to open a tunnel socket with the user's credentials in
-        // IndexedDB... it cannot anyway (tokens live in IndexedDB per-origin),
-        // but refusing foreign origins costs nothing and stops probing.
+        // Browser clients must come from the separately hosted trusted app.
+        // No configured origin means browsers are refused.
         const origin = req.headers.origin
         if (origin) {
           try {
-            const host = req.headers.host ?? ''
-            if (new URL(origin).host !== host) {
+            const allowed = this.deps.mobileOrigin
+              ? new URL(this.deps.mobileOrigin).origin
+              : null
+            if (!allowed || new URL(origin).origin !== allowed) {
               socket.destroy()
               return
             }
@@ -144,7 +141,14 @@ export class RelayServer {
       // half-open sockets (phone in a subway tunnel) free their routing slot.
       const pinger = setInterval(() => {
         for (const client of wss.clients) {
+          if (this.pongTimers.has(client)) continue
           void client.ping()
+          const timer = setTimeout(() => {
+            this.pongTimers.delete(client)
+            client.terminate()
+          }, PONG_GRACE_MS)
+          timer.unref?.()
+          this.pongTimers.set(client, timer)
         }
       }, PING_INTERVAL_MS)
       pinger.unref?.()
@@ -160,11 +164,6 @@ export class RelayServer {
   }
 
   async stop(): Promise<void> {
-    for (const [, pending] of this.httpPending) {
-      clearTimeout(pending.timer)
-      pending.res.destroy()
-    }
-    this.httpPending.clear()
     for (const socket of this.wss?.clients ?? []) socket.terminate()
     this.wss?.close()
     this.wss = null
@@ -180,8 +179,14 @@ export class RelayServer {
 
   private async handleSocket(socket: WebSocket): Promise<void> {
     socket.on('pong', () => {
-      // ws tracks liveness itself; the ping loop terminates dead sockets via
-      // close timeouts. Nothing else to do.
+      const timer = this.pongTimers.get(socket)
+      if (timer) clearTimeout(timer)
+      this.pongTimers.delete(socket)
+    })
+    socket.on('close', () => {
+      const timer = this.pongTimers.get(socket)
+      if (timer) clearTimeout(timer)
+      this.pongTimers.delete(socket)
     })
     const hello = await this.readOne(socket)
     if (!hello) return socket.terminate()
@@ -387,22 +392,6 @@ export class RelayServer {
         }
         break
       }
-      case 'http-res': {
-        const pending = this.httpPending.get(String(frame.reqId ?? ''))
-        if (!pending) return
-        clearTimeout(pending.timer)
-        this.httpPending.delete(String(frame.reqId ?? ''))
-        const status = Number(frame.status)
-        const body = Buffer.from(String(frame.body ?? ''), 'base64')
-        pending.res.writeHead(Number.isFinite(status) ? status : 502, {
-          'content-type': String(frame.contentType ?? 'application/octet-stream'),
-          ...(frame.etag ? { etag: String(frame.etag) } : {}),
-          'cache-control': 'no-cache',
-        })
-        // HEAD gets the headers (length implied by writeHead) but never a body.
-        pending.res.end(pending.head ? undefined : body)
-        break
-      }
       default:
         break
     }
@@ -427,7 +416,7 @@ export class RelayServer {
     }
   }
 
-  // -- HTTP (asset tunnel + health) ---------------------------------------------
+  // -- HTTP health only ----------------------------------------------------------
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://relay')
@@ -436,43 +425,8 @@ export class RelayServer {
       res.end(JSON.stringify({ ok: true, desktops: this.desktops.size }))
       return
     }
-    const match = /^\/([A-Za-z0-9-]{1,64})(\/.*)?$/.exec(url.pathname)
-    if (!match) {
-      res.writeHead(404, { 'content-type': 'text/plain' })
-      res.end('Not found.')
-      return
-    }
-    const [, desktopId, rest = '/'] = match
-    const desktop = this.desktops.get(desktopId)
-    // Placeholder entries from the persisted store have a null socket — the
-    // desktop is NOT online, so answer 503 now instead of timing out into a
-    // 504 fifteen seconds later.
-    if (!desktop?.socket) {
-      res.writeHead(503, { 'content-type': 'text/plain' })
-      res.end('This Grasberg desktop is not connected to the relay right now.')
-      return
-    }
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405, { 'content-type': 'text/plain' })
-      res.end('Use GET.')
-      return
-    }
-    const reqId = randomUUID()
-    const timer = setTimeout(() => {
-      this.httpPending.delete(reqId)
-      if (!res.destroyed) {
-        res.writeHead(504, { 'content-type': 'text/plain' })
-        res.end('The desktop did not answer in time.')
-      }
-    }, HTTP_TIMEOUT_MS)
-    timer.unref?.()
-    this.httpPending.set(reqId, { res, timer, head: req.method === 'HEAD' })
-    this.send(desktop.socket, {
-      t: 'http',
-      reqId,
-      method: req.method,
-      path: rest + (url.search || ''),
-    })
+    res.writeHead(404, { 'content-type': 'text/plain' })
+    res.end('Not found.')
   }
 
   // -- store ---------------------------------------------------------------------

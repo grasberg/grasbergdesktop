@@ -10,9 +10,11 @@ import type { ConversationSummary, Project } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { modKeyLabel } from '@/lib/platform'
 import { useWorkflowsStore } from '@/stores/workflows'
+import BriefCard from './BriefCard'
 import GettingStartedCard from './GettingStartedCard'
 import ScheduledCard from './ScheduledCard'
 import InboxCard from './InboxCard'
+import NotesCard from './NotesCard'
 import RecentRunsCard from './RecentRunsCard'
 import RecentWorkCard from './RecentWorkCard'
 import ProjectsCard from './ProjectsCard'
@@ -75,9 +77,11 @@ export default function HomeView(): React.JSX.Element {
         </span>
       </header>
       <div className="home-grid">
+        <BriefCard />
         <GettingStartedCard recent={recent} />
         <ScheduledCard />
         <InboxCard />
+        <NotesCard />
         <RecentRunsCard />
         <RecentWorkCard items={recent} projectNameById={projectNameById} />
         <ProjectsCard projects={projects} />

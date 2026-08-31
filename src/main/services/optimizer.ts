@@ -4,8 +4,8 @@
  *
  *   Vary(P) = Agent(P, K, f)
  *
- * Each round the agent edits the project working tree with its normal tools
- * (the "variation operator"); MAIN then evaluates deterministically by running
+ * Each round the agent edits an app-owned isolated git worktree with its normal
+ * tools (the "variation operator"); MAIN then evaluates deterministically by running
  * the user's eval command (the scoring function f). The AVO commit rule is
  * enforced verbatim: a round is accepted only when evaluation passes AND the
  * score matches or beats the best so far. Accepted rounds become git commits
@@ -74,38 +74,46 @@ export function parseScore(output: string): number | null {
 
 /**
  * AVO commit rule: correctness first (eval exit code + optional test gate),
- * then strictly non-regressing score. `best === null` means no accepted
- * version yet — any passing score becomes the baseline.
+ * then a non-regressing score in the run's chosen direction. `best === null`
+ * means no accepted version yet — any passing score becomes the baseline.
+ * 'maximize' keeps a score that matches-or-beats the best; 'minimize' (runtime,
+ * memory, error count) keeps one that matches-or-undercuts it.
  */
 export function decideAccept(input: {
   evalExitCode: number | null
   score: number | null
   testPassed: boolean
   bestScore: number | null
+  direction?: 'maximize' | 'minimize'
 }): boolean {
-  return (
-    input.evalExitCode === 0 &&
-    input.score !== null &&
-    input.testPassed &&
-    (input.bestScore === null || input.score >= input.bestScore)
-  )
+  if (input.evalExitCode !== 0 || input.score === null || !input.testPassed) return false
+  if (input.bestScore === null) return true
+  return input.direction === 'minimize'
+    ? input.score <= input.bestScore
+    : input.score >= input.bestScore
 }
 
 export interface RoundPromptInput {
   goal: string
   evalCommand: string
   testCommand: string | null
+  direction: 'maximize' | 'minimize'
   round: number
   maxRounds: number
   bestScore: number | null
   bestVersion: number | null
-  /** Compact accepted lineage, newest first. */
-  versions: Array<{ seq: number; score: number | null; summary: string }>
+  /** Compact recent lineage, newest first — accepted AND rejected attempts. */
+  versions: Array<{ seq: number; score: number | null; summary: string; accepted: boolean }>
   redirectHint: boolean
 }
 
 /** The per-round variation prompt. */
 export function buildRoundPrompt(input: RoundPromptInput): string {
+  const better = input.direction === 'minimize' ? 'LOWER is better' : 'HIGHER is better'
+  const keepRule =
+    input.direction === 'minimize'
+      ? 'A new version is kept ONLY if its score matches or undercuts this. Increases are discarded.'
+      : 'A new version is kept ONLY if its score matches or beats this. Decreases are discarded.'
   const parts: string[] = [
     'You are an autonomous OPTIMIZATION agent working directly in a real project ' +
       '(the folder tools are already scoped to it). The user will evaluate your work by ' +
@@ -114,12 +122,11 @@ export function buildRoundPrompt(input: RoundPromptInput): string {
     `GOAL: ${input.goal}`,
     `EVALUATION (run automatically after this round): ${input.evalCommand}`,
     ...(input.testCommand ? [`TEST GATE (must also pass): ${input.testCommand}`] : []),
-    `The single number printed by the last line of the evaluation output is the SCORE.`,
+    `The single number printed by the last line of the evaluation output is the SCORE (${better}).`,
     '',
     input.bestScore === null
       ? 'No accepted version exists yet — establish a correct baseline first.'
-      : `Best accepted version so far: v${input.bestVersion} (score ${input.bestScore}). ` +
-        'A new version is kept ONLY if the score matches or beats this. Regressions are discarded.',
+      : `Best accepted version so far: v${input.bestVersion} (score ${input.bestScore}). ${keepRule}`,
     '',
     'PROTOCOL:',
     '1. Make focused edits toward the goal with edit_file/write_file.',
@@ -130,10 +137,13 @@ export function buildRoundPrompt(input: RoundPromptInput): string {
   if (input.versions.length > 0) {
     parts.push(
       '',
-      'RECENT ATTEMPTS (newest first):',
+      'RECENT ATTEMPTS (newest first; build on what was KEPT, do not repeat what was DISCARDED):',
       ...input.versions
         .slice(0, 8)
-        .map((v) => `- v${v.seq} score=${v.score ?? 'n/a'}: ${v.summary.slice(0, 200)}`),
+        .map(
+          (v) =>
+            `- v${v.seq} [${v.accepted ? 'kept' : 'discarded'}] score=${v.score ?? 'n/a'}: ${v.summary.slice(0, 200)}`
+        ),
     )
   }
   if (input.redirectHint) {
@@ -141,7 +151,8 @@ export function buildRoundPrompt(input: RoundPromptInput): string {
       '',
       'REDIRECT: several consecutive attempts failed to improve the score. Stop refining ' +
         'the current idea; pick a materially different approach (different hot path, ' +
-        'different algorithmic angle) informed by the experiment log.'
+        'different algorithmic angle) — the discarded attempts above are approaches that ' +
+        'did NOT work, so choose something distinct from them.'
     )
   }
   return parts.join('\n')
@@ -155,6 +166,8 @@ interface CommandResult {
   ok: boolean
   exitCode: number | null
   output: string
+  /** True when the command was killed by the run's abort signal (a stop). */
+  aborted?: boolean
 }
 
 export interface OptimizerDeps {
@@ -168,6 +181,11 @@ export interface OptimizerDeps {
         providerId: string | null
         modelId: string | null
         maxRounds: number
+        direction: 'maximize' | 'minimize'
+        worktreePath: string
+        worktreeBranch: string
+        baseBranch: string
+        baseSha: string
       }): OptimizerRun
       getById(id: string): OptimizerRun | null
       list(): OptimizerRun[]
@@ -192,11 +210,15 @@ export interface OptimizerDeps {
       }): ExperimentEntry
       listForProject(projectId: string, limit?: number): ExperimentEntry[]
     }
-    code: { projectGetById(id: string): { id: string; path: string } | null }
+    code: {
+      projectGetById(id: string): { id: string; path: string } | null
+      projectUpsertByPath(path: string, name?: string): { id: string }
+    }
   }
   git: {
     status(root: string): Promise<{
       isRepo: boolean
+      branch: string | null
       staged: unknown[]
       unstaged: unknown[]
       untracked: unknown[]
@@ -204,18 +226,39 @@ export interface OptimizerDeps {
     stage(root: string, paths: string[]): Promise<unknown>
     commit(root: string, message: string): Promise<{ sha: string; branch: string | null }>
     discardAllChanges(root: string): Promise<void>
+    createWorktree(
+      root: string,
+      worktreesDir: string,
+      projectId: string,
+      requestedName?: string
+    ): Promise<{ path: string; branch: string; projectId: string }>
+    removeWorktree(mainRoot: string, worktreePath: string, branch: string): Promise<void>
+    revision(root: string): Promise<string>
+    fastForwardWorktree(
+      mainRoot: string,
+      sourceBranch: string,
+      expectedBranch: string,
+      expectedHead: string
+    ): Promise<void>
   }
   /** Wired to ChatService.generateForWorkflow (headless tool loop). */
   generate: (
     prompt: string,
     providerId: string | undefined,
     modelId: string | undefined,
-    opts: { useTools: boolean; approvedToolIds: string[]; projectId: string; signal?: AbortSignal }
+    opts: {
+      useTools: boolean
+      approvedToolIds: string[]
+      projectId: string
+      sandboxLevel?: 'workspace-write' | 'full'
+      signal?: AbortSignal
+    }
   ) => Promise<string>
   /** Wired to runShell (tools/shell.ts). */
   runCommand: (command: string, cwd: string, signal?: AbortSignal) => Promise<CommandResult>
   broadcast: (channel: string, payload: unknown) => void
   notify?: (notification: { kind: 'result'; title: string; body: string }) => void
+  worktreesDir: string
 }
 
 interface RunningOptimization {
@@ -243,6 +286,7 @@ export class OptimizerService {
     providerId?: string | null
     modelId?: string | null
     maxRounds?: number
+    direction?: 'maximize' | 'minimize'
     allowShell?: boolean
   }): Promise<OptimizerRun> {
     const goal = input.goal.trim()
@@ -263,32 +307,78 @@ export class OptimizerService {
       throw invalid('Commit or stash your changes first — the optimizer needs a clean tree.')
     }
 
+    if (!status.branch) throw invalid('The optimizer requires a checked-out branch.')
+
     const maxRounds = Math.min(Math.max(Math.trunc(input.maxRounds ?? 6), 1), 40)
     const testCommand = input.testCommand?.trim() || null
-    const run = this.deps.db.optimizer.create({
-      projectId: project.id,
-      goal,
-      evalCommand,
-      testCommand,
-      providerId: input.providerId ?? null,
-      modelId: input.modelId ?? null,
-      maxRounds,
-    })
+    const baseSha = await this.deps.git.revision(project.path)
+    const worktree = await this.deps.git.createWorktree(
+      project.path,
+      this.deps.worktreesDir,
+      project.id,
+      'optimizer'
+    )
+    let run: OptimizerRun
+    let worktreeProjectId: string
+    try {
+      worktreeProjectId = this.deps.db.code.projectUpsertByPath(worktree.path, 'Optimizer').id
+      run = this.deps.db.optimizer.create({
+        projectId: project.id,
+        goal,
+        evalCommand,
+        testCommand,
+        providerId: input.providerId ?? null,
+        modelId: input.modelId ?? null,
+        maxRounds,
+        direction: input.direction === 'minimize' ? 'minimize' : 'maximize',
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+        baseBranch: status.branch,
+        baseSha,
+      })
+    } catch (error) {
+      await this.deps.git.removeWorktree(project.path, worktree.path, worktree.branch)
+      throw error
+    }
     this.push(run)
 
     const controller = new AbortController()
     this.running.set(run.id, { controller })
-    void this.loop(run.id, project.path, input.allowShell === true, controller).catch((error) => {
+    void this.loop(
+      run.id,
+      project.path,
+      worktree.path,
+      worktreeProjectId,
+      input.allowShell === true,
+      controller
+    ).catch((error) => {
       // Loop-level crash: persist honestly instead of leaving a zombie 'running' row.
       const message = error instanceof Error ? error.message : String(error)
-      this.finalize(run.id, 'failed', redactSecrets(message))
+      void this.finish(run.id, 'failed', redactSecrets(message), project.path)
     })
     return run
   }
 
   stop(runId: string): OptimizerRun | null {
     const running = this.running.get(runId)
-    if (!running) return this.deps.db.optimizer.getById(runId)
+    if (!running) {
+      // No live controller. If the row is nonetheless still 'running' (a
+      // dangling row that escaped boot recovery), finalize it so the UI's
+      // Stop button is never a no-op and the project unlocks.
+      const row = this.deps.db.optimizer.getById(runId)
+      if (row && row.status === 'running') {
+        const updated = this.applyPatch(runId, {
+          status: 'stopped',
+          lastError:
+            row.worktreePath === null
+              ? null
+              : `Interrupted run preserved at ${row.worktreePath} (${row.worktreeBranch ?? 'unknown branch'}).`,
+        })
+        this.push(updated)
+        return this.deps.db.optimizer.getById(runId)
+      }
+      return row
+    }
     running.controller.abort()
     return this.deps.db.optimizer.getById(runId)
   }
@@ -300,32 +390,73 @@ export class OptimizerService {
   /** The full loop; every exit path funnels through finalize(). */
   private async loop(
     runId: string,
+    mainRoot: string,
     root: string,
+    worktreeProjectId: string,
     allowShell: boolean,
     controller: AbortController
   ): Promise<void> {
     let current = this.requireRun(runId)
     let consecutiveRejects = 0
     try {
-      for (let round = 1; round <= current.maxRounds; round++) {
-        if (controller.signal.aborted) {
-          this.finalize(runId, 'stopped', null)
+      // Establish v0 on the untouched checkout before the agent can edit it.
+      const baselineEval = await this.deps.runCommand(current.evalCommand, root, controller.signal)
+      if (controller.signal.aborted || baselineEval.aborted) {
+        await this.finish(runId, 'stopped', null, mainRoot)
+        return
+      }
+      const baselineScore = baselineEval.ok ? parseScore(baselineEval.output) : null
+      let baselineTestsPassed = true
+      if (current.testCommand) {
+        const baselineTest = await this.deps.runCommand(
+          current.testCommand,
+          root,
+          controller.signal
+        )
+        if (controller.signal.aborted || baselineTest.aborted) {
+          await this.finish(runId, 'stopped', null, mainRoot)
           return
         }
+        baselineTestsPassed = baselineTest.ok
+      }
+      if (baselineEval.exitCode !== 0 || baselineScore === null || !baselineTestsPassed) {
+        throw new Error('The pristine project failed the evaluation or test gate; no edits were made.')
+      }
+      this.deps.db.optimizer.appendVersion({
+        runId,
+        seq: 0,
+        score: baselineScore,
+        accepted: true,
+        summary: 'Pristine project baseline.',
+        commitSha: current.baseSha,
+      })
+      current = this.applyPatch(runId, { bestScore: baselineScore, bestVersion: 0 })
+      this.push(current)
+
+      for (let round = 1; round <= current.maxRounds; round++) {
+        if (controller.signal.aborted) {
+          await this.finish(runId, 'stopped', null, mainRoot)
+          return
+        }
+
+        // Recent attempts, newest first — BOTH accepted and rejected, so the
+        // agent can see (and stop repeating) approaches that already failed.
+        const recent = this.deps.db.optimizer
+          .listVersions(runId)
+          .slice(-8)
+          .reverse()
+          .map((v) => ({ seq: v.seq, score: v.score, summary: v.summary, accepted: v.accepted }))
 
         const prompt = buildRoundPrompt({
           goal: current.goal,
           evalCommand: current.evalCommand,
           testCommand: current.testCommand,
+          direction: current.direction,
           round,
           maxRounds: current.maxRounds,
           bestScore: current.bestScore,
           bestVersion: current.bestVersion,
-          versions: this.deps.db.optimizer
-            .listVersions(runId)
-            .filter((v) => v.accepted)
-            .reverse()
-            .map((v) => ({ seq: v.seq, score: v.score, summary: v.summary })),
+          versions: recent,
           redirectHint: consecutiveRejects >= REDIRECT_AFTER_REJECTS,
         })
 
@@ -339,25 +470,34 @@ export class OptimizerService {
               useTools: true,
               approvedToolIds:
                 allowShell === true ? [...OPTIMIZER_TOOL_IDS, SHELL_TOOL_ID] : OPTIMIZER_TOOL_IDS,
-              projectId: current.projectId,
+              projectId: worktreeProjectId,
+              sandboxLevel: allowShell ? 'full' : 'workspace-write',
               signal: controller.signal,
             }
           )
         } catch (e) {
           if (controller.signal.aborted) {
-            this.finalize(runId, 'stopped', null)
+            await this.finish(runId, 'stopped', null, mainRoot)
             return
           }
           throw e
         }
 
         if (controller.signal.aborted) {
-          this.finalize(runId, 'stopped', null)
+          await this.finish(runId, 'stopped', null, mainRoot)
           return
         }
 
         // Deterministic scoring: main runs the eval command, never the agent.
         const evalRes = await this.deps.runCommand(current.evalCommand, root, controller.signal)
+        // A stop that lands mid-eval must not be recorded as a genuine failed
+        // round (that fake 'failed' would pollute the permanent experiment log
+        // injected into future sessions). Finalize as stopped, discard nothing
+        // extra — the next start() re-checks the tree.
+        if (controller.signal.aborted || evalRes.aborted) {
+          await this.finish(runId, 'stopped', null, mainRoot)
+          return
+        }
         const score = evalRes.ok ? parseScore(evalRes.output) : null
         let testPassed = true
         if (current.testCommand) {
@@ -366,6 +506,10 @@ export class OptimizerService {
             root,
             controller.signal
           )
+          if (controller.signal.aborted || testRes.aborted) {
+            await this.finish(runId, 'stopped', null, mainRoot)
+            return
+          }
           testPassed = testRes.ok
         }
 
@@ -374,6 +518,7 @@ export class OptimizerService {
           score,
           testPassed,
           bestScore: current.bestScore,
+          direction: current.direction,
         })
 
         let commitSha: string | null = null
@@ -433,17 +578,18 @@ export class OptimizerService {
 
         consecutiveRejects = accepted ? 0 : consecutiveRejects + 1
         if (consecutiveRejects >= PLATEAU_AFTER_REJECTS) {
-          this.finalize(runId, 'done', null)
+          await this.finish(runId, 'done', null, mainRoot)
           return
         }
       }
-      this.finalize(runId, 'done', null)
+      await this.finish(runId, 'done', null, mainRoot)
     } catch (e) {
       const aborted = controller.signal.aborted
-      this.finalize(
+      await this.finish(
         runId,
         aborted ? 'stopped' : 'failed',
-        aborted ? null : redactSecrets(e instanceof Error ? e.message : String(e))
+        aborted ? null : redactSecrets(e instanceof Error ? e.message : String(e)),
+        mainRoot
       )
     }
   }
@@ -463,12 +609,63 @@ export class OptimizerService {
     return updated
   }
 
-  private finalize(
+  private async finish(
     runId: string,
     status: OptimizerRun['status'],
-    lastError: string | null
-  ): void {
-    const updated = this.applyPatch(runId, { status, lastError })
+    lastError: string | null,
+    mainRoot: string
+  ): Promise<void> {
+    const run = this.requireRun(runId)
+    let finalError = lastError
+    const recovery = (message: string): void => {
+      finalError = [finalError, message].filter(Boolean).join(' ')
+    }
+
+    if (run.worktreePath && run.worktreeBranch && run.baseBranch && run.baseSha) {
+      let worktreeClean = true
+      try {
+        await this.deps.git.discardAllChanges(run.worktreePath)
+      } catch (error) {
+        worktreeClean = false
+        recovery(
+          `Could not clean the isolated worktree; it was preserved at ${run.worktreePath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+
+      let removable = run.bestVersion === null || run.bestVersion === 0
+      if (worktreeClean && run.bestVersion !== null && run.bestVersion > 0) {
+        try {
+          await this.deps.git.fastForwardWorktree(
+            mainRoot,
+            run.worktreeBranch,
+            run.baseBranch,
+            run.baseSha
+          )
+          removable = true
+        } catch (error) {
+          recovery(
+            `Accepted commits were preserved at ${run.worktreePath} on ${run.worktreeBranch}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        }
+      }
+      if (worktreeClean && removable) {
+        try {
+          await this.deps.git.removeWorktree(mainRoot, run.worktreePath, run.worktreeBranch)
+        } catch (error) {
+          recovery(
+            `The isolated worktree could not be removed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        }
+      }
+    }
+
+    const updated = this.applyPatch(runId, { status, lastError: finalError })
     this.running.delete(runId)
     this.push(updated)
     if (status !== 'running') {
@@ -482,7 +679,7 @@ export class OptimizerService {
               : 'Optimizer failed',
         body:
           updated.bestScore !== null
-            ? `Best score: ${updated.bestScore} (v${updated.bestVersion})`
+            ? `Best score: ${updated.bestScore} (v${updated.bestVersion}).${updated.lastError ? ` ${updated.lastError}` : ''}`
             : (updated.lastError ?? 'No accepted version.'),
       })
     }

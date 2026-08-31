@@ -3,6 +3,7 @@ import type { ProjectHook, ProjectHookEvent } from '@shared/types'
 import { Switch } from '@/components/common/controls'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
+import MorningBriefCard from './MorningBriefCard'
 
 export default function AgentPlatformTab(): ReactElement {
   const settings = useSettingsStore((state) => state.settings)
@@ -73,6 +74,8 @@ export default function AgentPlatformTab(): ReactElement {
           />
         </label>
       </div>
+
+      <MorningBriefCard />
 
       <div className="card settings-card">
         <h4>IDE bridge</h4>

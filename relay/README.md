@@ -12,25 +12,36 @@ history, no content, ever.
 - One WebSocket endpoint, `/ws`, speaking the frames in
   `src/shared/remote-protocol.ts` (desktop tunnels, paired devices,
   pairing-role connections).
-- One HTTP route, `GET /<desktopId>/*`, that tunnels asset requests to the
-  desktop so the phone loads the mobile UI straight from the desktop app —
-  always version-matched. `GET /healthz` for monitoring.
+- One HTTP route, `GET /healthz`, for monitoring. Every asset path returns
+  404: this process deliberately does not host or tunnel executable code.
+
+The phone client is built separately with `npm run build:mobile`. Deploy the
+contents of `out/mobile` to an HTTPS static origin you control, and configure
+that URL as the **Mobile client URL** in Grasberg. It must not share the
+relay's origin. The QR fragment tells that trusted client which relay and
+desktop to connect to; the fragment is not sent in the HTTP request.
 
 ## Run it
 
 ```bash
 # From the repository root — build a single-file bundle (no deps at runtime):
 npm run build:relay
-PORT=8790 node relay/relay.mjs
+MOBILE_ORIGIN=https://phone.example.com PORT=8790 node relay/relay.mjs
 
 # Or with Docker:
 docker build -t grasberg-relay -f relay/Dockerfile .
-docker run -d -p 8790:8790 -v relay-data:/data grasberg-relay
+docker run -d -p 8790:8790 -e MOBILE_ORIGIN=https://phone.example.com \
+  -v relay-data:/data grasberg-relay
 ```
 
-Then point Grasberg at it: Settings → Bridges → Remote access →
-`https://your-relay.example.com` (put TLS in front — the relay speaks plain
-HTTP/WS; a platform terminator like Fly.io, Railway or nginx does TLS).
+Then configure both URLs in Settings → Bridges → Remote access:
+
+- Relay URL: `https://your-relay.example.com`
+- Mobile client URL: `https://phone.example.com`
+
+Put TLS in front of the relay — it speaks plain HTTP/WS; a platform terminator
+like Fly.io, Railway or nginx can terminate TLS. `MOBILE_ORIGIN` is mandatory
+for browser connections and must exactly match the mobile client's origin.
 
 ## Deploying
 
@@ -46,20 +57,19 @@ HTTP/WS; a platform terminator like Fly.io, Railway or nginx does TLS).
 - **TLS is required in production.** The desktop refuses non-https relay URLs
   outside localhost, precisely so a plaintext hop cannot be configured by
   accident.
-- **Residual trust, stated plainly:** each phone keeps its device token and
-  frame key in `localStorage` under the relay's origin. The relay never sees
-  the key (all content is end-to-end encrypted), but code running on the relay
-  origin — i.e. the mobile app itself, plus anything that manages to inject
-  script into it — could read that identity and impersonate the phone. The
-  mobile app renders markdown without raw HTML for exactly this reason, and
-  revoking a device on the desktop invalidates a stolen token immediately.
+- **Origin separation is required.** Each phone keeps its device token and
+  frame key under the trusted mobile origin. Browser WebSocket upgrades are
+  rejected unless their `Origin` exactly matches `MOBILE_ORIGIN`; non-browser
+  desktop connections do not send an Origin header.
+- **Upgrading to the hardened protocol revokes old pairings.** Pair each phone
+  again so it receives the anti-replay sequence state and trusted client URL.
 - **The store** (`/data/relay-store.json`) holds desktop/device token hashes.
   Wiping it logs everyone out: desktops re-register on next connect
   (trust-on-first-use), phones must be re-paired.
 - **A lost desktop token** (wiped desktop app): wipe the store, or just delete
   the stale `desktops` entry — the id will re-register.
 - **Nothing to comply with**: there is no user content here to serve or
-  delete; requests from unknown desktops get a 503 and nothing else.
+  delete; non-health HTTP paths return 404.
 
 ## Tests
 

@@ -51,11 +51,17 @@ function imageSource(url: string): Block {
 
 function userContent(content: string | ContentPart[]): Block[] {
   if (typeof content === 'string') return [{ type: 'text', text: content }]
-  return content.map((p) =>
-    p.type === 'text'
-      ? { type: 'text', text: p.text }
-      : { type: 'image', source: imageSource(p.image_url.url) }
-  )
+  return content.map((p) => {
+    if (p.type === 'text') return { type: 'text', text: p.text }
+    if (p.type === 'document') {
+      return {
+        type: 'document',
+        source: { type: 'base64', media_type: p.mediaType, data: p.dataBase64 },
+        ...(p.name ? { title: p.name } : {}),
+      }
+    }
+    return { type: 'image', source: imageSource(p.image_url.url) }
+  })
 }
 
 /**

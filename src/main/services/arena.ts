@@ -19,7 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import type {
   ArenaCandidateState,
@@ -138,9 +138,8 @@ export function arenaJudgePrompt(
 }
 
 /**
- * Seeds a fresh round-N worktree from the previous winner by copying exactly
- * the winner's changed files onto it (deletions are skipped, mirroring how
- * apply() behaves). Overlay semantics: only the winning DIFF propagates.
+ * Seeds a fresh round-N worktree from the previous winner by replaying exactly
+ * the winner's changed paths, including deletions and renames.
  */
 export function seedWorktreeFromParent(
   parentPath: string,
@@ -149,6 +148,18 @@ export function seedWorktreeFromParent(
 ): { seeded: number } {
   let seeded = 0
   for (const file of files) {
+    const removedPath = file.status === 'R' ? file.oldPath : file.status === 'D' ? file.path : null
+    if (removedPath) {
+      const removed = resolveInsideRoot(targetPath, removedPath)
+      if (removed && existsSync(removed)) {
+        try {
+          unlinkSync(removed)
+          seeded += 1
+        } catch {
+          // Best-effort seeding; generation can repair an unusual path.
+        }
+      }
+    }
     if (file.status === 'D') continue
     const src = resolveInsideRoot(parentPath, file.path)
     const dest = resolveInsideRoot(targetPath, file.path)
@@ -199,10 +210,10 @@ interface ArenaCodePort {
   proposeChange(
     conversationId: string,
     relPath: string,
-    changeType: 'create' | 'edit',
-    newContent: string
+    changeType: 'create' | 'edit' | 'delete',
+    newContent?: string
   ): { id: string }
-  applyChange(changeId: string): unknown
+  applyChangesAtomically(changeIds: string[]): unknown
 }
 
 export interface ArenaServiceDeps {
@@ -238,6 +249,8 @@ export interface ArenaServiceDeps {
       projectId: string
       signal?: AbortSignal
       json?: boolean
+      /** Spend attribution: arena runs bill the owning conversation (v44). */
+      usage?: { runKind: 'arena'; refId: string }
     }
   ) => Promise<string>
 }
@@ -284,19 +297,24 @@ export class ArenaService {
     const candidates: ArenaCandidateState[] = []
     const worktreeProjects = new Map<string, string>()
 
-    for (const [index, ref] of request.candidates.entries()) {
-      const created = await this.createCandidate(
-        project.id,
-        project.path,
-        request.conversationId,
-        request.task,
-        ref,
-        index,
-        1,
-        null
-      )
-      worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
-      candidates.push(created.candidate)
+    try {
+      for (const [index, ref] of request.candidates.entries()) {
+        const created = await this.createCandidate(
+          project.id,
+          project.path,
+          request.conversationId,
+          request.task,
+          ref,
+          index,
+          1,
+          null
+        )
+        worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
+        candidates.push(created.candidate)
+      }
+    } catch (error) {
+      await Promise.allSettled(candidates.map((candidate) => this.cleanupCandidate(project.path, candidate)))
+      throw error
     }
 
     const arena: ArenaInternal = {
@@ -345,33 +363,41 @@ export class ArenaService {
       projectId,
       `arena-r${round}-${index + 1}-${safeModel}`
     )
-    const worktreeProject = this.deps.code.openProject(worktree.path)
-    const run = this.deps.db.agentPlatform.runStart({
-      conversationId,
-      projectId: worktreeProject.id,
-      agentName: `arena-r${round}`,
-      task,
-      worktreePath: worktree.path,
-      providerId: ref.providerId,
-      modelId: ref.modelId,
-    })
-    return {
-      worktreeProjectId: worktreeProject.id,
-      candidate: {
-        runId: run.id,
+    let runId: string | null = null
+    try {
+      const worktreeProject = this.deps.code.openProject(worktree.path)
+      const run = this.deps.db.agentPlatform.runStart({
+        conversationId,
+        projectId: worktreeProject.id,
+        agentName: `arena-r${round}`,
+        task,
+        worktreePath: worktree.path,
         providerId: ref.providerId,
         modelId: ref.modelId,
-        providerLabel: provider?.label ?? ref.providerId,
-        worktreePath: worktree.path,
-        branch: worktree.branch,
-        status: 'running',
-        summary: '',
-        diffStat: '',
-        diff: '',
-        changedFiles: [],
-        round,
-        parentRunId,
-      },
+      })
+      runId = run.id
+      return {
+        worktreeProjectId: worktreeProject.id,
+        candidate: {
+          runId: run.id,
+          providerId: ref.providerId,
+          modelId: ref.modelId,
+          providerLabel: provider?.label ?? ref.providerId,
+          worktreePath: worktree.path,
+          branch: worktree.branch,
+          status: 'running',
+          summary: '',
+          diffStat: '',
+          diff: '',
+          changedFiles: [],
+          round,
+          parentRunId,
+        },
+      }
+    } catch (error) {
+      if (runId) this.deps.db.agentPlatform.runFinish(runId, 'error', 'Candidate setup failed.')
+      await this.removeCandidateWorktree(projectPath, worktree.path, worktree.branch)
+      throw error
     }
   }
 
@@ -409,30 +435,44 @@ export class ArenaService {
         this.push(arena)
 
         // Fresh worktrees per candidate, seeded with the winner's diff. They
-        // are awaited by the loop's next allSettled pass.
-        const seeded: ArenaCandidateState[] = []
-        for (const [index, ref] of refs.entries()) {
-          if (arena.controller.signal.aborted) break
-          const created = await this.createCandidate(
-            arena.state.projectId,
-            projectPath,
-            arena.state.conversationId,
-            arena.state.task,
-            ref,
-            index,
-            currentRound + 1,
-            winner.runId
-          )
-          try {
-            seedWorktreeFromParent(winner.worktreePath, created.candidate.worktreePath, winner.changedFiles)
-          } catch {
-            // Seeding is best-effort: an unseeded candidate still runs on HEAD.
+        // carry round currentRound+1 and run on the loop's NEXT allSettled
+        // pass (line 392) — deliberately not awaited here. Running them in this
+        // iteration too would double every evolutionary round: generate twice,
+        // re-prompt against an already-edited tree, and finish each agent_run
+        // row twice.
+        const nextRound: ArenaCandidateState[] = []
+        try {
+          for (const [index, ref] of refs.entries()) {
+            if (arena.controller.signal.aborted) break
+            const created = await this.createCandidate(
+              arena.state.projectId,
+              projectPath,
+              arena.state.conversationId,
+              arena.state.task,
+              ref,
+              index,
+              currentRound + 1,
+              winner.runId
+            )
+            try {
+              seedWorktreeFromParent(
+                winner.worktreePath,
+                created.candidate.worktreePath,
+                winner.changedFiles
+              )
+            } catch {
+              // Seeding is best-effort: an unseeded candidate still runs on HEAD.
+            }
+            arena.worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
+            arena.state.candidates.push(created.candidate)
+            nextRound.push(created.candidate)
           }
-          arena.worktreeProjects.set(created.candidate.runId, created.worktreeProjectId)
-          arena.state.candidates.push(created.candidate)
-          seeded.push(created.candidate)
+        } catch (error) {
+          await Promise.allSettled(
+            nextRound.map((candidate) => this.cleanupCandidate(projectPath, candidate))
+          )
+          throw error
         }
-        await Promise.allSettled(seeded.map((candidate) => this.runCandidate(arena, candidate)))
       }
     } finally {
       if (arena.state.status === 'running') arena.state.status = 'finished'
@@ -464,7 +504,15 @@ export class ArenaService {
         ),
         undefined,
         undefined,
-        { useTools: false, approvedToolIds: [], projectId: '', json: true, signal: arena.controller.signal }
+        {
+          useTools: false,
+          approvedToolIds: [],
+          projectId: '',
+          json: true,
+          signal: arena.controller.signal,
+          // Judging spend is arena spend too.
+          usage: { runKind: 'arena', refId: arena.state.conversationId },
+        }
       )
       const verdict = parseJudgeWinner(text, done.length)
       if (!verdict) return null
@@ -495,44 +543,71 @@ export class ArenaService {
     if (candidate.status !== 'done') throw invalid('Only a finished candidate can be applied.')
     if (arena.state.appliedRunId) throw invalid('A candidate has already been applied.')
 
+    // Applying commits the outcome — stop any still-running evolutionary rounds
+    // so the loop doesn't keep judging, seeding and generating (burning tokens)
+    // for an arena whose winner is already chosen.
+    if (arena.state.status === 'running') arena.controller.abort()
+
     const skipped: string[] = []
-    let applied = 0
+    const planned: Array<{
+      path: string
+      changeType: 'create' | 'edit' | 'delete'
+      content?: string
+    }> = []
     for (const file of candidate.changedFiles) {
-      // Deletions and renames are rare for task-sized changes; report instead
-      // of guessing. (status D = deleted in the worktree.)
       if (file.status === 'D') {
-        skipped.push(`${file.path} (deletion — remove it manually if intended)`)
+        planned.push({ path: file.path, changeType: 'delete' })
         continue
       }
       const abs = this.resolveInWorktree(candidate.worktreePath, file.path)
       if (!abs || !existsSync(abs)) {
+        if (file.status === 'R') {
+          throw invalid(`Cannot apply rename: replacement '${file.path}' is not readable.`)
+        }
         skipped.push(`${file.path} (not readable in the worktree)`)
         continue
       }
       const buffer = readFileSync(abs)
       if (buffer.byteLength > APPLY_FILE_MAX_BYTES || looksBinary(buffer)) {
+        if (file.status === 'R') {
+          throw invalid(`Cannot apply rename: replacement '${file.path}' is binary or too large.`)
+        }
         skipped.push(`${file.path} (binary or too large for the change pipeline)`)
         continue
       }
       const targetAbs = path.join(arena.mainRoot, file.path)
       const changeType: 'create' | 'edit' = existsSync(targetAbs) ? 'edit' : 'create'
-      const change = this.deps.code.proposeChange(
-        conversationId,
-        file.path,
-        changeType,
-        buffer.toString('utf8')
-      )
-      this.deps.code.applyChange(change.id)
-      applied += 1
+      // A rename is one indivisible logical operation: validate its
+      // replacement before the old path can even be proposed for deletion.
+      if (file.status === 'R') {
+        if (!file.oldPath) {
+          throw invalid(`Cannot apply rename for '${file.path}': source path is missing.`)
+        }
+        planned.push({ path: file.oldPath, changeType: 'delete' })
+      }
+      planned.push({ path: file.path, changeType, content: buffer.toString('utf8') })
     }
-    if (applied === 0 && skipped.length === 0) {
+    if (planned.length === 0 && skipped.length === 0) {
       throw invalid('The chosen candidate has no changes to apply.')
     }
+
+    // Propose only after the whole candidate has been preflighted, so a bad
+    // rename cannot leave a standalone delete proposal behind.
+    const changeIds = planned.map(
+      (change) =>
+        this.deps.code.proposeChange(
+          conversationId,
+          change.path,
+          change.changeType,
+          change.content
+        ).id
+    )
+    if (changeIds.length > 0) this.deps.code.applyChangesAtomically(changeIds)
 
     arena.state.appliedRunId = runId
     arena.state.status = 'applied'
     candidate.summary = skipped.length
-      ? `${candidate.summary}\n\nApplied ${applied} file(s); skipped: ${skipped.join(', ')}`
+      ? `${candidate.summary}\n\nApplied ${changeIds.length} change(s); skipped: ${skipped.join(', ')}`
       : candidate.summary
     this.push(arena)
     return arena.state
@@ -589,6 +664,7 @@ export class ArenaService {
           approvedToolIds: ARENA_TOOL_IDS,
           projectId: projectId ?? '',
           signal: arena.controller.signal,
+          usage: { runKind: 'arena', refId: arena.state.conversationId },
         }
       )
       candidate.summary = text.trim().slice(0, SUMMARY_MAX_CHARS)
@@ -615,6 +691,33 @@ export class ArenaService {
       // Diff capture is cosmetic; the run result stands either way.
     }
     this.push(arena)
+  }
+
+  private async cleanupCandidate(mainRoot: string, candidate: ArenaCandidateState): Promise<void> {
+    candidate.status = 'stopped'
+    candidate.summary = 'Candidate setup was rolled back.'
+    this.deps.db.agentPlatform.runFinish(
+      candidate.runId,
+      'stopped',
+      'Candidate setup was rolled back.'
+    )
+    await this.removeCandidateWorktree(mainRoot, candidate.worktreePath, candidate.branch)
+  }
+
+  private async removeCandidateWorktree(
+    mainRoot: string,
+    worktreePath: string,
+    branch: string
+  ): Promise<void> {
+    const worktreesRoot = path.resolve(this.deps.worktreesDir)
+    const resolved = path.resolve(worktreePath)
+    const rel = path.relative(worktreesRoot, resolved)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return
+    try {
+      await this.deps.git.removeWorktree(mainRoot, resolved, branch)
+    } catch {
+      // Cleanup is best-effort; never broaden the deletion target.
+    }
   }
 
   private resolveInWorktree(worktreeRoot: string, relPath: string): string | null {

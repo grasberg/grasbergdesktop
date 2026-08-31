@@ -181,12 +181,8 @@ describe('WorkflowTriggerServer', () => {
 
   it('refuses an oversized body instead of buffering it', async () => {
     await start()
-    const res = await post(`/run/wf-open?token=${TOKEN}`, { body: 'x'.repeat(70 * 1024) }).catch(
-      () => null
-    )
-    // The connection is destroyed once the cap is passed, so either a 413 or a
-    // dropped socket is acceptable — what matters is that nothing ran.
-    if (res) expect(res.status).toBe(413)
+    const res = await post(`/run/wf-open?token=${TOKEN}`, { body: 'x'.repeat(70 * 1024) })
+    expect(res.status).toBe(413)
     expect(run).not.toHaveBeenCalled()
   })
 

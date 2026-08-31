@@ -7,14 +7,19 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement,
 } from 'react'
-import type { Attachment, Message, MoaReferenceOutput } from '@shared/types'
+import type { Attachment, FailoverReason, Message, MoaReferenceOutput } from '@shared/types'
 import { estimateCost, findPricing, formatCost, PRICING_DISCLAIMER } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
 import { useCopied } from '@/hooks/useCopied'
 import { formatBytes } from '@/lib/format'
+import { ttsSupported } from '@/lib/tts'
 import { useChatStore } from '@/stores/chat'
 import { useCodeStore } from '@/stores/code'
+import { useConversationsStore } from '@/stores/conversations'
 import { useProvidersStore } from '@/stores/providers'
+import { useSettingsStore } from '@/stores/settings'
+import { useUiStore } from '@/stores/ui'
+import { sttReady, useVoiceStore } from '@/stores/voice'
 import GeneratedImage from './GeneratedImage'
 import Markdown from './Markdown'
 import ModelPickList from './ModelPickList'
@@ -28,8 +33,17 @@ interface MessageItemProps {
 }
 
 /** Attachment chip with a lazily-loaded thumbnail for stored images. */
-function AttachmentChip({ attachment }: { attachment: Attachment }): ReactElement {
+function AttachmentChip({
+  attachment,
+  messageId,
+}: {
+  attachment: Attachment
+  /** Set on persisted messages: lets audio Transcribe write onto the message. */
+  messageId?: string
+}): ReactElement {
   const [src, setSrc] = useState<string | null>(attachment.dataUrl ?? null)
+  const [transcribing, setTranscribing] = useState(false)
+  const voiceStatus = useVoiceStore((s) => s.status)
   useEffect(() => {
     if (attachment.kind !== 'image' || src || !attachment.storageKey) return
     let cancelled = false
@@ -41,13 +55,83 @@ function AttachmentChip({ attachment }: { attachment: Attachment }): ReactElemen
     }
   }, [attachment.kind, attachment.storageKey, src])
 
+  const extractionNote =
+    attachment.kind === 'pdf'
+      ? [
+          attachment.extraction === 'text'
+            ? 'text extracted'
+            : attachment.extraction === 'ocr'
+              ? 'OCR'
+              : 'no text extracted',
+          ...(attachment.rawAttach ? ['sent as original PDF'] : []),
+        ].join(', ')
+      : attachment.kind === 'audio'
+        ? attachment.extractedText
+          ? 'transcribed'
+          : 'not transcribed'
+        : null
+
+  // Persisted-message audio: transcribe + store the transcript on the message
+  // (the conversationsChanged push then refreshes the transcript everywhere).
+  const transcribe = (): void => {
+    if (!attachment.storageKey || !messageId) return
+    setTranscribing(true)
+    void window.uld.voice
+      .transcribeAttachment({
+        storageKey: attachment.storageKey,
+        messageId,
+        attachmentId: attachment.id,
+      })
+      .then((res) => {
+        if (!res.ok) {
+          useUiStore.getState().toast(`Could not transcribe ${attachment.name}: ${res.error.message}`, 'error')
+        }
+      })
+      .finally(() => setTranscribing(false))
+  }
+
+  const canTranscribe =
+    attachment.kind === 'audio' &&
+    !!attachment.storageKey &&
+    !!messageId &&
+    !attachment.extractedText &&
+    sttReady(voiceStatus)
+
   return (
-    <span className="msg-attachment-chip" title={attachment.name}>
+    <span
+      className="msg-attachment-chip"
+      title={extractionNote ? `${attachment.name} (${extractionNote})` : attachment.name}
+    >
       {attachment.kind === 'image' && src ? (
         <img className="msg-attachment-thumb" src={src} alt="" />
       ) : null}
+      {attachment.kind === 'pdf' ? (
+        <span className="msg-attachment-badge" aria-hidden>
+          PDF
+        </span>
+      ) : null}
+      {attachment.kind === 'audio' ? (
+        <span className="msg-attachment-badge" aria-hidden>
+          AUDIO
+        </span>
+      ) : null}
       <span className="msg-attachment-name">{attachment.name}</span>
       <span className="msg-attachment-size">{formatBytes(attachment.sizeBytes)}</span>
+      {attachment.kind === 'audio' && attachment.extractedText ? (
+        <span className="msg-attachment-note">transcribed</span>
+      ) : null}
+      {transcribing ? (
+        <span className="msg-attachment-note">Transcribing…</span>
+      ) : canTranscribe ? (
+        <button
+          type="button"
+          className="msg-attachment-transcribe"
+          title="Transcribe this audio with the local whisper model"
+          onClick={transcribe}
+        >
+          Transcribe
+        </button>
+      ) : null}
     </span>
   )
 }
@@ -111,7 +195,7 @@ function UserMessage({ message }: { message: Message }): ReactElement {
             {message.attachments && message.attachments.length > 0 && (
               <div className="msg-attachments">
                 {message.attachments.map((a) => (
-                  <AttachmentChip key={a.id} attachment={a} />
+                  <AttachmentChip key={a.id} attachment={a} messageId={message.id} />
                 ))}
               </div>
             )}
@@ -140,6 +224,7 @@ function UserMessage({ message }: { message: Message }): ReactElement {
           >
             ✎
           </button>
+          <ForkAction message={message} />
         </div>
       )}
     </div>
@@ -382,6 +467,25 @@ function RegenerateWithMenu({ message }: { message: Message }): ReactElement {
   )
 }
 
+/** "Fork from here": copies the conversation up to this message into a new one. */
+function ForkAction({ message }: { message: Message }): ReactElement | null {
+  const conversationId = useChatStore((s) => s.conversation?.id ?? null)
+  const streaming = useChatStore((s) => s.streaming)
+  if (!conversationId) return null
+  return (
+    <button
+      type="button"
+      className="btn-icon msg-action"
+      aria-label="Fork from here"
+      title="Fork from here"
+      disabled={streaming !== null}
+      onClick={() => void useConversationsStore.getState().fork(conversationId, message.id)}
+    >
+      ⑂
+    </button>
+  )
+}
+
 /**
  * "Undo file changes (n files)" for an assistant turn that applied changes:
  * shown when the conversation's checkpoints contain entries stamped with this
@@ -463,9 +567,55 @@ function UndoTurnAction({ message }: { message: Message }): ReactElement | null 
   )
 }
 
+/**
+ * Read-aloud (offline system voice). Also rendered while the message is still
+ * streaming — the voice store follows the stream and speaks sentences as they
+ * complete. Hidden unless the toggle is on and this platform can speak.
+ */
+function ReadAloudAction({ message }: { message: Message }): ReactElement | null {
+  const enabled = useSettingsStore((s) => s.settings?.voiceReadAloudEnabled === true)
+  const speakingId = useVoiceStore((s) => s.speakingMessageId)
+  if (!enabled || !ttsSupported()) return null
+  const speaking = speakingId === message.id
+  return (
+    <button
+      type="button"
+      className={`btn-icon msg-action${speaking ? ' msg-action-active' : ''}`}
+      aria-label={speaking ? 'Stop reading' : 'Read aloud'}
+      title={speaking ? 'Stop reading' : 'Read aloud'}
+      onClick={() =>
+        speaking
+          ? useVoiceStore.getState().stopSpeaking()
+          : useVoiceStore.getState().play(message.id)
+      }
+    >
+      {speaking ? '◼' : '▶'}
+    </button>
+  )
+}
+
+/** Human reason for a Reliability Autopilot hop (the header note). */
+function failoverReasonText(code: FailoverReason): string {
+  switch (code) {
+    case 'rate_limit':
+      return 'rate limited'
+    case 'server':
+      return 'provider error'
+    case 'network':
+      return 'network error'
+    case 'timeout':
+      return 'timed out'
+    case 'empty_reply':
+      return 'empty reply'
+    default:
+      return code
+  }
+}
+
 function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   const regenerate = useChatStore((s) => s.regenerate)
   const streaming = useChatStore((s) => s.streaming)
+  const readAloudOn = useSettingsStore((s) => s.settings?.voiceReadAloudEnabled === true)
   const [copied, copy] = useCopied()
   const [reasoningOpen, setReasoningOpen] = useState(false)
 
@@ -496,6 +646,20 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
   return (
     <div className="msg-row msg-row-assistant">
       <div className={`msg-card msg-card-assistant${isError ? ' msg-card-error' : ''}`}>
+        {message.failedOverFrom && message.failedOverFrom.length > 0 && (
+          <div className="msg-failover-note">
+            Fell back from{' '}
+            {message.failedOverFrom
+              .map(
+                (hop) =>
+                  `${providers.find((p) => p.id === hop.providerId)?.label ?? hop.providerId} · ${
+                    hop.modelId
+                  } (${failoverReasonText(hop.code)})`
+              )
+              .join(', ')}
+          </div>
+        )}
+
         {message.research && (
           <ResearchProgress research={message.research} streaming={isStreaming} />
         )}
@@ -549,7 +713,7 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
               a.kind === 'image' ? (
                 <GeneratedImage key={a.id} attachment={a} />
               ) : (
-                <AttachmentChip key={a.id} attachment={a} />
+                <AttachmentChip key={a.id} attachment={a} messageId={message.id} />
               )
             )}
           </div>
@@ -596,33 +760,39 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
             </div>
           )}
       </div>
-      {!isStreaming && (
+      {(!isStreaming || readAloudOn) && (
         <div className="msg-actions" role="toolbar" aria-label="Message actions">
-          <button
-            type="button"
-            className="btn-icon msg-action"
-            aria-label={copied ? 'Copied' : 'Copy message'}
-            title="Copy"
-            onClick={() => copy(message.content)}
-          >
-            {copied ? '✓' : '⧉'}
-          </button>
-          {isLast && (
+          <ReadAloudAction message={message} />
+          {!isStreaming && (
             <>
               <button
                 type="button"
                 className="btn-icon msg-action"
-                aria-label="Regenerate response"
-                title="Regenerate"
-                onClick={() => void regenerate(message.id)}
-                disabled={streaming !== null}
+                aria-label={copied ? 'Copied' : 'Copy message'}
+                title="Copy"
+                onClick={() => copy(message.content)}
               >
-                ↺
+                {copied ? '✓' : '⧉'}
               </button>
-              <RegenerateWithMenu message={message} />
+              {isLast && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-icon msg-action"
+                    aria-label="Regenerate response"
+                    title="Regenerate"
+                    onClick={() => void regenerate(message.id)}
+                    disabled={streaming !== null}
+                  >
+                    ↺
+                  </button>
+                  <RegenerateWithMenu message={message} />
+                </>
+              )}
+              <ForkAction message={message} />
+              <UndoTurnAction message={message} />
             </>
           )}
-          <UndoTurnAction message={message} />
         </div>
       )}
     </div>

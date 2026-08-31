@@ -36,6 +36,7 @@ export interface InboxDatabase {
   workflows: { listRecentRunsWithNames(limit: number): WorkflowRunListItem[] }
   scheduledTasks: { list(): ScheduledTask[] }
   inbox: { reviewedByKey(): Map<string, number> }
+  conversations: { listPrivateSpaceConversationIds(): string[] }
 }
 
 /** How many workflow runs the inbox looks back over. */
@@ -49,7 +50,8 @@ export function collectInboxItems(db: InboxDatabase): InboxItem[] {
       workflowRuns: db.workflows.listRecentRunsWithNames(WORKFLOW_RUN_LOOKBACK),
       scheduledTasks: db.scheduledTasks.list(),
     },
-    db.inbox.reviewedByKey()
+    db.inbox.reviewedByKey(),
+    new Set(db.conversations.listPrivateSpaceConversationIds())
   )
 }
 
@@ -60,19 +62,23 @@ export function countUnreviewed(items: readonly InboxItem[]): number {
 
 export function buildInboxItems(
   sources: InboxSources,
-  reviewedByKey: Map<string, number>
+  reviewedByKey: Map<string, number>,
+  privateConversationIds: ReadonlySet<string> = new Set()
 ): InboxItem[] {
   const items: InboxItem[] = []
 
   for (const run of sources.agentRuns) {
     if (run.status === 'running') continue
+    // A private-space run shows without preview text: the task IS the prompt,
+    // so its title falls back to the agent label (v45).
+    const isPrivate = run.conversationId !== null && privateConversationIds.has(run.conversationId)
     items.push({
       itemType: 'agent_run',
       itemId: run.id,
       sourceLabel: run.agentName ?? 'Background agent',
-      title: snip(run.task) || 'Background run',
+      title: isPrivate ? (run.agentName ?? 'Background agent') : snip(run.task) || 'Background run',
       status: run.status === 'done' ? 'ok' : run.status === 'stopped' ? 'stopped' : 'error',
-      snippet: snip(run.result),
+      snippet: isPrivate ? '' : snip(run.result),
       conversationId: run.conversationId,
       workflowId: null,
       finishedAt: run.finishedAt ?? run.startedAt,

@@ -79,6 +79,14 @@ export function createWorkflowRunner(
       try {
         const result = await runWorkflow(workflow.graph, {
           ...deps,
+          // Attribute every ai_agent node's spend to this workflow (and let
+          // its budget cap apply). A budget refusal simply fails the node —
+          // the run is recorded as 'error' below and lands in the inbox.
+          runAgent: (prompt, providerId, modelId, opts) =>
+            deps.runAgent(prompt, providerId, modelId, {
+              ...opts,
+              usage: { runKind: 'workflow', refId: workflowId },
+            }),
           signal: controller.signal,
           ...(payload ? { triggerPayload: payload } : {}),
         })

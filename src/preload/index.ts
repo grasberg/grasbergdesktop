@@ -9,11 +9,15 @@ import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
 import type {
   ArenaState,
   McpServerRuntime,
+  MorningBrief,
   OptimizerRun,
+  QuickContext,
+  QuickStreamEventEnvelope,
   StreamEventEnvelope,
   TerminalDataEvent,
   TerminalExitEvent,
   ToolApprovalRequest,
+  VoiceDownloadProgressEvent,
   UserQuestionRequest,
   WorkflowRunFinishedEvent,
 } from '@shared/types'
@@ -38,6 +42,8 @@ const api: UldApi = {
     pickFiles: () => ipcRenderer.invoke(CHANNELS.appPickFiles),
     storePastedImage: (input) => ipcRenderer.invoke(CHANNELS.appStorePastedImage, input),
     readAttachment: (storageKey) => ipcRenderer.invoke(CHANNELS.appReadAttachment, storageKey),
+    extractAttachmentText: (input) =>
+      ipcRenderer.invoke(CHANNELS.appExtractAttachmentText, input),
     saveAttachmentAs: (storageKey, suggestedName) =>
       ipcRenderer.invoke(CHANNELS.appSaveAttachmentAs, { storageKey, suggestedName }),
   },
@@ -69,7 +75,8 @@ const api: UldApi = {
     delete: (id) => ipcRenderer.invoke(CHANNELS.convDelete, id),
     messages: (conversationId) => ipcRenderer.invoke(CHANNELS.convMessages, conversationId),
     export: (req) => ipcRenderer.invoke(CHANNELS.convExport, req),
-    fork: (id, throughSeq) => ipcRenderer.invoke(CHANNELS.convFork, { id, throughSeq }),
+    fork: (id, messageId) => ipcRenderer.invoke(CHANNELS.convFork, { id, messageId }),
+    forkLineage: (id) => ipcRenderer.invoke(CHANNELS.convForkLineage, id),
     onConversationsChanged: subscribe<{ conversationId: string }>(CHANNELS.conversationsChanged),
   },
   projects: {
@@ -145,11 +152,19 @@ const api: UldApi = {
   },
   usage: {
     summary: (days) => ipcRenderer.invoke(CHANNELS.usageSummary, days),
+    conversationCost: (conversationId) =>
+      ipcRenderer.invoke(CHANNELS.usageConversationCost, conversationId),
+    headlessSummary: (days) => ipcRenderer.invoke(CHANNELS.usageHeadless, days),
   },
   inbox: {
     list: () => ipcRenderer.invoke(CHANNELS.inboxList),
     markReviewed: (itemType, itemId) =>
       ipcRenderer.invoke(CHANNELS.inboxMarkReviewed, { itemType, itemId }),
+  },
+  brief: {
+    list: () => ipcRenderer.invoke(CHANNELS.briefList),
+    dismiss: (id) => ipcRenderer.invoke(CHANNELS.briefDismiss, id),
+    onChanged: subscribe<{ brief: MorningBrief }>(CHANNELS.briefChanged),
   },
   arena: {
     start: (req) => ipcRenderer.invoke(CHANNELS.arenaStart, req),
@@ -176,6 +191,29 @@ const api: UldApi = {
     dispose: (sessionId) => ipcRenderer.invoke(CHANNELS.terminalDispose, sessionId),
     onData: subscribe<TerminalDataEvent>(CHANNELS.terminalData),
     onExit: subscribe<TerminalExitEvent>(CHANNELS.terminalExit),
+  },
+  voice: {
+    status: () => ipcRenderer.invoke(CHANNELS.voiceStatus),
+    download: (modelId) => ipcRenderer.invoke(CHANNELS.voiceDownload, { modelId }),
+    cancelDownload: () => ipcRenderer.invoke(CHANNELS.voiceDownloadCancel),
+    remove: (modelId) => ipcRenderer.invoke(CHANNELS.voiceRemove, { modelId }),
+    pickBinary: (clear) => ipcRenderer.invoke(CHANNELS.voicePickBinary, clear),
+    sttBegin: () => ipcRenderer.invoke(CHANNELS.voiceSttBegin),
+    sttChunk: (sessionId, chunk) =>
+      ipcRenderer.invoke(CHANNELS.voiceSttChunk, { sessionId, chunk }),
+    sttEnd: (sessionId) => ipcRenderer.invoke(CHANNELS.voiceSttEnd, { sessionId }),
+    sttCancel: (sessionId) => ipcRenderer.invoke(CHANNELS.voiceSttCancel, { sessionId }),
+    transcribeAttachment: (req) => ipcRenderer.invoke(CHANNELS.voiceTranscribeAttachment, req),
+    onDownloadProgress: subscribe<VoiceDownloadProgressEvent>(CHANNELS.voiceDownloadProgress),
+  },
+  quick: {
+    run: (req) => ipcRenderer.invoke(CHANNELS.quickRun, req),
+    getContext: () => ipcRenderer.invoke(CHANNELS.quickGetContext),
+    hide: () => ipcRenderer.invoke(CHANNELS.quickHide),
+    promote: (req) => ipcRenderer.invoke(CHANNELS.quickPromote, req),
+    onContext: subscribe<QuickContext>(CHANNELS.quickContext),
+    onStreamEvent: subscribe<QuickStreamEventEnvelope>(CHANNELS.quickStreamEvent),
+    onPromoted: subscribe<{ conversationId: string }>(CHANNELS.quickPromoted),
   },
   tools: {
     list: () => ipcRenderer.invoke(CHANNELS.toolsList),
@@ -220,6 +258,17 @@ const api: UldApi = {
     delete: (id) => ipcRenderer.invoke(CHANNELS.memoriesDelete, id),
     dream: () => ipcRenderer.invoke(CHANNELS.memoriesDream),
   },
+  documents: {
+    list: () => ipcRenderer.invoke(CHANNELS.documentsList),
+    get: (id) => ipcRenderer.invoke(CHANNELS.documentsGet, id),
+    create: (input) => ipcRenderer.invoke(CHANNELS.documentsCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(CHANNELS.documentsUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.documentsDelete, id),
+    listVersions: (id) => ipcRenderer.invoke(CHANNELS.documentsListVersions, id),
+    revert: (id, versionId) => ipcRenderer.invoke(CHANNELS.documentsRevert, { id, versionId }),
+    export: (id) => ipcRenderer.invoke(CHANNELS.documentsExport, id),
+    onChanged: subscribe(CHANNELS.documentsChanged),
+  },
   skills: {
     list: () => ipcRenderer.invoke(CHANNELS.skillsList),
     create: (input) => ipcRenderer.invoke(CHANNELS.skillsCreate, input),
@@ -228,8 +277,21 @@ const api: UldApi = {
     importFolder: (path) => ipcRenderer.invoke(CHANNELS.skillsImportFolder, path),
   },
   backup: {
-    export: () => ipcRenderer.invoke(CHANNELS.backupExport),
+    export: (opts) => ipcRenderer.invoke(CHANNELS.backupExport, opts),
     import: () => ipcRenderer.invoke(CHANNELS.backupImport),
+  },
+  spaces: {
+    list: () => ipcRenderer.invoke(CHANNELS.spacesList),
+    create: (name) => ipcRenderer.invoke(CHANNELS.spacesCreate, { name }),
+    update: (id, patch) => ipcRenderer.invoke(CHANNELS.spacesUpdate, { id, patch }),
+    delete: (id) => ipcRenderer.invoke(CHANNELS.spacesDelete, id),
+  },
+  lock: {
+    status: () => ipcRenderer.invoke(CHANNELS.lockStatus),
+    unlock: (passphrase) => ipcRenderer.invoke(CHANNELS.lockUnlock, { passphrase }),
+    lockNow: () => ipcRenderer.invoke(CHANNELS.lockNow),
+    setPassphrase: (input) => ipcRenderer.invoke(CHANNELS.lockSetPassphrase, input),
+    onChanged: subscribe<{ locked: boolean }>(CHANNELS.appLockChanged),
   },
   mcp: {
     list: () => ipcRenderer.invoke(CHANNELS.mcpList),
@@ -266,12 +328,15 @@ const api: UldApi = {
     onRunFinished: subscribe<WorkflowRunFinishedEvent>(CHANNELS.workflowRunFinished),
     triggerInfo: (workflowId) => ipcRenderer.invoke(CHANNELS.workflowsTriggerInfo, workflowId),
     triggerRegenerate: () => ipcRenderer.invoke(CHANNELS.workflowsTriggerRegenerate),
+    watchInfo: (workflowId) => ipcRenderer.invoke(CHANNELS.workflowsWatchInfo, workflowId),
   },
   scheduledTasks: {
     list: () => ipcRenderer.invoke(CHANNELS.scheduledTasksList),
     create: (input) => ipcRenderer.invoke(CHANNELS.scheduledTasksCreate, input),
     setEnabled: (id, enabled) =>
       ipcRenderer.invoke(CHANNELS.scheduledTasksSetEnabled, id, enabled),
+    setBudget: (id, budgetUsd) =>
+      ipcRenderer.invoke(CHANNELS.scheduledTasksSetBudget, id, budgetUsd),
     delete: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksDelete, id),
       onChanged: subscribe(CHANNELS.scheduledTasksChanged),
     runs: (taskId) => ipcRenderer.invoke(CHANNELS.scheduledTaskRuns, taskId),
@@ -285,6 +350,17 @@ const api: UldApi = {
     stopRun: (runId) => ipcRenderer.invoke(CHANNELS.agentRunStop, runId),
     packExport: () => ipcRenderer.invoke(CHANNELS.agentPackExport),
     packImport: () => ipcRenderer.invoke(CHANNELS.agentPackImport),
+  },
+  bots: {
+    roster: () => ipcRenderer.invoke(CHANNELS.botsRoster),
+    openChat: (agentId) => ipcRenderer.invoke(CHANNELS.botsOpenChat, agentId),
+    createGroup: (input) => ipcRenderer.invoke(CHANNELS.botGroupCreate, input),
+    updateGroup: (id, patch) => ipcRenderer.invoke(CHANNELS.botGroupUpdate, id, patch),
+    deleteGroup: (id) => ipcRenderer.invoke(CHANNELS.botGroupDelete, id),
+    groupSend: (groupId, content) => ipcRenderer.invoke(CHANNELS.botGroupSend, groupId, content),
+    groupStop: (groupId) => ipcRenderer.invoke(CHANNELS.botGroupStop, groupId),
+    groupMarkSeen: (groupId) => ipcRenderer.invoke(CHANNELS.botGroupMarkSeen, groupId),
+    onChanged: subscribe(CHANNELS.botsChanged),
   },
   knowledge: {
     list: () => ipcRenderer.invoke(CHANNELS.kbList),

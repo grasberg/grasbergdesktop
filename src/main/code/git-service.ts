@@ -175,10 +175,12 @@ export function parsePorcelainStatus(raw: string): {
       continue
     }
     // A rename/copy in EITHER column carries the source path as the next
-    // record; leaving it in the stream would parse it as a status record.
-    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i += 1
-    if (x !== ' ' && x !== '?') staged.push({ path, status: x })
-    if (y !== ' ' && y !== '?') unstaged.push({ path, status: y })
+    // record. Preserve it so Arena can faithfully seed/apply the change.
+    const renamed = x === 'R' || x === 'C' || y === 'R' || y === 'C'
+    const oldPath = renamed ? (records[i + 1] || undefined) : undefined
+    if (renamed) i += 1
+    if (x !== ' ' && x !== '?') staged.push({ path, status: x, ...(oldPath ? { oldPath } : {}) })
+    if (y !== ' ' && y !== '?') unstaged.push({ path, status: y, ...(oldPath ? { oldPath } : {}) })
   }
   return { staged, unstaged, untracked }
 }
@@ -241,6 +243,36 @@ export class GitService {
     const result = await runGit(['worktree', 'add', '-b', branch, target, 'HEAD'], root)
     if (!result.ok) throw invalid(`git worktree add failed: ${result.stderr || 'unknown error'}`)
     return { path: target, branch, projectId }
+  }
+
+  async revision(root: string): Promise<string> {
+    const result = await runGit(['rev-parse', 'HEAD'], root)
+    if (!result.ok || !result.stdout.trim()) throw invalid('The repository has no readable HEAD.')
+    return result.stdout.trim()
+  }
+
+  /** Publishes an app-owned optimizer branch without ever staging/resetting the main tree. */
+  async fastForwardWorktree(
+    mainRoot: string,
+    sourceBranch: string,
+    expectedBranch: string,
+    expectedHead: string
+  ): Promise<void> {
+    const status = await this.status(mainRoot)
+    if (!status.isRepo || status.branch !== expectedBranch) {
+      throw invalid(`The project is no longer on branch '${expectedBranch}'.`)
+    }
+    if (status.staged.length || status.unstaged.length || status.untracked.length) {
+      throw invalid('The project has uncommitted changes.')
+    }
+    const currentHead = await this.revision(mainRoot)
+    if (currentHead !== expectedHead) {
+      throw invalid('The project branch changed after the optimizer started.')
+    }
+    const result = await runGit(['merge', '--ff-only', sourceBranch], mainRoot)
+    if (!result.ok) {
+      throw invalid(`The optimizer branch could not be fast-forwarded: ${result.stderr || 'unknown error'}`)
+    }
   }
 
   /** Opens a project/worktree in a supported editor without invoking a shell. */

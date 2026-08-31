@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { ChatParams, ConversationMode, ModeModelDefault, ResearchDepth } from '@shared/types'
+import type {
+  ChatParams,
+  ConversationMode,
+  FailoverChainEntry,
+  ModeModelDefault,
+  ResearchDepth,
+} from '@shared/types'
 import { providerSupportsImageOutput, resolveImageModelCatalog } from '@shared/catalog'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
@@ -228,6 +234,262 @@ function ImageModelRow({
         )
       ) : (
         <span className="field-hint mode-model-hint">Auto-picks the model too.</span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * One row of a Reliability fallback chain: provider + model pickers plus
+ * reorder/remove. Unlike ModeModelRow both parts are required — an incomplete
+ * row is a draft held by the editor and never persisted.
+ */
+function FailoverRow({
+  ariaLabel,
+  providerId,
+  modelId,
+  onProviderChange,
+  onModelChange,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+}: {
+  ariaLabel: string
+  providerId: string
+  modelId: string | null
+  onProviderChange: (id: string) => void
+  onModelChange: (id: string) => void
+  onRemove: () => void
+  onMoveUp?: () => void
+  onMoveDown?: () => void
+}): React.JSX.Element {
+  const providers = useProvidersStore((s) => s.providers)
+  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
+  const loadModels = useProvidersStore((s) => s.loadModels)
+
+  const [customMode, setCustomMode] = useState(false)
+  const [customDraft, setCustomDraft] = useState(modelId ?? '')
+
+  const provider = providers.find((p) => p.id === providerId) ?? null
+  const enabledProviders = providers.filter((p) => p.enabled)
+  const models = provider ? modelsByProvider[provider.id] ?? [] : []
+  const inList = models.some((m) => m.id === modelId)
+  const showCustom = !!provider && (customMode || models.length === 0 || (!!modelId && !inList))
+
+  useEffect(() => setCustomDraft(modelId ?? ''), [modelId])
+
+  useEffect(() => {
+    if (!provider || modelsByProvider[provider.id]) return
+    void loadModels(provider.id).catch(() => {
+      // Best-effort; the custom model input still works.
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider?.id])
+
+  const commitCustom = (): void => {
+    const trimmed = customDraft.trim()
+    if (trimmed) onModelChange(trimmed)
+  }
+
+  return (
+    <div className="failover-chain-row">
+      <select
+        className="select"
+        aria-label={`${ariaLabel} provider`}
+        value={providerId}
+        onChange={(e) => {
+          setCustomMode(false)
+          if (e.target.value) onProviderChange(e.target.value)
+        }}
+      >
+        {!providerId && <option value="">Pick provider…</option>}
+        {enabledProviders.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+        {provider && !provider.enabled ? (
+          <option value={provider.id}>{provider.label} (disabled)</option>
+        ) : null}
+      </select>
+      {provider ? (
+        showCustom ? (
+          <input
+            className="input mono"
+            aria-label={`${ariaLabel} custom model id`}
+            value={customDraft}
+            placeholder="model id"
+            spellCheck={false}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onBlur={commitCustom}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                commitCustom()
+              }
+            }}
+          />
+        ) : (
+          <select
+            className="select"
+            aria-label={`${ariaLabel} model`}
+            value={modelId ?? ''}
+            onChange={(e) => {
+              if (e.target.value === CUSTOM) {
+                setCustomMode(true)
+                setCustomDraft(modelId ?? '')
+                return
+              }
+              if (e.target.value) onModelChange(e.target.value)
+            }}
+          >
+            {!modelId && <option value="">Pick model…</option>}
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label ?? m.id}
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom model id…</option>
+          </select>
+        )
+      ) : (
+        <span className="field-hint mode-model-hint">Pick a provider first.</span>
+      )}
+      <div className="failover-row-actions">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          aria-label={`${ariaLabel}: move up`}
+          disabled={!onMoveUp}
+          onClick={onMoveUp}
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          aria-label={`${ariaLabel}: move down`}
+          disabled={!onMoveDown}
+          onClick={onMoveDown}
+        >
+          ↓
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          aria-label={`${ariaLabel}: remove`}
+          onClick={onRemove}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Ordered fallback chain (Reliability Autopilot). Entries persist only once
+ * complete (provider AND model chosen); the in-progress row lives in local
+ * draft state so a half-filled entry never reaches settings.
+ */
+function FailoverChainEditor({
+  label,
+  entries,
+  onChange,
+}: {
+  label: string
+  entries: FailoverChainEntry[]
+  onChange: (next: FailoverChainEntry[]) => void
+}): React.JSX.Element {
+  // The one row being edited: an appended "Add fallback" row, or an existing
+  // row whose provider was switched (its persisted entry stays until commit).
+  const [draft, setDraft] = useState<{
+    index: number
+    providerId: string
+    modelId: string | null
+  } | null>(null)
+
+  const commitOrHold = (index: number, providerId: string, modelId: string | null): void => {
+    if (providerId && modelId) {
+      const next = [...entries]
+      next.splice(index, index < entries.length ? 1 : 0, { providerId, modelId })
+      onChange(next)
+      setDraft(null)
+    } else {
+      setDraft({ index, providerId, modelId })
+    }
+  }
+
+  const move = (index: number, delta: number): void => {
+    const next = [...entries]
+    const [entry] = next.splice(index, 1)
+    if (!entry) return
+    next.splice(index + delta, 0, entry)
+    setDraft(null)
+    onChange(next)
+  }
+
+  const rows: Array<{
+    key: string
+    index: number
+    providerId: string
+    modelId: string | null
+    isDraft: boolean
+  }> = entries.map((entry, i) => ({
+    key: `entry-${i}`,
+    index: i,
+    providerId: entry.providerId,
+    modelId: entry.modelId,
+    isDraft: false,
+  }))
+  if (draft) {
+    const draftRow = { key: 'draft', ...draft, isDraft: true }
+    if (draft.index < entries.length) rows[draft.index] = draftRow
+    else rows.push(draftRow)
+  }
+
+  return (
+    <div className="failover-chain">
+      <span className="field-label">{label}</span>
+      {rows.length === 0 && <p className="field-hint">No fallbacks configured.</p>}
+      {rows.map((row, i) => (
+        <FailoverRow
+          key={row.key}
+          ariaLabel={`${label} fallback ${i + 1}`}
+          providerId={row.providerId}
+          modelId={row.modelId}
+          onProviderChange={(id) =>
+            row.isDraft
+              ? commitOrHold(row.index, id, null)
+              : setDraft({ index: row.index, providerId: id, modelId: null })
+          }
+          onModelChange={(id) =>
+            row.isDraft
+              ? commitOrHold(row.index, row.providerId, id)
+              : onChange(
+                  entries.map((entry, j) =>
+                    j === row.index ? { providerId: row.providerId, modelId: id } : entry
+                  )
+                )
+          }
+          onRemove={() => {
+            setDraft(null)
+            if (!row.isDraft) onChange(entries.filter((_, j) => j !== row.index))
+          }}
+          onMoveUp={!row.isDraft && row.index > 0 ? () => move(row.index, -1) : undefined}
+          onMoveDown={
+            !row.isDraft && row.index < entries.length - 1 ? () => move(row.index, 1) : undefined
+          }
+        />
+      ))}
+      {entries.length < 5 && !draft && (
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => setDraft({ index: entries.length, providerId: '', modelId: null })}
+        >
+          Add fallback
+        </button>
       )}
     </div>
   )
@@ -659,6 +921,28 @@ export default function DefaultsTab() {
           }
         />
       </div>
+
+      <h4 className="section-subhead">Reliability fallbacks</h4>
+      <p className="field-hint">
+        If a model fails mid-answer (rate limit, outage, network error) or returns nothing before
+        any tool has run, the app retries with these models in order before showing an error.
+        Interactive covers chats; Background covers workflows, scheduled tasks and other
+        background runs.
+      </p>
+      <FailoverChainEditor
+        label="Interactive"
+        entries={settings.failoverChains.interactive ?? []}
+        onChange={(next) =>
+          void persist({ failoverChains: { ...settings.failoverChains, interactive: next } })
+        }
+      />
+      <FailoverChainEditor
+        label="Background"
+        entries={settings.failoverChains.headless ?? []}
+        onChange={(next) =>
+          void persist({ failoverChains: { ...settings.failoverChains, headless: next } })
+        }
+      />
     </section>
   )
 }

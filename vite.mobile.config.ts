@@ -3,12 +3,11 @@
  *
  * A second, deliberately tiny vite root next to the desktop renderer: same
  * React/zustand/@shared contracts, none of the desktop app's weight. The
- * output lands in out/mobile and is served FROM THE DESKTOP through the relay
- * tunnel (src/main/remote/static.ts), so a phone always loads a UI version
- * matched to the main process it talks to.
+ * output lands in out/mobile and must be deployed to a trusted static origin
+ * that is separate from the untrusted relay. The client receives the relay
+ * and desktop routing values in the QR fragment.
  *
- * base './' matters: the bundle is served under /<desktopId>/ on the relay,
- * so asset URLs must be relative, not root-absolute.
+ * base './' keeps the bundle deployable below an arbitrary static path.
  */
 
 import react from '@vitejs/plugin-react'

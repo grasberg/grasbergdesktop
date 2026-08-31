@@ -53,11 +53,15 @@ describe('ToolRegistry.listDefinitions', () => {
       'write_file',
       'knowledge_search',
       'delegate',
+      'message_agent',
       'task_output',
       'task_stop',
       'update_task_list',
       'ask_user_question',
       'schedule_task',
+      'list_documents',
+      'read_document',
+      'edit_document',
     ])
     for (const def of definitions) {
       expect(def.builtin).toBe(true)
@@ -81,6 +85,11 @@ describe('ToolRegistry.listDefinitions', () => {
     expect(byId.get('write_file')!.risk).toBe('dangerous')
     expect(byId.get('update_task_list')!.risk).toBe('safe')
     expect(byId.get('ask_user_question')!.risk).toBe('safe')
+    // Notebooks: app-local reads are safe; the write asks (and is mutating).
+    expect(byId.get('list_documents')!.risk).toBe('safe')
+    expect(byId.get('read_document')!.risk).toBe('safe')
+    expect(byId.get('edit_document')!.risk).toBe('sensitive')
+    expect(byId.get('edit_document')!.mutating).toBe(true)
   })
 
   it('merges per-tool enabled flags from the database', () => {

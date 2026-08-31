@@ -163,6 +163,8 @@ describe('scheduler due check + tick', () => {
     name: 'W',
     graph: SIMPLE_GRAPH,
     webhookEnabled: false,
+    watch: null,
+    scheduleUpdatedAt: 0,
     createdAt: 0,
     updatedAt: 0,
   }

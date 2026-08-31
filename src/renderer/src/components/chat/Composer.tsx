@@ -17,6 +17,8 @@ import { useProvidersStore } from '@/stores/providers'
 import { usePromptsStore } from '@/stores/prompts'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
+import { sttReady, useVoiceStore } from '@/stores/voice'
+import { MicDeniedError, VoiceRecorder } from '@/lib/recorder'
 import { toNormalized, unwrap } from '@/api/uld'
 import ModelSelector from './ModelSelector'
 import './chat.css'
@@ -25,6 +27,8 @@ const MAX_TEXTAREA_HEIGHT = 240 // ~10 lines
 const CHAR_COUNT_THRESHOLD = 2000
 const MENTION_DEBOUNCE_MS = 150
 const MAX_PASTED_IMAGE_BYTES = 4 * 1024 * 1024
+// Mirrors the authoritative main-side cap (src/main/ipc/attachments.ts).
+const MAX_RAW_ATTACH_BYTES = Math.floor(4.5 * 1024 * 1024)
 const PASTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 function fileAsBase64(file: File): Promise<string> {
@@ -98,6 +102,8 @@ export default function Composer(): ReactElement {
   const [autoAcceptBusy, setAutoAcceptBusy] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<Attachment[] | null>(null)
+  // Attachment ids with a text-extraction/OCR call in flight.
+  const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set())
   const [confirmFlash, setConfirmFlash] = useState(false)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   // Slash-command / @-mention autocomplete state.
@@ -107,6 +113,12 @@ export default function Composer(): ReactElement {
   const [suggestIndex, setSuggestIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const confirmRef = useRef<HTMLDivElement>(null)
+
+  // Push-to-talk (offline whisper.cpp).
+  const voiceStatus = useVoiceStore((s) => s.status)
+  const [recState, setRecState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
+  const [recSeconds, setRecSeconds] = useState(0)
+  const recorderRef = useRef<VoiceRecorder | null>(null)
 
   useEffect(() => {
     void loadPrompts()
@@ -196,13 +208,60 @@ export default function Composer(): ReactElement {
     setValue(id ? (drafts.current.get(id) ?? '') : '')
     setAttachments([])
     setPendingFiles(null)
+    setExtractingIds(new Set())
     setMention(null)
     setMentionItems([])
     setSlashDismissed(false)
+    // A recording belongs to the conversation it was started in.
+    const recorder = recorderRef.current
+    if (recorder) {
+      recorderRef.current = null
+      void recorder.cancel()
+    }
+    setRecState('idle')
     return () => {
       if (id) drafts.current.set(id, valueRef.current)
     }
   }, [conversation?.id])
+
+  // Unmount (Home/Workflows navigation, lock screen): release the mic —
+  // otherwise the getUserMedia stream and worklet keep running for up to the
+  // 10-minute cap with the OS mic indicator lit.
+  useEffect(
+    () => () => {
+      const recorder = recorderRef.current
+      recorderRef.current = null
+      void recorder?.cancel()
+    },
+    []
+  )
+
+  // Recording elapsed-time ticker + Escape-to-cancel.
+  useEffect(() => {
+    if (recState !== 'recording') {
+      setRecSeconds(0)
+      return
+    }
+    const started = Date.now()
+    const ticker = window.setInterval(
+      () => setRecSeconds(Math.floor((Date.now() - started) / 1000)),
+      500
+    )
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      const recorder = recorderRef.current
+      recorderRef.current = null
+      void recorder?.cancel()
+      setRecState('idle')
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.clearInterval(ticker)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [recState])
 
   const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
   // Preset-aware: for the 120+ preset-backed 'openai-compatible' providers
@@ -214,6 +273,11 @@ export default function Composer(): ReactElement {
 
   const isStreaming = streaming !== null
   const disabled = !conversation || isStreaming || !usable
+
+  // Hidden until the whisper binary + active model are downloaded (charter:
+  // voice surfaces appear only once the model exists locally).
+  const voiceReady = sttReady(voiceStatus)
+  const micAvailable = settings?.voiceInputEnabled === true && voiceReady
 
   // -- slash-command menu -------------------------------------------------------
 
@@ -287,32 +351,54 @@ export default function Composer(): ReactElement {
     textareaRef.current?.focus()
   }
 
-  // -- @-file mentions ----------------------------------------------------------
+  // -- @-mentions (project files; teammate bots inside a bot chat) --------------
 
   const projectId = conversation?.projectId ?? null
+  // Bot chat (v46): @ suggests teammate handles instead of files — picking one
+  // inserts the handle so the bot brings that teammate in via message_agent.
+  const botChatAgentId = conversation?.agentId ?? null
 
   useEffect(() => {
-    if (!mention || !projectId) {
+    if (!mention || (!projectId && !botChatAgentId)) {
       setMentionItems([])
       return
     }
+    if (botChatAgentId) {
+      const query = mention.query.toLowerCase()
+      void window.uld.agents.list().then((res) => {
+        if (!res.ok) return setMentionItems([])
+        const handles = res.data
+          .filter((agent) => agent.enabled && agent.id !== botChatAgentId)
+          .map((agent) => agent.name.trim().toLowerCase().replace(/\s+/g, '-'))
+          .filter((slug) => slug && slug.includes(query))
+        setMentionItems(handles.slice(0, 8))
+      })
+      return
+    }
+    const pid = projectId
+    if (!pid) return
     const token = window.setTimeout(() => {
       void window.uld.code
-        .suggestFiles({ projectId, query: mention.query, limit: 8 })
+        .suggestFiles({ projectId: pid, query: mention.query, limit: 8 })
         .then((res) => setMentionItems(res.ok ? res.data : []))
     }, MENTION_DEBOUNCE_MS)
     return () => window.clearTimeout(token)
-  }, [mention, projectId])
+  }, [mention, projectId, botChatAgentId])
 
   const mentionVisible = !slashVisible && mention !== null && mentionItems.length > 0
 
   const pickMention = (relPath: string): void => {
     const m = mention
-    if (!m || !projectId) return
+    if (!m || (!projectId && !botChatAgentId)) return
     setValue((cur) => `${cur.slice(0, m.start)}@${relPath} ${cur.slice(m.end)}`)
     setMention(null)
     setMentionItems([])
     setSuggestIndex(0)
+    // A bot handle is just text — no file to attach.
+    if (botChatAgentId || !projectId) {
+      textareaRef.current?.focus()
+      return
+    }
     // Attach the mentioned file's content so the model actually sees it. An
     // explicit @-mention is an intentional share, so it skips the
     // warn-before-sending-files confirmation bar.
@@ -407,6 +493,11 @@ export default function Composer(): ReactElement {
       flashConfirm()
       return
     }
+    // Never send an attachment half-extracted — wait or remove it.
+    if (extractingIds.size > 0) {
+      toast('Wait for text extraction to finish, or remove the attachment.', 'error')
+      return
+    }
     const sentAttachments = attachments.length > 0 ? attachments : undefined
     const sendOpts = researchOn
       ? { research: researchDepth ? { depth: researchDepth } : {} }
@@ -430,10 +521,154 @@ export default function Composer(): ReactElement {
     })()
   }
 
+  // An attachment may sit in either list (still in the confirm bar or already
+  // staged) when an extraction lands, so patch both; unknown ids no-op.
+  const patchAttachment = (id: string, patch: Partial<Attachment>): void => {
+    const apply = (list: Attachment[]): Attachment[] =>
+      list.map((a) => (a.id === id ? { ...a, ...patch } : a))
+    setAttachments(apply)
+    setPendingFiles((prev) => (prev ? apply(prev) : prev))
+  }
+
+  const setExtracting = (id: string, on: boolean): void => {
+    setExtractingIds((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const runExtraction = (a: Attachment, method: 'text' | 'ocr'): void => {
+    if (!a.storageKey) return
+    setExtracting(a.id, true)
+    void window.uld.app
+      .extractAttachmentText({ storageKey: a.storageKey, method })
+      .then((res) => {
+        if (res.ok) {
+          if (!res.data.extractedText.trim()) {
+            // Nothing recognized: keep the chip honest — a PDF stays at
+            // 'none' so the OCR retry affordance survives, instead of
+            // claiming "OCR text extracted" over an empty result.
+            patchAttachment(a.id, {
+              extractedText: undefined,
+              extraction: a.kind === 'pdf' ? 'none' : a.extraction,
+            })
+            toast(`No text was recognized in ${a.name}.`, 'info')
+            return
+          }
+          patchAttachment(a.id, {
+            extractedText: res.data.extractedText,
+            extraction: res.data.extraction,
+          })
+        } else {
+          if (method === 'text') patchAttachment(a.id, { extraction: 'none' })
+          toast(`Could not extract text from ${a.name}: ${res.error.message}`, 'error')
+        }
+      })
+      .catch((error) => {
+        if (method === 'text') patchAttachment(a.id, { extraction: 'none' })
+        toast(`Could not extract text from ${a.name}: ${toNormalized(error).message}`, 'error')
+      })
+      .finally(() => setExtracting(a.id, false))
+  }
+
+  // Staged audio: transcribe with the local whisper model (renderer-side patch
+  // only — the attachment is persisted with the message on send).
+  const runAudioTranscription = (a: Attachment): void => {
+    if (!a.storageKey) return
+    setExtracting(a.id, true)
+    void window.uld.voice
+      .transcribeAttachment({ storageKey: a.storageKey })
+      .then((res) => {
+        if (res.ok) {
+          patchAttachment(a.id, {
+            extractedText: res.data.text.trim() ? res.data.text : undefined,
+            extraction: 'transcript',
+          })
+          if (!res.data.text.trim()) toast(`No speech was detected in ${a.name}.`, 'info')
+        } else {
+          toast(`Could not transcribe ${a.name}: ${res.error.message}`, 'error')
+        }
+      })
+      .catch((error) => {
+        toast(`Could not transcribe ${a.name}: ${toNormalized(error).message}`, 'error')
+      })
+      .finally(() => setExtracting(a.id, false))
+  }
+
+  const insertAtCaret = (text: string): void => {
+    const el = textareaRef.current
+    setValue((cur) => {
+      if (!el) return cur.trim().length > 0 ? `${cur} ${text}` : text
+      const start = el.selectionStart ?? cur.length
+      const end = el.selectionEnd ?? start
+      return `${cur.slice(0, start)}${text}${cur.slice(end)}`
+    })
+    textareaRef.current?.focus()
+  }
+
+  const stopRecording = async (): Promise<void> => {
+    const recorder = recorderRef.current
+    if (!recorder) return
+    recorderRef.current = null
+    setRecState('transcribing')
+    try {
+      const wav = await recorder.stop()
+      const text = await useVoiceStore.getState().sendRecording(wav)
+      if (text.trim()) insertAtCaret(text.trim())
+      else toast('No speech was detected.', 'info')
+    } catch (error) {
+      toast(`Transcription failed: ${toNormalized(error).message}`, 'error')
+    } finally {
+      setRecState('idle')
+      textareaRef.current?.focus()
+    }
+  }
+
+  const toggleRecording = async (): Promise<void> => {
+    if (recState === 'transcribing') return
+    if (recState === 'recording') {
+      await stopRecording()
+      return
+    }
+    const recorder = new VoiceRecorder()
+    recorder.onAutoStop = () => void stopRecording()
+    try {
+      await recorder.start()
+    } catch (error) {
+      if (error instanceof MicDeniedError) {
+        toast('Microphone access was denied — allow it in your OS privacy settings.', 'error')
+      } else {
+        toast(`Could not start recording: ${toNormalized(error).message}`, 'error')
+      }
+      return
+    }
+    recorderRef.current = recorder
+    setRecState('recording')
+  }
+
+  const removeStagedAttachment = (id: string): void => {
+    setAttachments((prev) => prev.filter((x) => x.id !== id))
+    // Late extraction results then no-op via patchAttachment.
+    setExtracting(id, false)
+  }
+
+  const cancelPendingFiles = (): void => {
+    setExtractingIds((prev) => {
+      if (!pendingFiles || prev.size === 0) return prev
+      const next = new Set(prev)
+      for (const file of pendingFiles) next.delete(file.id)
+      return next
+    })
+    setPendingFiles(null)
+  }
+
   const queueAttachments = (picked: Attachment[]): void => {
     let files = picked
     // Drop images the effective model can't see, rather than sending them to a
-    // text-only endpoint that would reject or ignore them.
+    // text-only endpoint that would reject or ignore them. PDFs stay: their
+    // extracted text works on any model.
     if (!visionSupported && files.some((f) => f.kind === 'image')) {
       files = files.filter((f) => f.kind !== 'image')
       toast('This model has no vision support — images were not attached.', 'info')
@@ -445,6 +680,12 @@ export default function Composer(): ReactElement {
       setPendingFiles((prev) => [...(prev ?? []), ...files])
     } else {
       setAttachments((prev) => [...prev, ...files])
+    }
+    // Freshly stored PDFs get their text layer extracted right away.
+    for (const file of files) {
+      if (file.kind === 'pdf' && file.storageKey && file.extraction === undefined) {
+        runExtraction(file, 'text')
+      }
     }
   }
 
@@ -598,7 +839,7 @@ export default function Composer(): ReactElement {
               // (which would stop an in-flight generation).
               e.preventDefault()
               e.stopPropagation()
-              setPendingFiles(null)
+              cancelPendingFiles()
               textareaRef.current?.focus()
             }
           }}
@@ -618,7 +859,7 @@ export default function Composer(): ReactElement {
             >
               Continue
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setPendingFiles(null)}>
+            <button type="button" className="btn btn-ghost" onClick={cancelPendingFiles}>
               Cancel
             </button>
           </div>
@@ -634,11 +875,76 @@ export default function Composer(): ReactElement {
               ) : null}
               <span className="composer-attachment-name">{a.name}</span>
               <span className="composer-attachment-size">{formatBytes(a.sizeBytes)}</span>
+              {a.kind === 'pdf' ? (
+                extractingIds.has(a.id) ? (
+                  <span className="composer-attachment-status">Extracting…</span>
+                ) : a.extraction === 'text' ? (
+                  <span className="composer-attachment-status">Text extracted</span>
+                ) : a.extraction === 'ocr' ? (
+                  <span className="composer-attachment-status">OCR text extracted</span>
+                ) : a.extraction === 'none' ? (
+                  <button
+                    type="button"
+                    className="composer-attachment-ocr"
+                    title="No text layer was found — run OCR (first use downloads language data)"
+                    onClick={() => runExtraction(a, 'ocr')}
+                  >
+                    Extract text (OCR)
+                  </button>
+                ) : null
+              ) : null}
+              {a.kind === 'pdf' && a.sizeBytes <= MAX_RAW_ATTACH_BYTES ? (
+                <label
+                  className="composer-attachment-raw"
+                  title="Send the original PDF to providers that support documents (Anthropic, Google); others receive the extracted text"
+                >
+                  <input
+                    type="checkbox"
+                    checked={a.rawAttach === true}
+                    onChange={() => patchAttachment(a.id, { rawAttach: !a.rawAttach })}
+                  />
+                  Send original PDF
+                </label>
+              ) : null}
+              {a.kind === 'image' ? (
+                extractingIds.has(a.id) ? (
+                  <span className="composer-attachment-status">Running OCR…</span>
+                ) : a.extractedText ? (
+                  <span className="composer-attachment-status">OCR text extracted</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="composer-attachment-ocr"
+                    title="Extract text from this image with OCR (first use downloads language data)"
+                    onClick={() => runExtraction(a, 'ocr')}
+                  >
+                    Extract text (OCR)
+                  </button>
+                )
+              ) : null}
+              {a.kind === 'audio' ? (
+                extractingIds.has(a.id) ? (
+                  <span className="composer-attachment-status">Transcribing…</span>
+                ) : a.extractedText ? (
+                  <span className="composer-attachment-status">Transcribed</span>
+                ) : voiceReady ? (
+                  <button
+                    type="button"
+                    className="composer-attachment-ocr"
+                    title="Transcribe this audio with the local whisper model"
+                    onClick={() => runAudioTranscription(a)}
+                  >
+                    Transcribe
+                  </button>
+                ) : (
+                  <span className="composer-attachment-status">Not transcribed</span>
+                )
+              ) : null}
               <button
                 type="button"
                 className="composer-attachment-remove"
                 aria-label={`Remove attachment ${a.name}`}
-                onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                onClick={() => removeStagedAttachment(a.id)}
               >
                 ×
               </button>
@@ -790,8 +1096,8 @@ export default function Composer(): ReactElement {
                     className="composer-plus-subcontrol"
                     title={
                       'read-only: the assistant may only investigate — every mutating tool is refused. ' +
-                      'workspace-write: file writes and shell commands stay inside the granted folder (default). ' +
-                      'full: shell commands may also target an absolute cwd outside the folder (each call still asks).'
+                      'workspace-write: audited file tools may write only inside the granted folder (default); shell is off. ' +
+                      'full: enables an unrestricted host shell (each call still asks).'
                     }
                   >
                     <span>Sandbox</span>
@@ -913,6 +1219,44 @@ export default function Composer(): ReactElement {
           />
           <ModelSelector placement="composer" />
         </div>
+        {micAvailable ? (
+          <button
+            type="button"
+            className={`btn-icon composer-mic${recState === 'recording' ? ' recording' : ''}`}
+            aria-label={
+              recState === 'recording'
+                ? 'Stop recording and transcribe'
+                : recState === 'transcribing'
+                  ? 'Transcribing'
+                  : 'Dictate a message'
+            }
+            title={
+              recState === 'recording'
+                ? 'Stop recording and transcribe (Esc cancels)'
+                : recState === 'transcribing'
+                  ? 'Transcribing…'
+                  : 'Dictate a message (offline)'
+            }
+            disabled={!conversation || isStreaming || recState === 'transcribing'}
+            onClick={() => void toggleRecording()}
+          >
+            {recState === 'transcribing' ? (
+              <span className="composer-mic-busy" aria-hidden>
+                …
+              </span>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
+                <path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6" />
+              </svg>
+            )}
+            {recState === 'recording' ? (
+              <span className="composer-mic-time">
+                {Math.floor(recSeconds / 60)}:{String(recSeconds % 60).padStart(2, '0')}
+              </span>
+            ) : null}
+          </button>
+        ) : null}
         {isStreaming ? (
           <button
             type="button"

@@ -32,8 +32,12 @@ import type {
 } from '@shared/remote-protocol'
 import { PairingGuard } from './pairing'
 import { RelayClient, relayWsUrl, type TunnelSocketFactory } from './relay-client'
-import { createRemoteRouter, REMOTE_PUSH_CHANNELS, type RemoteRequestInvoker } from './router'
-import { StaticServer } from './static'
+import {
+  createRemoteRouter,
+  remotePushAllowed,
+  REMOTE_PUSH_CHANNELS,
+  type RemoteRequestInvoker,
+} from './router'
 import {
   deriveFrameKey,
   generateAccessToken,
@@ -53,8 +57,6 @@ export interface RemoteServiceDeps {
   keystore: Pick<Keystore, 'encryptKey' | 'decryptKey'>
   /** The same handler map ipcMain serves — the phone runs the identical code. */
   handlers: IpcHandlerMap
-  /** Directory of the built mobile bundle (served through the tunnel). */
-  mobileDir: string
   appVersion: string
   socketFactory: TunnelSocketFactory
   /** Surfaced to the UI (toast) for tunnel errors. */
@@ -80,9 +82,26 @@ export function relayHttpOrigin(relayUrl: string): string | null {
   return `${secure ? 'https' : 'http'}://${parsed.host}`
 }
 
+/** Trusted browser client URL policy (it must be separate from the relay). */
+export function remoteClientUrl(input: string): string | null {
+  try {
+    const parsed = new URL(input)
+    const loopback =
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '[::1]'
+    if (parsed.protocol !== 'https:' && !(loopback && parsed.protocol === 'http:')) return null
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
 export class RemoteService {
   private readonly router: RemoteRequestInvoker
-  private readonly statics: StaticServer
+  /** False = private space; such conversations never reach a phone (v45). */
+  private readonly isConversationRemotable: (conversationId: string) => boolean
   private readonly pairing: PairingGuard
   private tunnel: RelayClient | null = null
   private tunnelKey = ''
@@ -93,14 +112,23 @@ export class RemoteService {
   private unsubscribeBus: (() => void) | null = null
 
   constructor(private readonly deps: RemoteServiceDeps) {
-    this.router = createRemoteRouter(deps.handlers)
-    this.statics = new StaticServer({ root: deps.mobileDir })
-    // The QR embeds the http origin the phone's browser should load; built
-    // lazily so an offer is always minted against the CURRENT relay settings.
+    this.isConversationRemotable = (id) => deps.db.conversations.getById(id)?.spaceId == null
+    this.router = createRemoteRouter(deps.handlers, {
+      isConversationRemotable: this.isConversationRemotable,
+    })
+    // Executable phone code comes from a separately trusted static origin;
+    // the untrusted relay receives only transport frames.
     this.pairing = new PairingGuard((secret) => {
       const settings = deps.db.settings.get()
-      const origin = settings.remoteRelayUrl ? relayHttpOrigin(settings.remoteRelayUrl) : null
-      return `${origin ?? ''}/${settings.remoteDesktopId ?? ''}/#p=${secret}`
+      const client = settings.remoteClientUrl ? remoteClientUrl(settings.remoteClientUrl) : null
+      if (!client || !settings.remoteRelayUrl || !settings.remoteDesktopId) return ''
+      const url = new URL(client)
+      url.hash = new URLSearchParams({
+        p: secret,
+        relay: settings.remoteRelayUrl,
+        desktop: settings.remoteDesktopId,
+      }).toString()
+      return url.toString()
     })
   }
 
@@ -113,6 +141,8 @@ export class RemoteService {
       settings.remoteAccessEnabled &&
       settings.remoteRelayUrl !== null &&
       settings.remoteRelayUrl.trim().length > 0 &&
+      settings.remoteClientUrl !== null &&
+      remoteClientUrl(settings.remoteClientUrl) !== null &&
       relayWsUrl(settings.remoteRelayUrl) !== null &&
       process.env.SMOKE_TEST !== '1'
     if (!shouldRun) {
@@ -121,7 +151,9 @@ export class RemoteService {
     }
     if (!settings.remoteDesktopId) {
       // Public routing id — minted once, first time the tunnel is enabled.
-      this.deps.db.settings.update({ remoteDesktopId: randomBytes(8).toString('hex') })
+      // 128-bit (matches the relay's documented assumption): it gates the
+      // anonymous pairing route, so it must not be guessable.
+      this.deps.db.settings.update({ remoteDesktopId: randomBytes(16).toString('hex') })
     }
     // Re-read after the possible mint above: the snapshot's desktopId is
     // stale in exactly that case, and a key built from it would tear the
@@ -174,9 +206,6 @@ export class RemoteService {
         }
         this.notifyDevicesChanged()
       },
-      onHttp: (req) => {
-        void this.handleHttp(req)
-      },
     })
     this.tunnel.start()
     if (!this.unsubscribeBus) {
@@ -212,6 +241,7 @@ export class RemoteService {
     return {
       enabled: settings.remoteAccessEnabled,
       relayUrl: settings.remoteRelayUrl,
+      clientUrl: settings.remoteClientUrl,
       connected: this.connected,
       error: this.tunnelError,
       desktopId: settings.remoteDesktopId,
@@ -228,7 +258,11 @@ export class RemoteService {
    * matches every outbound URL in the app: https (or wss) anywhere, plaintext
    * only on loopback — enforced here, before it is ever stored.
    */
-  setConfig(input: { enabled: boolean; relayUrl?: string | null }): RemoteStatus {
+  setConfig(input: {
+    enabled: boolean
+    relayUrl?: string | null
+    clientUrl?: string | null
+  }): RemoteStatus {
     const patch: Partial<AppSettings> = { remoteAccessEnabled: input.enabled }
     if (input.relayUrl !== undefined) {
       const trimmed = input.relayUrl?.trim() ?? ''
@@ -241,6 +275,26 @@ export class RemoteService {
         }
         patch.remoteRelayUrl = trimmed
       }
+    }
+    if (input.clientUrl !== undefined) {
+      const trimmed = input.clientUrl?.trim() ?? ''
+      if (trimmed.length === 0) {
+        if (input.enabled) throw new Error('A trusted mobile client URL is required.')
+        patch.remoteClientUrl = null
+      } else {
+        const normalized = remoteClientUrl(trimmed)
+        if (!normalized) throw new Error('The mobile client URL must be https:// (or localhost).')
+        patch.remoteClientUrl = normalized
+      }
+    }
+    const current = this.deps.db.settings.get()
+    const relay = patch.remoteRelayUrl ?? current.remoteRelayUrl
+    const client = patch.remoteClientUrl ?? current.remoteClientUrl
+    if (input.enabled && (!relay || !client)) {
+      throw new Error('Both a relay URL and a trusted mobile client URL are required.')
+    }
+    if (relay && client && relayHttpOrigin(relay) === new URL(client).origin) {
+      throw new Error('The mobile client must be hosted on a different origin from the relay.')
     }
     this.deps.db.settings.update(patch)
     if (!input.enabled) this.pairing.cancel()
@@ -257,11 +311,17 @@ export class RemoteService {
       return this.status()
     }
     const settings = this.deps.db.settings.get()
-    if (!settings.remoteAccessEnabled || !settings.remoteRelayUrl || !settings.remoteDesktopId) {
+    if (
+      !settings.remoteAccessEnabled ||
+      !settings.remoteRelayUrl ||
+      !settings.remoteClientUrl ||
+      !settings.remoteDesktopId
+    ) {
       throw new Error('Enable remote access and connect a relay first.')
     }
-    if (relayHttpOrigin(settings.remoteRelayUrl) === null) {
-      throw new Error('The relay URL is not usable for pairing.')
+    const client = remoteClientUrl(settings.remoteClientUrl)
+    if (!client || relayHttpOrigin(settings.remoteRelayUrl) === new URL(client).origin) {
+      throw new Error('Pairing requires a trusted mobile client on a separate origin.')
     }
     this.pairing.issue()
     this.deps.onChanged()
@@ -306,6 +366,10 @@ export class RemoteService {
       return
     }
     if (inner.t === 'req') {
+      // The sequence is inside the authenticated ciphertext. The atomic DB
+      // claim survives reconnects/restarts, so a captured mutating frame can
+      // never be executed twice.
+      if (!this.deps.db.remoteDevices.claimRequestSequence(deviceId, inner.seq)) return
       const result = await this.router(inner.channel, inner.args)
       this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'res', id: inner.id, result }))
       return
@@ -361,37 +425,13 @@ export class RemoteService {
     this.deps.onChanged()
   }
 
-  /** Serves one tunnelled asset request from the phone's browser. */
-  private async handleHttp(req: { reqId: string; method: string; path: string }): Promise<void> {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      this.sendHttp(req.reqId, 405, 'text/plain', null, 'Use GET.')
-      return
-    }
-    const response = await this.statics.serve(req.path)
-    this.sendHttp(req.reqId, response.status, response.contentType, response.etag, response.body)
-  }
-
-  private sendHttp(
-    reqId: string,
-    status: number,
-    contentType: string,
-    etag: string | null,
-    body: Buffer | string
-  ): void {
-    this.tunnel?.send({
-      t: 'http-res',
-      reqId,
-      status,
-      contentType,
-      etag,
-      body: Buffer.from(body).toString('base64'),
-    })
-  }
-
   /** Forwards one bus push to every online device, sealed per device. */
   private forwardPush(channel: string, payload: unknown): void {
     if (!this.tunnel || this.onlineDevices.size === 0) return
     if (!REMOTE_PUSH_CHANNELS.has(channel)) return
+    // Private-space frames (stream text, approvals, list refreshes naming the
+    // conversation) are dropped before sealing — they must never leave the box.
+    if (!remotePushAllowed(channel, payload, this.isConversationRemotable)) return
     for (const deviceId of this.onlineDevices) {
       const key = this.deviceKey(deviceId)
       if (!key) continue

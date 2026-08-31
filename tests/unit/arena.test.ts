@@ -47,6 +47,7 @@ async function until(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 
 interface FakePorts {
   files?: GitFileChange[]
+  failCreateAt?: number
   generate?: (
     prompt: string,
     providerId: string | undefined,
@@ -65,6 +66,7 @@ function makeService(ports: FakePorts = {}) {
     git: {
       createWorktree: async (_root, wtDir, projectId, name) => {
         worktreeIndex += 1
+        if (worktreeIndex === ports.failCreateAt) throw new Error('worktree setup failed')
         const path = join(wtDir, `${projectId}-${name ?? 'wt'}-${worktreeIndex}`)
         mkdirSync(path, { recursive: true })
         return { path, branch: `grasberg/${name ?? 'wt'}-${worktreeIndex}`, projectId }
@@ -86,10 +88,10 @@ function makeService(ports: FakePorts = {}) {
     code: {
       openProject: (path) => db.code.projectUpsertByPath(path, 'wt'),
       proposeChange: (_cid, relPath, changeType, content) => {
-        proposed.push({ relPath, changeType, content })
+        proposed.push({ relPath, changeType, content: content ?? '' })
         return { id: `chg-${proposed.length}` }
       },
-      applyChange: (changeId) => changeId,
+      applyChangesAtomically: (changeIds) => changeIds,
     },
     worktreesDir,
     broadcast: vi.fn(),
@@ -126,6 +128,21 @@ describe('ArenaService', () => {
     expect(db.agentPlatform.runsList(conversationId).every((r) => r.status === 'done')).toBe(true)
   })
 
+  it('rolls back candidates already created when later setup fails', async () => {
+    const { service, removed } = makeService({ failCreateAt: 2 })
+
+    await expect(
+      service.start({ conversationId, task: 'Fix the bug', candidates: CANDIDATES })
+    ).rejects.toThrow('worktree setup failed')
+
+    expect(service.status(conversationId)).toBeNull()
+    expect(removed).toHaveLength(1)
+    expect(removed[0].startsWith(worktreesDir)).toBe(true)
+    expect(db.agentPlatform.runsList(conversationId)).toMatchObject([
+      { status: 'stopped', result: 'Candidate setup was rolled back.' },
+    ])
+  })
+
   it('refuses to start without a folder, with bad counts, or while running', async () => {
     const bare = db.conversations.create({ mode: 'work' }).id
     const { service } = makeService()
@@ -153,12 +170,13 @@ describe('ArenaService', () => {
     ).toBe(true)
   })
 
-  it('applies the winner through the change pipeline (create vs edit) and skips deletions', async () => {
+  it('applies creates, edits, deletions, and renames through one change batch', async () => {
     const { service, proposed } = makeService({
       files: [
         { path: 'new-file.ts', status: 'A' },
         { path: 'existing.ts', status: 'M' },
         { path: 'gone.ts', status: 'D' },
+        { path: 'renamed.ts', oldPath: 'old-name.ts', status: 'R' },
       ],
     })
     await service.start({ conversationId, task: 'Fix', candidates: CANDIDATES })
@@ -168,6 +186,7 @@ describe('ArenaService', () => {
     // Seed the winner's worktree with the files its diff claims.
     writeFileSync(join(winner.worktreePath, 'new-file.ts'), 'brand new\n')
     writeFileSync(join(winner.worktreePath, 'existing.ts'), 'updated content\n')
+    writeFileSync(join(winner.worktreePath, 'renamed.ts'), 'renamed content\n')
 
     const applied = await service.apply(conversationId, winner.runId)
     expect(applied.status).toBe('applied')
@@ -175,11 +194,28 @@ describe('ArenaService', () => {
     expect(proposed).toEqual([
       { relPath: 'new-file.ts', changeType: 'create', content: 'brand new\n' },
       { relPath: 'existing.ts', changeType: 'edit', content: 'updated content\n' },
+      { relPath: 'gone.ts', changeType: 'delete', content: '' },
+      { relPath: 'old-name.ts', changeType: 'delete', content: '' },
+      { relPath: 'renamed.ts', changeType: 'create', content: 'renamed content\n' },
     ])
     // Second apply is refused.
     await expect(service.apply(conversationId, state.candidates[1].runId)).rejects.toThrow(
       /already been applied/i
     )
+  })
+
+  it('never degrades a rename with a missing replacement into a deletion', async () => {
+    const { service, proposed } = makeService({
+      files: [{ path: 'missing-new-name.ts', oldPath: 'existing.ts', status: 'R' }],
+    })
+    await service.start({ conversationId, task: 'Rename', candidates: CANDIDATES })
+    await until(() => service.status(conversationId)?.status === 'finished')
+    const winner = service.status(conversationId)!.candidates[0]
+
+    await expect(service.apply(conversationId, winner.runId)).rejects.toThrow(
+      /replacement .* is not readable/i
+    )
+    expect(proposed).toEqual([])
   })
 
   it('discard removes only worktrees under the app-owned directory', async () => {
@@ -209,6 +245,32 @@ describe('ArenaService', () => {
     expect(state.candidates[0].status).toBe('error')
     expect(state.candidates[0].summary).toMatch(/provider exploded/)
     expect(state.candidates[1].status).toBe('done')
+  })
+
+  it('runs each evolutionary round exactly once (no double execution)', async () => {
+    // Regression guard: seeded candidates must run on the loop's next pass only,
+    // never an extra time in the round that created them. For 2 rounds × 2
+    // models that is 4 candidate generations (not 6) and 1 judge call.
+    let candidateGenerations = 0
+    let judgeGenerations = 0
+    const { service } = makeService({
+      generate: async (_prompt, _providerId, modelId, opts) => {
+        if (opts.json) {
+          judgeGenerations += 1
+          return '{"winnerIndex": 1}'
+        }
+        candidateGenerations += 1
+        return `done by ${modelId}`
+      },
+    })
+    await service.start({ conversationId, task: 'Evolve it', candidates: CANDIDATES, rounds: 2 })
+    await until(() => service.status(conversationId)?.status === 'finished')
+    expect(candidateGenerations).toBe(4)
+    expect(judgeGenerations).toBe(1)
+    const state = service.status(conversationId)!
+    expect(state.totalRounds).toBe(2)
+    // Round 1's two candidates + round 2's two seeded candidates.
+    expect(state.candidates).toHaveLength(4)
   })
 
   it('arenaPrompt frames the race and embeds the task', () => {

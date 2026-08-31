@@ -94,6 +94,31 @@ describe('relay server', () => {
     expect(await res.json()).toMatchObject({ ok: true })
   })
 
+  it('accepts browser sockets only from the configured trusted client origin', async () => {
+    const refused = new WebSocket(wsUrl(), { origin: 'https://mobile.example.com' })
+    const refusedResult = await new Promise<'open' | 'error'>((resolve) => {
+      refused.once('open', () => resolve('open'))
+      refused.once('error', () => resolve('error'))
+    })
+    expect(refusedResult).toBe('error')
+
+    await relay.stop()
+    relay = new RelayServer({
+      port: 0,
+      host: '127.0.0.1',
+      storePath: join(dir, 'store.json'),
+      mobileOrigin: 'https://mobile.example.com',
+    })
+    await relay.start()
+    port = relay.port!
+    const allowed = new WebSocket(wsUrl(), { origin: 'https://mobile.example.com' })
+    await new Promise((resolve, reject) => {
+      allowed.once('open', resolve)
+      allowed.once('error', reject)
+    })
+    allowed.close()
+  })
+
   it('registers a desktop trust-on-first-use and accepts the same token again', async () => {
     const first = await connectedDesktop()
     const second = await connectedDesktop() // same id + token replaces silently
@@ -228,30 +253,9 @@ describe('relay server', () => {
     expect(welcome.ok).toBe(false)
   })
 
-  it('tunnels HTTP asset requests to the desktop and back', async () => {
-    const desktop = await connectedDesktop()
-    const httpPromise = fetch(`http://127.0.0.1:${port}/${DESKTOP}/index.html`)
-    const req = await nextMessage<{ reqId: string; path: string }>(desktop, (f) => f.t === 'http')
-    expect(req.path).toBe('/index.html')
-    desktop.send(
-      JSON.stringify({
-        t: 'http-res',
-        reqId: req.reqId,
-        status: 200,
-        contentType: 'text/html',
-        etag: '"x1"',
-        body: Buffer.from('<html>hi</html>').toString('base64'),
-      })
-    )
-    const res = await httpPromise
-    expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toBe('text/html')
-    expect(await res.text()).toBe('<html>hi</html>')
-  })
-
-  it('HTTP for an offline desktop answers 503', async () => {
+  it('never serves executable desktop assets', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/unknown-desktop/`)
-    expect(res.status).toBe(503)
+    expect(res.status).toBe(404)
   })
 
   it('persists hashes: a restarted relay still knows the desktop token', async () => {
@@ -324,41 +328,4 @@ describe('relay server', () => {
     device.close()
   })
 
-  it('answers 503 immediately for a desktop known only from the store', async () => {
-    await connectedDesktop()
-    await relay.stop()
-    // Placeholder warm-up: the store knows the desktop, but its socket is
-    // null — HTTP must refuse now, not 504 after the tunnel timeout.
-    const restarted = new RelayServer({ port: 0, host: '127.0.0.1', storePath: join(dir, 'store.json') })
-    await restarted.start()
-    try {
-      const started = Date.now()
-      const res = await fetch(`http://127.0.0.1:${restarted.port}/${DESKTOP}/`)
-      expect(res.status).toBe(503)
-      expect(Date.now() - started).toBeLessThan(1000)
-    } finally {
-      await restarted.stop()
-    }
-  })
-
-  it('serves HEAD with headers but no body', async () => {
-    const desktop = await connectedDesktop()
-    const httpPromise = fetch(`http://127.0.0.1:${port}/${DESKTOP}/index.html`, { method: 'HEAD' })
-    const req = await nextMessage<{ reqId: string; method: string }>(desktop, (f) => f.t === 'http')
-    expect(req.method).toBe('HEAD')
-    desktop.send(
-      JSON.stringify({
-        t: 'http-res',
-        reqId: req.reqId,
-        status: 200,
-        contentType: 'text/html',
-        etag: null,
-        body: Buffer.from('<html>hi</html>').toString('base64'),
-      })
-    )
-    const res = await httpPromise
-    expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toBe('text/html')
-    expect(await res.text()).toBe('')
-  })
 })

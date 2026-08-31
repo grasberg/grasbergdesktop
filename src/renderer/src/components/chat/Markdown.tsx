@@ -56,6 +56,16 @@ function normalizeMathDelimiters(src: string): string {
 
 let mermaidSeq = 0
 
+/** SVG-as-image runs in the browser's scriptless SVG image mode. */
+function svgImageDataUrl(svg: string): string {
+  const bytes = new TextEncoder().encode(svg)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return `data:image/svg+xml;base64,${btoa(binary)}`
+}
+
 /**
  * Renders a ```mermaid fence as a diagram once the source parses; while the
  * source is incomplete (streaming) or invalid it shows the plain code block.
@@ -70,7 +80,7 @@ function MermaidBlock({
   fallback: ReactNode
 }): ReactElement {
   const resolvedTheme = useUiStore((s) => s.resolvedTheme)
-  const [svg, setSvg] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -85,12 +95,12 @@ function MermaidBlock({
             theme: resolvedTheme === 'dark' ? 'dark' : 'default',
           })
           const rendered = await mermaid.render(id, source)
-          if (!cancelled) setSvg(rendered.svg)
+          if (!cancelled) setImageUrl(svgImageDataUrl(rendered.svg))
         })
         .catch(() => {
           // mermaid can leave its scratch element behind on a parse failure.
           document.getElementById(`d${id}`)?.remove()
-          if (!cancelled) setSvg(null)
+          if (!cancelled) setImageUrl(null)
         })
     }, 200)
     return () => {
@@ -99,8 +109,12 @@ function MermaidBlock({
     }
   }, [source, resolvedTheme])
 
-  if (!svg) return <>{fallback}</>
-  return <div className="chat-mermaid" dangerouslySetInnerHTML={{ __html: svg }} />
+  if (!imageUrl) return <>{fallback}</>
+  return (
+    <div className="chat-mermaid">
+      <img src={imageUrl} alt="Mermaid diagram" />
+    </div>
+  )
 }
 
 /** Languages whose code blocks offer a sandboxed live preview. */

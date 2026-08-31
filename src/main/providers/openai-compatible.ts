@@ -53,8 +53,24 @@ export function toWireMessage(m: AdapterMessage): Record<string, unknown> {
     return { role: 'tool', tool_call_id: m.toolCallId ?? '', content }
   }
   // Array content (text + image parts) passes straight through; OpenAI-
-  // compatible vision endpoints accept the parts array as `content`.
-  const wire: Record<string, unknown> = { role: m.role, content: m.content }
+  // compatible vision endpoints accept the parts array as `content`. Document
+  // parts are the exception: these endpoints reject unknown part types, so
+  // they are substituted with their extracted text. The original array is
+  // returned untouched when no document part is present.
+  let content = m.content
+  if (Array.isArray(content) && content.some((p) => p.type === 'document')) {
+    content = content.map((p) =>
+      p.type === 'document'
+        ? {
+            type: 'text',
+            text:
+              p.fallbackText ??
+              `[Attached PDF: ${p.name ?? 'document'} — not supported by this provider]`,
+          }
+        : p
+    )
+  }
+  const wire: Record<string, unknown> = { role: m.role, content }
   if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
     wire.tool_calls = m.toolCalls.map((tc) => ({
       id: tc.id,

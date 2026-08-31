@@ -113,11 +113,19 @@ function partsToText(parts: ContentPart[]): string {
 /** Map user content (string or text/image parts) to Responses input parts. */
 function userContent(content: string | ContentPart[]): Record<string, unknown>[] {
   if (typeof content === 'string') return [{ type: 'input_text', text: content }]
-  return content.map((p) =>
-    p.type === 'text'
-      ? { type: 'input_text', text: p.text }
-      : { type: 'input_image', image_url: p.image_url.url }
-  )
+  return content.map((p) => {
+    if (p.type === 'text') return { type: 'input_text', text: p.text }
+    // No PDF part in this adapter — strip and substitute the extracted text.
+    if (p.type === 'document') {
+      return {
+        type: 'input_text',
+        text:
+          p.fallbackText ??
+          `[Attached PDF: ${p.name ?? 'document'} — not supported by this provider]`,
+      }
+    }
+    return { type: 'input_image', image_url: p.image_url.url }
+  })
 }
 
 /** Responses uses a flat function-tool shape (no nested `function` object). */

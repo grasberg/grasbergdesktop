@@ -30,6 +30,7 @@ type ScheduleFields = Pick<Workflow, 'schedule' | 'scheduleEnabled' | 'lastRunAt
    * last edited. Omitted means "now", i.e. the next matching slot from here.
    */
   updatedAt?: number
+  scheduleUpdatedAt?: number
 }
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -94,7 +95,14 @@ export function nextCalendarSlot(schedule: WorkflowCalendarSchedule, after: numb
 export function nextRunAt(w: ScheduleFields, now: number): number | null {
   if (!w.schedule || !w.scheduleEnabled) return null
   if (w.schedule.kind === 'calendar') {
-    return nextCalendarSlot(w.schedule, w.lastRunAt ?? w.updatedAt ?? now)
+    // Unrelated edits must not erase catch-up, but a schedule edit must anchor
+    // the newly configured calendar after the edit rather than firing an old
+    // missed slot. Older callers without scheduleUpdatedAt retain the previous
+    // updatedAt fallback.
+    return nextCalendarSlot(
+      w.schedule,
+      Math.max(w.lastRunAt ?? -Infinity, w.scheduleUpdatedAt ?? w.updatedAt ?? now)
+    )
   }
   if (w.lastRunAt === null) return now
   return w.lastRunAt + w.schedule.everyMinutes * 60_000

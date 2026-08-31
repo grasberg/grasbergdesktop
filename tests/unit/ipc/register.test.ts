@@ -202,6 +202,29 @@ describe('conv:fork', () => {
     ])
   })
 
+  it('strips usage from copied rows so budget aggregates never double-count (v44)', async () => {
+    const sourceId = seed()
+    const assistant = db.messages.listByConversation(sourceId).find((m) => m.role === 'assistant')!
+    db.messages.update(assistant.id, {
+      usage: { promptTokens: 100, completionTokens: 50 },
+      providerId: 'p1',
+      modelId: 'm-priced',
+    })
+    const rowsBefore = db.messages.usageSince(0).length
+    expect(rowsBefore).toBe(1)
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, { id: sourceId })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    // Cost attribution stays with the source: no copied row carries usage,
+    // so globalMonthSpend / the fork's HUD see nothing new.
+    const copied = db.messages.listByConversation(result.data.id)
+    expect(copied.every((m) => m.usage === undefined)).toBe(true)
+    expect(db.messages.usageSince(0).length).toBe(rowsBefore)
+    expect(db.messages.usageForConversationSince(result.data.id, 0)).toEqual([])
+  })
+
   it('keeps the knowledge-base attachment of the source conversation', async () => {
     const kb = db.knowledge.create({ name: 'Docs', providerId: 'p', modelId: 'e' })
     const sourceId = seed()
@@ -227,6 +250,200 @@ describe('conv:fork', () => {
 
     expect(result.ok).toBe(false)
     expect(db.conversations.list().map((c) => c.id)).toEqual([sourceId])
+  })
+
+  it('forks at a mid-transcript message: prefix only, original seqs, fresh ids, provenance', async () => {
+    const sourceId = seed()
+    const source = db.messages.listByConversation(sourceId)
+    const target = source.find((m) => m.seq === 2)!
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, {
+      id: sourceId,
+      messageId: target.id,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const copied = db.messages.listByConversation(result.data.id)
+    expect(copied.map((m) => [m.seq, m.content])).toEqual([
+      [1, 'm1'],
+      [2, 'm2'],
+    ])
+    const sourceIds = new Set(source.map((m) => m.id))
+    expect(copied.every((m) => !sourceIds.has(m.id))).toBe(true)
+
+    const fork = db.conversations.getById(result.data.id)!
+    expect(fork.title).toBe('Source (fork)')
+    expect(fork.parentConversationId).toBe(sourceId)
+    expect(fork.forkedAtMessageId).toBe(target.id)
+  })
+
+  it('records the last message as the fork point when messageId is omitted', async () => {
+    const sourceId = seed()
+    const last = db.messages.listByConversation(sourceId).find((m) => m.seq === 3)!
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, { id: sourceId })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(db.conversations.getById(result.data.id)?.forkedAtMessageId).toBe(last.id)
+  })
+
+  it("rejects a messageId from a different conversation (no fork row survives)", async () => {
+    const sourceId = seed()
+    const other = db.conversations.create({ mode: 'chat', title: 'Other' })
+    const foreign: Message = {
+      id: randomUUID(),
+      conversationId: other.id,
+      role: 'user',
+      content: 'elsewhere',
+      seq: 1,
+      status: 'complete',
+      createdAt: Date.now(),
+    }
+    db.messages.insert(foreign)
+
+    const result = await invoke(CHANNELS.convFork, { id: sourceId, messageId: foreign.id })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('invalid_request')
+    expect(db.conversations.list().map((c) => c.id).sort()).toEqual([sourceId, other.id].sort())
+  })
+
+  it('copies the source params onto the fork', async () => {
+    const sourceId = seed()
+    db.conversations.update(sourceId, { params: { temperature: 0.2 } })
+
+    const result = await invoke<{ id: string; params: { temperature?: number } }>(
+      CHANNELS.convFork,
+      { id: sourceId }
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.data.params.temperature).toBe(0.2)
+    expect(db.conversations.getById(result.data.id)?.params.temperature).toBe(0.2)
+  })
+
+  it('keeps the compaction summary when forking at/after the compaction point', async () => {
+    const sourceId = seed()
+    db.conversations.setSummary(sourceId, 'sum', 2)
+    const target = db.messages.listByConversation(sourceId).find((m) => m.seq === 3)!
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, {
+      id: sourceId,
+      messageId: target.id,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(db.conversations.getById(result.data.id)).toMatchObject({
+      summaryText: 'sum',
+      summaryThroughSeq: 2,
+    })
+  })
+
+  it('drops the compaction summary when forking before the compaction point', async () => {
+    const sourceId = seed()
+    db.conversations.setSummary(sourceId, 'sum', 2)
+    const target = db.messages.listByConversation(sourceId).find((m) => m.seq === 1)!
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, {
+      id: sourceId,
+      messageId: target.id,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(db.conversations.getById(result.data.id)).toMatchObject({
+      summaryText: null,
+      summaryThroughSeq: null,
+    })
+  })
+
+  it("copies a 'streaming' source message as 'stopped' (a copy can never resume)", async () => {
+    const sourceId = seed()
+    const streaming: Message = {
+      id: randomUUID(),
+      conversationId: sourceId,
+      role: 'assistant',
+      content: 'partial',
+      seq: 4,
+      status: 'streaming',
+      createdAt: Date.now(),
+    }
+    db.messages.insert(streaming)
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, { id: sourceId })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const copy = db.messages.listByConversation(result.data.id).find((m) => m.seq === 4)!
+    expect(copy.status).toBe('stopped')
+  })
+
+  it('shares attachment storage instead of duplicating files (same storageKey)', async () => {
+    const sourceId = seed()
+    const withImage: Message = {
+      id: randomUUID(),
+      conversationId: sourceId,
+      role: 'user',
+      content: 'look',
+      seq: 4,
+      status: 'complete',
+      createdAt: Date.now(),
+      attachments: [
+        { id: 'a1', name: 'pic.png', mimeType: 'image/png', sizeBytes: 12, kind: 'image', storageKey: 'k.png' },
+      ],
+    }
+    db.messages.insert(withImage)
+
+    const result = await invoke<{ id: string }>(CHANNELS.convFork, { id: sourceId })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const copy = db.messages.listByConversation(result.data.id).find((m) => m.seq === 4)!
+    expect(copy.attachments?.[0].storageKey).toBe('k.png')
+  })
+})
+
+describe('conv:forkLineage', () => {
+  it('resolves parent and sibling forks; the source itself has neither', async () => {
+    const source = db.conversations.create({ mode: 'chat', title: 'Source' })
+    const forkA = await invoke<{ id: string }>(CHANNELS.convFork, { id: source.id })
+    const forkB = await invoke<{ id: string }>(CHANNELS.convFork, { id: source.id })
+    expect(forkA.ok && forkB.ok).toBe(true)
+    if (!forkA.ok || !forkB.ok) return
+
+    const lineageA = await invoke<{ parent: unknown; siblings: Array<{ id: string }> }>(
+      CHANNELS.convForkLineage,
+      forkA.data.id
+    )
+    expect(lineageA.ok).toBe(true)
+    if (!lineageA.ok) return
+    expect(lineageA.data.parent).toEqual({ id: source.id, title: 'Source' })
+    expect(lineageA.data.siblings.map((s) => s.id)).toEqual([forkB.data.id])
+
+    const sourceLineage = await invoke<{ parent: unknown; siblings: unknown[] }>(
+      CHANNELS.convForkLineage,
+      source.id
+    )
+    expect(sourceLineage.ok).toBe(true)
+    if (!sourceLineage.ok) return
+    expect(sourceLineage.data).toEqual({ parent: null, siblings: [] })
+  })
+
+  it('survives a deleted parent: parent null, siblings still listed', async () => {
+    const source = db.conversations.create({ mode: 'chat', title: 'Source' })
+    const forkA = await invoke<{ id: string }>(CHANNELS.convFork, { id: source.id })
+    const forkB = await invoke<{ id: string }>(CHANNELS.convFork, { id: source.id })
+    expect(forkA.ok && forkB.ok).toBe(true)
+    if (!forkA.ok || !forkB.ok) return
+
+    expect((await invoke(CHANNELS.convDelete, source.id)).ok).toBe(true)
+
+    const lineage = await invoke<{ parent: unknown; siblings: Array<{ id: string }> }>(
+      CHANNELS.convForkLineage,
+      forkA.data.id
+    )
+    expect(lineage.ok).toBe(true)
+    if (!lineage.ok) return
+    expect(lineage.data.parent).toBeNull()
+    expect(lineage.data.siblings.map((s) => s.id)).toEqual([forkB.data.id])
   })
 })
 
@@ -473,5 +690,55 @@ describe('activity:list', () => {
       if (result.ok) continue
       expect(result.error.code).toBe('invalid_request')
     }
+  })
+})
+
+describe('documents (notebooks)', () => {
+  it('creates and rejects an extra key (strict schema)', async () => {
+    const created = await invoke<{ id: string; title: string }>(CHANNELS.documentsCreate, {
+      title: 'Plan',
+      content: 'v1',
+    })
+    expect(created.ok).toBe(true)
+    if (!created.ok) return
+    expect(created.data.title).toBe('Plan')
+    expect(db.documents.getById(created.data.id)?.content).toBe('v1')
+
+    const rejected = await invoke(CHANNELS.documentsCreate, { title: 'X', extra: 1 })
+    expect(rejected.ok).toBe(false)
+  })
+
+  it('update and revert on missing targets return ok:false', async () => {
+    const update = await invoke(CHANNELS.documentsUpdate, 'ghost', { content: 'x' })
+    expect(update.ok).toBe(false)
+
+    const doc = db.documents.create({ title: 'Note', content: 'v1' })
+    const revert = await invoke(CHANNELS.documentsRevert, { id: doc.id, versionId: 999 })
+    expect(revert.ok).toBe(false)
+  })
+
+  it('listVersions reflects an update made through the update handler', async () => {
+    const doc = db.documents.create({ title: 'Note', content: 'v1' })
+    expect((await invoke(CHANNELS.documentsUpdate, doc.id, { content: 'v2' })).ok).toBe(true)
+
+    const versions = await invoke<Array<{ contentLength: number; content?: string }>>(
+      CHANNELS.documentsListVersions,
+      doc.id
+    )
+    expect(versions.ok).toBe(true)
+    if (!versions.ok) return
+    // Summary shape over IPC: the length of 'v1', never the content itself.
+    expect(versions.data.map((v) => v.contentLength)).toEqual(['v1'.length])
+    expect(versions.data.every((v) => v.content === undefined)).toBe(true)
+  })
+
+  it('export returns canceled under the mocked save dialog; delete removes the doc', async () => {
+    const doc = db.documents.create({ title: 'Note', content: 'v1' })
+    const exported = await invoke<{ canceled: boolean }>(CHANNELS.documentsExport, doc.id)
+    expect(exported.ok).toBe(true)
+    if (exported.ok) expect(exported.data.canceled).toBe(true)
+
+    expect((await invoke(CHANNELS.documentsDelete, doc.id)).ok).toBe(true)
+    expect(db.documents.getById(doc.id)).toBeNull()
   })
 })

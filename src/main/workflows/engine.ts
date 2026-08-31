@@ -45,6 +45,8 @@ export interface RunAgentOptions {
   signal?: AbortSignal
   /** Route to the configured economy model (dry runs; explicit ids still win). */
   economy?: boolean
+  /** Spend attribution + budget scope for the headless_usage ledger (v44). */
+  usage?: { runKind: 'workflow'; refId?: string | null }
 }
 
 export interface WorkflowEngineDeps {

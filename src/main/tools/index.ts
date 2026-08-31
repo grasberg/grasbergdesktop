@@ -84,6 +84,8 @@ export interface CreateToolSystemOptions {
   knowledgeSearch?: ToolExecutorDeps['knowledgeSearch']
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: ToolExecutorDeps['delegate']
+  /** Bot Mode: fire-and-forget bot-to-bot delivery for 'message_agent' (wired to BotService). */
+  botMessenger?: NonNullable<ToolExecutorDeps['botMessenger']>
   /** Text-to-image for 'generate_image' (wired to ChatService.generateImage). */
   imageGeneration?: NonNullable<ToolExecutorDeps['imageGeneration']>
   /** Local git writes for 'git_write' (wired to GitService). */
@@ -104,6 +106,11 @@ export interface CreateToolSystemOptions {
    * push CHANNELS.scheduledTasksChanged to the renderer.
    */
   onScheduledTasksChanged?: () => void
+  /**
+   * Called after a *_document tool created or edited a notebook, so main can
+   * push CHANNELS.documentsChanged to the renderer.
+   */
+  onDocumentsChanged?: () => void
   /** Called after an approval answer persisted a new standing rule. */
   onToolRulesChanged?: () => void
   /** Injectable for tests; defaults to global fetch. */
@@ -156,6 +163,7 @@ export function createToolSystem(
     browser: options.browser ?? null,
     knowledgeSearch: options.knowledgeSearch,
     delegate: options.delegate,
+    botMessenger: options.botMessenger ?? null,
     imageGeneration: options.imageGeneration ?? null,
     gitWrite: options.gitWrite ?? null,
     gitHub: options.gitHub ?? null,
@@ -197,6 +205,23 @@ export function createToolSystem(
       conversationProjectId: (conversationId) =>
         db.conversations.getById(conversationId)?.projectId ?? null,
       projectPath: (projectId) => db.code.projectGetById(projectId)?.path ?? null,
+    },
+    // Notebooks for the *_document tools: mutations signal main so the Home
+    // Notes card stays live while the model writes.
+    documents: {
+      list: () => db.documents.list(),
+      getById: (id) => db.documents.getById(id),
+      findByTitle: (title) => db.documents.findByTitle(title),
+      create: (input) => {
+        const doc = db.documents.create(input)
+        options.onDocumentsChanged?.()
+        return doc
+      },
+      update: (id, patch) => {
+        const doc = db.documents.update(id, patch)
+        if (doc) options.onDocumentsChanged?.()
+        return doc
+      },
     },
     // schedule_task's optional `agent`: names an agent profile to own the task.
     agents: {

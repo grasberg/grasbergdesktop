@@ -47,6 +47,14 @@ const BASE_PERSONA =
   'Be concise and helpful: give direct answers first, add detail only when it earns its place, ' +
   'and use Markdown formatting when it improves readability.'
 
+/**
+ * Fixed system prompt of the quick-assistant mini window: it acts on copied
+ * text with no tools, no memories and no mode prompt.
+ */
+export const QUICK_SYSTEM_PROMPT =
+  'You are a quick assistant acting on text the user copied. ' +
+  'Follow the instruction directly and concisely, without preamble or meta-commentary.'
+
 const CHAT_SECTION = `You are in Chat mode: an everyday conversational assistant.
 
 Tone and formatting:

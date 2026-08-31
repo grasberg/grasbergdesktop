@@ -24,6 +24,7 @@ import {
   loadIdentity,
   pairOverRelay,
   pairingSecretFromUrl,
+  relayUrlFromUrl,
   saveIdentity,
   Tunnel,
   type TunnelState,
@@ -107,18 +108,21 @@ export const useMobileStore = create<MobileStore>((set, get) => ({
     const secret = pairingSecretFromUrl()
     if (secret) {
       const desktopId = desktopIdFromUrl()
+      const relayUrl = relayUrlFromUrl()
       set({ tunnelState: 'pairing', tunnelError: null })
-      if (!desktopId) {
+      if (!desktopId || !relayUrl) {
         set({ tunnelState: 'error', tunnelError: 'This pairing link is incomplete.' })
         return
       }
       try {
-        const paired = await pairOverRelay(desktopId, secret)
+        const paired = await pairOverRelay(desktopId, secret, relayUrl)
         saveIdentity({
+          relayUrl,
           desktopId,
           deviceId: paired.deviceId,
           token: paired.token,
           keyBase64: paired.keyBase64,
+          nextRequestSeq: paired.nextRequestSeq,
         })
         // The secret has served its purpose; it must not survive in the URL.
         clearUrlSecret()
@@ -339,6 +343,18 @@ function handleStreamEvent(
               event.type === 'reasoning-delta' ? current.reasoning + event.text : current.reasoning,
           },
         },
+      }
+    })
+    return
+  }
+  if (event.type === 'failover') {
+    // A fallback model restarts the answer: drop the failed attempt's partial
+    // text so the phone doesn't concatenate two answers.
+    set((state) => {
+      const current = state.streams[streamId]
+      if (!current) return state
+      return {
+        streams: { ...state.streams, [streamId]: { ...current, text: '', reasoning: '' } },
       }
     })
     return

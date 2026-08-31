@@ -48,6 +48,7 @@ export default function BridgesTab(): ReactElement {
   // URL; the secret inside the fragment never leaves this component + main.
   const [remote, setRemote] = useState<RemoteStatus | null>(null)
   const [relayDraft, setRelayDraft] = useState('')
+  const [clientDraft, setClientDraft] = useState('')
   const [qrData, setQrData] = useState<string | null>(null)
   const remoteBusy = useRef(false)
 
@@ -80,6 +81,10 @@ export default function BridgesTab(): ReactElement {
     if (remote && relayDraft === '' && remote.relayUrl) setRelayDraft(remote.relayUrl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remote?.relayUrl])
+  useEffect(() => {
+    if (remote && clientDraft === '' && remote.clientUrl) setClientDraft(remote.clientUrl)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remote?.clientUrl])
   // (Re)renders the QR whenever a pairing offer appears or changes.
   useEffect(() => {
     const url = remote?.pairing?.url
@@ -198,6 +203,7 @@ export default function BridgesTab(): ReactElement {
   const saveRemote = (enabledNext: boolean): void => {
     void runRemote(async () => {
       const trimmed = relayDraft.trim()
+      const client = clientDraft.trim()
       const res = await window.uld.remote.setConfig({
         enabled: enabledNext,
         // An empty draft means "not typed yet", not "clear the stored URL":
@@ -205,6 +211,7 @@ export default function BridgesTab(): ReactElement {
         // here during that window would wipe a configured relay on a stray
         // uncheck. Only an explicitly typed URL is ever sent.
         ...(trimmed ? { relayUrl: trimmed } : {}),
+        ...(client ? { clientUrl: client } : {}),
       })
       if (!res.ok) throw res.error
       setRemote(res.data)
@@ -328,7 +335,8 @@ export default function BridgesTab(): ReactElement {
       <p className="field-hint">
         Use the full app from your phone: conversations, live streaming, approvals. The desktop
         opens no port — it dials out to a relay you host (see relay/ in the repository), and every
-        frame is end-to-end encrypted; the relay only routes ciphertext. Off by default.
+        frame is end-to-end encrypted. Host the built mobile client on a separate trusted HTTPS
+        origin; the relay never serves executable code. Off by default.
       </p>
       <label className="field">
         <span className="field-label">Relay URL</span>
@@ -338,6 +346,18 @@ export default function BridgesTab(): ReactElement {
           placeholder="https://relay.example.com"
           onChange={(e) => setRelayDraft(e.target.value)}
         />
+      </label>
+      <label className="field">
+        <span className="field-label">Trusted mobile client URL</span>
+        <input
+          className="input"
+          value={clientDraft}
+          placeholder="https://mobile.example.com"
+          onChange={(e) => setClientDraft(e.target.value)}
+        />
+        <span className="field-hint">
+          Deploy out/mobile here. It must be a different origin from the relay.
+        </span>
       </label>
       <label className="field-checkbox">
         <input
@@ -385,7 +405,8 @@ export default function BridgesTab(): ReactElement {
               {qrData ? <img className="remote-qr" src={qrData} alt="Pairing QR code" /> : null}
               <p className="field-hint">
                 Scan with the phone&apos;s camera. The code works once, expires in 15 minutes, and
-                the connection is end-to-end encrypted — the relay never sees your chats.
+                the connection is end-to-end encrypted — the relay never sees the pairing secret
+                or your chats.
               </p>
             </div>
           ) : null}

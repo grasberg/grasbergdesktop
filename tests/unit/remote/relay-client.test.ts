@@ -59,7 +59,6 @@ function makeClient(): { client: RelayClient; sockets: FakeSocket[]; states: Arr
     onDeviceFrame: () => undefined,
     onDevicePresence: () => undefined,
     onDevicesOnline: () => undefined,
-    onHttp: () => undefined,
     socketFactory: factory,
     backoffBaseMs: 5,
   })

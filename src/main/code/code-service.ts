@@ -223,8 +223,8 @@ export class CodeService {
   proposeChange(
     conversationId: string,
     relPath: string,
-    changeType: 'create' | 'edit',
-    newContent: string
+    changeType: CodeChange['changeType'],
+    newContent = ''
   ): CodeChange {
     const conversation = this.db.conversations.getById(conversationId)
     if (!conversation || !conversation.projectId) {
@@ -313,6 +313,50 @@ export class CodeService {
     this.notifyChanges(updated.projectId)
     if (updated.conversationId) this.onAfterApply?.(updated.conversationId)
     return updated
+  }
+
+  /**
+   * Applies a group as one logical operation. Every proposal is checked before
+   * the first write; if a later write still fails (for example due to a race),
+   * already-applied changes are reverted newest-first.
+   */
+  applyChangesAtomically(changeIds: string[]): CodeChange[] {
+    const ids = [...new Set(changeIds)]
+    if (ids.length === 0) throw invalid('No changes were supplied.')
+    const changes = ids.map((id) => this.requireChange(id))
+    const first = changes[0]
+    if (
+      changes.some(
+        (change) =>
+          change.projectId !== first.projectId || change.conversationId !== first.conversationId
+      )
+    ) {
+      throw invalid('A change batch must belong to one project and conversation.')
+    }
+    for (const change of changes) this.assertApplicable(change)
+
+    const applied: CodeChange[] = []
+    try {
+      for (const id of ids) applied.push(this.applyChange(id))
+      return applied
+    } catch (error) {
+      const rollbackFailures: string[] = []
+      for (const change of [...applied].reverse()) {
+        try {
+          this.revertChange(change.id)
+        } catch (rollbackError) {
+          rollbackFailures.push(
+            `${change.filePath}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          )
+        }
+      }
+      if (rollbackFailures.length > 0) {
+        throw invalid(
+          `${error instanceof Error ? error.message : String(error)} Rollback also failed for ${rollbackFailures.join('; ')}.`
+        )
+      }
+      throw error
+    }
   }
 
   rejectChange(changeId: string): CodeChange {
@@ -465,6 +509,27 @@ export class CodeService {
     const change = this.db.code.changeGet(changeId)
     if (!change) throw invalid('Change not found.')
     return change
+  }
+
+  /** Read-only preflight used by applyChangesAtomically. */
+  private assertApplicable(change: CodeChange): void {
+    if (change.status !== 'proposed') throw invalid('Only proposed changes can be applied.')
+    const project = this.db.code.projectGetById(change.projectId)
+    if (!project) throw invalid('Project not found.')
+    const abs = this.resolveInsideRoot(project.path, change.filePath)
+    if (change.changeType === 'create') {
+      if (change.newContent === null) throw invalid('This change has no content to write.')
+      if (this.lstatOrNull(abs)) {
+        const real = this.realInsideRoot(project.path, abs)
+        this.assertNotStale(change, real)
+      }
+      return
+    }
+    if (change.changeType === 'edit' && change.newContent === null) {
+      throw invalid('This change has no content to write.')
+    }
+    const real = this.realInsideRoot(project.path, abs)
+    this.assertNotStale(change, real)
   }
 
   /**

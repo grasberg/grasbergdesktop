@@ -1,8 +1,8 @@
 /**
  * The phone's tunnel: one WebSocket to the relay, speaking the frames in
  * @shared/remote-protocol. Device credentials and the frame key live in
- * localStorage — they are only reachable by this origin (the relay), and the
- * key they protect encrypts nothing the relay can read anyway.
+ * localStorage on a separately trusted static-client origin. The relay is
+ * supplied as data in the QR fragment and serves no executable client code.
  *
  * The pairing secret from the QR fragment is consumed once: proof → sealed
  * 'paired' reply → identity stored → fragment cleared from the URL so a
@@ -34,11 +34,14 @@ export type TunnelState =
   | 'error'
 
 export interface Identity {
+  relayUrl: string
   desktopId: string
   deviceId: string
   token: string
   /** Frame key, base64 — sealed/checked against the desktop on connect. */
   keyBase64: string
+  /** Next authenticated request sequence; older saved identities start at 1. */
+  nextRequestSeq: number
 }
 
 export function loadIdentity(): Identity | null {
@@ -46,8 +49,20 @@ export function loadIdentity(): Identity | null {
     const raw = localStorage.getItem(IDENTITY_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as Identity
-    if (!parsed.desktopId || !parsed.deviceId || !parsed.token || !parsed.keyBase64) return null
-    return parsed
+    if (
+      !relayWsUrl(parsed.relayUrl) ||
+      !parsed.desktopId ||
+      !parsed.deviceId ||
+      !parsed.token ||
+      !parsed.keyBase64
+    ) return null
+    return {
+      ...parsed,
+      nextRequestSeq:
+        Number.isSafeInteger(parsed.nextRequestSeq) && parsed.nextRequestSeq > 0
+          ? parsed.nextRequestSeq
+          : 1,
+    }
   } catch {
     return null
   }
@@ -57,25 +72,48 @@ export function saveIdentity(identity: Identity): void {
   localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity))
 }
 
-/** The desktopId the QR addressed (first path segment), if the URL carries one. */
+const fragmentParams = (): URLSearchParams => new URLSearchParams(location.hash.replace(/^#/, ''))
+
+/** The desktopId carried inside the fragment, if this load came from a QR. */
 export function desktopIdFromUrl(): string | null {
-  const match = /^\/([A-Za-z0-9-]{1,64})(?:\/|$)/.exec(location.pathname)
-  return match ? match[1] : null
+  const value = fragmentParams().get('desktop')
+  return value && /^[A-Za-z0-9-]{1,64}$/.test(value) ? value : null
 }
 
 /** The pairing secret from `#p=…`, if this page load came from a QR scan. */
 export function pairingSecretFromUrl(): string | null {
-  const match = /^#p=([A-Za-z0-9_-]{43})$/.exec(location.hash)
-  return match ? match[1] : null
+  const value = fragmentParams().get('p')
+  return value && /^[A-Za-z0-9_-]{43}$/.test(value) ? value : null
+}
+
+export function relayUrlFromUrl(): string | null {
+  const value = fragmentParams().get('relay')
+  return value && relayWsUrl(value) ? value : null
 }
 
 export function clearUrlSecret(): void {
   if (location.hash) history.replaceState(null, '', location.pathname + location.search)
 }
 
-const wsUrl = (): string => {
-  const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${scheme}://${location.host}/ws`
+const relayWsUrl = (input: string): string | null => {
+  try {
+    const parsed = new URL(input)
+    const secure = parsed.protocol === 'https:' || parsed.protocol === 'wss:'
+    const loopback =
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '[::1]'
+    if (!secure && !(loopback && (parsed.protocol === 'http:' || parsed.protocol === 'ws:'))) {
+      return null
+    }
+    parsed.protocol = secure ? 'wss:' : 'ws:'
+    parsed.pathname = '/ws'
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return null
+  }
 }
 
 const guessPlatform = (): string => {
@@ -99,6 +137,7 @@ export class Tunnel {
   private reconnectTimer: number | null = null
   private failures = 0
   private closedByUser = false
+  private sendQueue: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly identity: Identity,
@@ -111,7 +150,12 @@ export class Tunnel {
   connect(): void {
     this.closedByUser = false
     this.setState('connecting', null)
-    const socket = new WebSocket(wsUrl())
+    const url = relayWsUrl(this.identity.relayUrl)
+    if (!url) {
+      this.setState('error', 'The saved relay URL is invalid.')
+      return
+    }
+    const socket = new WebSocket(url)
     this.socket = socket
     socket.onopen = () => {
       socket.send(
@@ -150,7 +194,12 @@ export class Tunnel {
       }
     }
     const id = crypto.randomUUID()
-    const inner: InnerReq = { t: 'req', id, channel, args }
+    const seq = this.identity.nextRequestSeq
+    this.identity.nextRequestSeq += 1
+    // Persist before network I/O: a crash may skip a number, but can never
+    // reuse one the desktop might already have executed.
+    saveIdentity(this.identity)
+    const inner: InnerReq = { t: 'req', id, seq, channel, args }
     const promise = new Promise<IpcResult<unknown>>((resolve) => {
       // A live-but-silent desktop must not leave the UI waiting forever; the
       // timer is cancelled by whichever of {reply, close} settles first.
@@ -172,7 +221,23 @@ export class Tunnel {
         },
       })
     })
-    socket.send(JSON.stringify({ t: 'to', frame: await sealFrame(this.key, inner) }))
+    try {
+      this.sendQueue = this.sendQueue.then(async () => {
+        if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+          throw new Error('Connection lost before the request was sent.')
+        }
+        socket.send(JSON.stringify({ t: 'to', frame: await sealFrame(this.key, inner) }))
+      })
+      await this.sendQueue
+    } catch {
+      const pending = this.pending.get(id)
+      this.pending.delete(id)
+      pending?.resolve({
+        ok: false,
+        error: { code: 'network', message: 'Connection lost.', retryable: true },
+      })
+      this.sendQueue = Promise.resolve()
+    }
     return promise as Promise<IpcResult<T>>
   }
 
@@ -279,12 +344,15 @@ export class Tunnel {
  */
 export async function pairOverRelay(
   desktopId: string,
-  secret: string
-): Promise<PairPaired & { keyBase64: string }> {
+  secret: string,
+  relayUrl: string
+): Promise<PairPaired & { keyBase64: string; nextRequestSeq: number }> {
   const key = await deriveFrameKey(secret)
   const proof = await pairingProof(secret)
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(wsUrl())
+    const url = relayWsUrl(relayUrl)
+    if (!url) return reject(new Error('The pairing link has an invalid relay URL.'))
+    const socket = new WebSocket(url)
     const fail = (message: string): void => {
       try {
         socket.close()
@@ -334,7 +402,7 @@ export async function pairOverRelay(
           const opened = await openFrame<PairPaired | InnerHelloRes>(key, inner as SealedFrame)
           if (opened.t === 'paired') {
             socket.close()
-            resolve({ ...opened, keyBase64: keyToBase64(key) })
+            resolve({ ...opened, keyBase64: keyToBase64(key), nextRequestSeq: 1 })
           }
         } catch (e) {
           fail(`Pairing reply could not be decrypted (${e instanceof Error ? e.message : 'error'}).`)

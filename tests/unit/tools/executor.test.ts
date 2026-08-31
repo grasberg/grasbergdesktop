@@ -182,6 +182,15 @@ describe('propose_shell_command — never executes anything', () => {
 })
 
 describe('fetch_url', () => {
+  it('classifies the address returned by the socket DNS lookup', async () => {
+    const { resolvedAddressRefusal } = await import('../../../src/main/tools/executor')
+    for (const address of ['127.0.0.1', '10.0.0.4', '169.254.169.254', '::1', 'fd00::1']) {
+      expect(resolvedAddressRefusal(address), address).toMatch(/internal\/loopback\/link-local/i)
+    }
+    expect(resolvedAddressRefusal('1.1.1.1')).toBeNull()
+    expect(resolvedAddressRefusal('2606:4700:4700::1111')).toBeNull()
+  })
+
   it('rejects non-https URLs without touching the network', async () => {
     const fetchImpl = vi.fn()
     const { executor } = createToolSystem(db, null, {
@@ -572,7 +581,7 @@ describe('run_shell_command tool (opt-in)', () => {
     const approval = vi.fn(async () => APPROVE)
     const result = await executor.execute(
       call('run_shell_command', { command: 'echo shellok123' }),
-      { conversation: conv(true), approval }
+      { conversation: conv(true), approval, sandboxLevel: 'full' }
     )
     expect(approval).toHaveBeenCalledTimes(1) // dangerous -> ask
     expect(result).toContain('shellok123')
@@ -586,6 +595,7 @@ describe('run_shell_command tool (opt-in)', () => {
     const result = await executor.execute(call('run_shell_command', { command: 'echo nope' }), {
       conversation: conv(true),
       approval: approveAll,
+      sandboxLevel: 'full',
     })
     expect(result).toMatch(/disabled/i)
   })
@@ -606,7 +616,12 @@ describe('run_shell_command tool (opt-in)', () => {
         command: 'node -e "setTimeout(() => {}, 600000)"',
         timeoutSeconds: 600,
       }),
-      { conversation: conv(true), approval: approveAll, signal: controller.signal }
+      {
+        conversation: conv(true),
+        approval: approveAll,
+        signal: controller.signal,
+        sandboxLevel: 'full',
+      }
     )
     setTimeout(() => controller.abort(), 300)
     const result = await running
@@ -643,18 +658,26 @@ describe('sandbox levels', () => {
     expect(grep).toContain('alpha.txt:2:')
   })
 
-  it('a relative shell cwd stays jailed to the project root at every level', async () => {
+  it('workspace-write refuses shell before approval; full accepts a relative cwd', async () => {
     db.settings.update({ shellExecutionEnabled: true })
     const { executor } = createToolSystem(db, null, { shellEnabled: () => true })
+    const approval = vi.fn(async () => APPROVE)
+    const refused = await executor.execute(
+      call('run_shell_command', { command: 'echo should-not-run' }),
+      { conversation: conv(true), approval, sandboxLevel: 'workspace-write' }
+    )
+    expect(refused).toMatch(/require.*full/i)
+    expect(approval).not.toHaveBeenCalled()
+
     const inside = await executor.execute(
       call('run_shell_command', { command: 'node -p "process.cwd()"', cwd: 'src' }),
-      { conversation: conv(true), approval: approveAll }
+      { conversation: conv(true), approval: approveAll, sandboxLevel: 'full' }
     )
     expect(inside).toContain(join(projectDir, 'src'))
 
     const escape = await executor.execute(
       call('run_shell_command', { command: 'echo hi', cwd: '../..' }),
-      { conversation: conv(true), approval: approveAll }
+      { conversation: conv(true), approval: approveAll, sandboxLevel: 'full' }
     )
     expect(escape).toMatch(/must stay inside the project folder/i)
   })
@@ -666,7 +689,7 @@ describe('sandbox levels', () => {
       call('run_shell_command', { command: 'echo hi', cwd: dir }),
       { conversation: conv(true), approval: approveAll }
     )
-    expect(refused).toMatch(/requires sandbox level 'full'/i)
+    expect(refused).toMatch(/require.*full/i)
 
     const allowed = await executor.execute(
       call('run_shell_command', { command: 'node -p "process.cwd()"', cwd: dir }),
@@ -784,7 +807,7 @@ describe('standing approval grants', () => {
 
     const allowed = await executor.execute(
       call('run_shell_command', { command: 'echo allowlisted123' }),
-      { conversation: conv(true), approval }
+      { conversation: conv(true), approval, sandboxLevel: 'full' }
     )
     expect(allowed).toContain('allowlisted123')
     expect(approval).not.toHaveBeenCalled()
@@ -792,7 +815,7 @@ describe('standing approval grants', () => {
     // Chaining characters defeat the prefix — the dialog comes back.
     await executor.execute(
       call('run_shell_command', { command: 'echo hi && echo smuggled' }),
-      { conversation: conv(true), approval }
+      { conversation: conv(true), approval, sandboxLevel: 'full' }
     )
     expect(approval).toHaveBeenCalledTimes(1)
   })

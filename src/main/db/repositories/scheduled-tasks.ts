@@ -16,6 +16,7 @@ interface ScheduledTaskRow {
   approved_tools_json: string
   project_id: string | null
   agent_id: string | null
+  budget_usd: number | null
   last_run_at: number | null
   last_status: ScheduledTaskStatus
   last_output: string
@@ -44,6 +45,7 @@ function toTask(row: ScheduledTaskRow): ScheduledTask {
     approvedToolIds: parseApprovedTools(row.approved_tools_json),
     projectId: row.project_id,
     agentId: row.agent_id,
+    budgetUsd: row.budget_usd ?? null,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
     lastOutput: row.last_output,
@@ -58,6 +60,8 @@ export interface ScheduledTasksRepository {
   getById(id: string): ScheduledTask | null
   create(input: ScheduledTaskInput): ScheduledTask
   setEnabled(id: string, enabled: boolean): ScheduledTask | null
+  /** Sets/clears the task's monthly spend cap (USD). */
+  setBudget(id: string, budgetUsd: number | null): ScheduledTask | null
   remove(id: string): void
   deleteAll(): void
   listDue(now: number): ScheduledTask[]
@@ -106,6 +110,9 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
         approvedToolIds: input.approvedToolIds ?? [],
         projectId: input.projectId ?? null,
         agentId: input.agentId ?? null,
+        // Not in the INSERT below — the column defaults to NULL; caps are set
+        // after creation via setBudget.
+        budgetUsd: null,
         lastRunAt: null,
         lastStatus: 'idle',
         lastOutput: '',
@@ -138,6 +145,15 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
     setEnabled(id, enabled) {
       driver.run('UPDATE scheduled_tasks SET enabled = ?, updated_at = ? WHERE id = ?', [
         enabled ? 1 : 0,
+        Date.now(),
+        id,
+      ])
+      return getById(id)
+    },
+
+    setBudget(id, budgetUsd) {
+      driver.run('UPDATE scheduled_tasks SET budget_usd = ?, updated_at = ? WHERE id = ?', [
+        budgetUsd,
         Date.now(),
         id,
       ])

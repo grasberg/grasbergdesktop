@@ -1,0 +1,39 @@
+{
+  "secret": "GrasbergTestSecret0000000000000000000000000",
+  "proofHex": "e343642b2145844c10f37779c9c11134c325a36eb81e885252a64d9dac196cc7",
+  "frameKeyBase64": "wYEcIeYDYyEseXODJmjkMGK4jeWN9RdKEqSm0SUNz/U=",
+  "sealedFrames": {
+    "hello": {
+      "t": "sec",
+      "n": "eGqPRAc7GoYn3p52",
+      "ct": "K34khd2me0UwIEz8JnFF8FP4u/hulKtcfWN5lG0="
+    },
+    "paired": {
+      "t": "sec",
+      "n": "qMe1eWINwT+V98Kr",
+      "ct": "kIhXnnzwWBjBOntG/Q/7p71kfnljn3YLu3XtTdZYW3eM5PgqnaKRnZuYwQYkQI6bPT6yy4pUi/hHkJgb1X/w6PfgXtMqmG6FKHkF8Z+7PynF2qyewQx2i71cOpT1IeQEkEppcUx1Bi8m68YYla+3waXHKfC5aSLWWRsLT46uatpbEoHtoU6d6bAW"
+    },
+    "req": {
+      "t": "sec",
+      "n": "JfJ71o7NIFq5/mZf",
+      "ct": "3Sd20TjaMcQWhiyDmJVRTqWm/GnFjG0c6w3STzlmXYReTJTp1Qa2Wlq6ur+r1T6vCzepTWHChfPWGsi8lREDdGMaw8XrOzRCr4OVMKw5HQLSMHhVCQ=="
+    },
+    "push": {
+      "t": "sec",
+      "n": "4UZsHXGTd41Ou9AL",
+      "ct": "OQaTQv29PMer1eKsz3Y1XHLAcJZVjE4iL1QrYWmmFyxkfYf9mVdpcOkuVw6Ci9aj7vhPu2JLSiGU9Ir82G+H7iXJ5lh9QQzdM8xi88B6h98vH9DUL1qN+d0mGTG4LLpFkAJZievoMno="
+    },
+    "helloRes": {
+      "t": "sec",
+      "n": "GainkZ2bouDVO+zI",
+      "ct": "PJR7/1MMfW0KQHwl4P/hUHa9XpwLuYrwk+HjKMBp5yC9w1o/NEDEKz7Lk3pE7tcprj/pNb3Uuh3CElvTFUqal8SjLGkttG0Lf6/Rm0o="
+    }
+  },
+  "pairingQr": "https://phone.grasberg.example/app#p=GrasbergTestSecret0000000000000000000000000&relay=https%3A%2F%2Frelay.example.com%3A7333&desktop=0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d",
+  "expected": {
+    "deviceId": "11111111-2222-4333-8444-555555555555",
+    "desktopId": "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d",
+    "relayUrl": "https://relay.example.com:7333",
+    "relayWsUrl": "wss://relay.example.com:7333/ws"
+  }
+}

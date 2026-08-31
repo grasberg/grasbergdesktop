@@ -665,6 +665,34 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     enabled: true,
   },
   {
+    id: 'message_agent',
+    name: 'message_agent',
+    description:
+      'Send a message to another bot on this desktop (Bot Mode). Only available inside a bot ' +
+      'chat. Delivery is fire-and-forget: you get an acknowledgement immediately, finish your ' +
+      'turn, and the teammate composes its own reply, which arrives in this chat later as an ' +
+      'incoming message. Compose the message yourself — include the context the teammate needs, ' +
+      'since it does not see this conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          description:
+            "The teammate bot's name or @handle (the roster is in your system prompt).",
+        },
+        message: {
+          type: 'string',
+          description: 'The message to deliver. Treated as plain text, never interpreted.',
+        },
+      },
+      required: ['target', 'message'],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
     id: 'task_output',
     name: 'task_output',
     description:
@@ -846,7 +874,8 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     description:
       'Execute a shell command in the project folder the user granted for this conversation and ' +
       'return its exit code, stdout and stderr. This ACTUALLY RUNS the command, so it requires the ' +
-      'user to have enabled shell execution AND to approve each call. Commands run with a timeout ' +
+      "user to have enabled shell execution, select the 'full' sandbox, AND approve each call. " +
+      'A host shell is not confined to the project folder. Commands run with a timeout ' +
       '(default 60s, raisable via timeoutSeconds up to 600) and capped output. Set background=true ' +
       'for long-running processes (dev servers, watchers): it returns a task id immediately — poll ' +
       'output with task_output and stop it with task_stop. Prefer propose_shell_command when you ' +
@@ -877,8 +906,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         cwd: {
           type: 'string',
           description:
-            'Optional working directory: a path relative to the project folder, or an absolute ' +
-            "path when the conversation's sandbox level is 'full' (otherwise refused).",
+            "Optional working directory. The tool is available only at sandbox level 'full'.",
         },
       },
       required: ['command'],
@@ -886,6 +914,72 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     // Highest-risk builtin: it can mutate the project and the system. Always
     // asks for approval, and is filtered out entirely unless the user opted in.
     risk: 'dangerous',
+    builtin: true,
+    enabled: true,
+    mutating: true,
+  },
+  {
+    id: 'list_documents',
+    name: 'list_documents',
+    description:
+      "List the user's notebooks — living Markdown documents kept in this app on the Home " +
+      "screen, independent of any conversation. Returns each notebook's title, id, size and " +
+      'last-updated time. Use read_document to open one.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'read_document',
+    name: 'read_document',
+    description:
+      'Read one notebook by id or by exact title (case-insensitive). Returns its full ' +
+      'Markdown content; very long notebooks are truncated.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Notebook id from list_documents.' },
+        title: {
+          type: 'string',
+          description: 'Exact notebook title (case-insensitive); used when id is omitted.',
+        },
+      },
+      required: [],
+    },
+    risk: 'safe',
+    builtin: true,
+    enabled: true,
+  },
+  {
+    id: 'edit_document',
+    name: 'edit_document',
+    description:
+      'Create a notebook or replace the ENTIRE content of an existing one (no partial edits ' +
+      'in this version — read the current content first and include everything that should ' +
+      'remain). The previous content is saved as a version the user can revert to, and each ' +
+      "call needs the user's approval. Targets the notebook by id if given, otherwise by " +
+      'case-insensitive title match; creates a new notebook when none matches.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Notebook id to edit (from list_documents). Omit to target by title.',
+        },
+        title: { type: 'string', description: 'Notebook title (max 200 chars).' },
+        content: { type: 'string', description: 'Complete new Markdown content of the notebook.' },
+      },
+      required: ['title', 'content'],
+    },
+    // Writes app-owned notebook state, not project files — sensitive +
+    // mutating so plan mode / read-only sandbox refuse it and each call is
+    // approved.
+    risk: 'sensitive',
     builtin: true,
     enabled: true,
     mutating: true,

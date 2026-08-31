@@ -171,6 +171,36 @@ export interface NormalizedError {
   providerType?: ProviderType
 }
 
+/**
+ * Why a Reliability Autopilot hop happened: a transient provider error, or a
+ * completed stream that produced no text, reasoning or tool calls at all.
+ */
+export type FailoverReason = ProviderErrorCode | 'empty_reply'
+
+/** One failover hop: the provider/model that failed, and why. */
+export interface FailoverAttempt {
+  providerId: string
+  modelId: string
+  code: FailoverReason
+}
+
+/** One entry of a failover chain (both parts required). */
+export interface FailoverChainEntry {
+  providerId: string
+  modelId: string
+}
+
+/**
+ * Ordered fallback models tried when a generation fails with a transient
+ * provider error (rate limit, outage, network, timeout) or returns nothing —
+ * before any tool has run. Separate chains for interactive chats and
+ * headless/background runs.
+ */
+export interface FailoverChains {
+  interactive?: FailoverChainEntry[]
+  headless?: FailoverChainEntry[]
+}
+
 // ---------------------------------------------------------------------------
 // Chat
 // ---------------------------------------------------------------------------
@@ -192,10 +222,24 @@ export interface Attachment {
   name: string
   mimeType: string
   sizeBytes: number
-  /** 'image' for images sent to vision models; otherwise text (default). */
-  kind?: 'text' | 'image'
+  /** 'image' for images sent to vision models, 'pdf' for stored PDFs, 'audio' for stored audio; otherwise text (default). */
+  kind?: 'text' | 'image' | 'pdf' | 'audio'
   /** Extracted text content that gets sent to the provider (text files). */
   textContent?: string
+  /** Text pulled from a PDF text layer, OCR or an audio transcript; inlined on the wire like textContent. */
+  extractedText?: string
+  /**
+   * How extractedText was produced. 'none' = no machine-readable text was
+   * found (a scanned document) — the UI offers user-triggered OCR then.
+   * 'transcript' = whisper speech-to-text of an audio attachment.
+   */
+  extraction?: 'text' | 'ocr' | 'transcript' | 'none'
+  /**
+   * Send the original PDF bytes as a document content part to providers that
+   * support it (Anthropic, Google); others receive the extracted text instead.
+   * Capped at MAX_RAW_ATTACH_BYTES main-side.
+   */
+  rawAttach?: boolean
   /**
    * Filename of the stored image under the app's attachments dir (image kind).
    * The bytes live on disk, not inline in the DB; the wire payload and
@@ -255,6 +299,32 @@ export interface UsageSummaryEntry {
   estimatedCostUsd: number | null
 }
 
+/** Month-to-date estimated spend of one conversation, for the header HUD. */
+export interface ConversationCostSummary {
+  /** Priced spend only (messages + this conversation's headless runs). */
+  estimatedCostUsd: number
+  /** Usage rows that could not be priced (excluded from the estimate). */
+  unpricedCount: number
+  /** This conversation's monthly cap, or null. */
+  budgetUsd: number | null
+  /** The global monthly cap (AppSettings.monthlyBudgetUsd), or null. */
+  globalBudgetUsd: number | null
+  /** Start of the month the summary covers (local calendar month). */
+  monthStartMs: number
+}
+
+/** One row of the Settings → Usage background-spend section (per run kind). */
+export interface HeadlessUsageSummaryEntry {
+  runKind: string
+  runs: number
+  promptTokens: number
+  completionTokens: number
+  /** Priced spend; null when every run in the group was unpriced. */
+  estimatedCostUsd: number | null
+  /** Runs with no price entry (excluded from the estimate). */
+  unpricedRuns: number
+}
+
 export interface Message {
   id: string
   conversationId: string
@@ -270,6 +340,13 @@ export interface Message {
   providerId?: string
   modelId?: string
   usage?: TokenUsage
+  /**
+   * Reliability Autopilot: the provider/model attempts that failed before the
+   * attributed model answered. Persisted INSIDE the usage_json column (as an
+   * extra `failedOverFrom` key) and split back out by the messages repository —
+   * no schema migration.
+   */
+  failedOverFrom?: FailoverAttempt[]
   /**
    * Mixture-of-Agents: the advisor (reference) model outputs that fed the
    * aggregator which produced this assistant message. Present only when the
@@ -288,6 +365,13 @@ export interface Message {
    * Present only when the message was generated via /research.
    */
   research?: ResearchRunInfo
+  /**
+   * Bot Mode (v46): the agent profile that authored this message. Set on a
+   * group-room bot turn (attribution in a multi-bot transcript) and on
+   * bot-authored messages in canonical chats. Null/absent = the conversation's
+   * implicit speaker.
+   */
+  agentId?: string | null
   /** Monotonic order within the conversation. */
   seq: number
   createdAt: number
@@ -304,10 +388,10 @@ export type ReasoningEffort = 'low' | 'medium' | 'high'
 /**
  * Sandbox posture for a Work conversation's tool loop:
  * - 'read-only': every mutating tool is refused — safe autonomous investigation.
- * - 'workspace-write' (the default when unset): today's behavior — writes are
- *   path-jailed to the granted folder and shell commands run in it.
- * - 'full': additionally allows run_shell_command to target an absolute cwd
- *   outside the project folder. Every shell call still requires approval.
+ * - 'workspace-write' (the default when unset): writes through audited file
+ *   tools are path-jailed to the granted folder; host shell is unavailable.
+ * - 'full': additionally enables the unrestricted host shell. A cwd is not a
+ *   confinement boundary; every shell call still requires approval.
  */
 export type SandboxLevel = 'read-only' | 'workspace-write' | 'full'
 
@@ -337,6 +421,37 @@ export interface TerminalDataEvent {
 export interface TerminalExitEvent {
   sessionId: string
   code: number | null
+}
+
+// ---------------------------------------------------------------------------
+// Voice (offline whisper.cpp speech-to-text; downloaded on demand)
+// ---------------------------------------------------------------------------
+
+/** The downloadable ggml whisper models the app knows about. */
+export type VoiceModelId = 'tiny' | 'base'
+
+/** Settings → Voice snapshot: what is installed and what is in flight. */
+export interface VoiceStatus {
+  /** False when no whisper.cpp release binary exists for this OS/arch (macOS). */
+  platformDownloadSupported: boolean
+  /** A runnable whisper binary is available (downloaded or user-picked). */
+  binaryReady: boolean
+  binarySource: 'downloaded' | 'custom' | null
+  models: Array<{ id: VoiceModelId; sizeBytes: number; downloaded: boolean }>
+  /** Which model transcription uses (settings.voiceModelId). */
+  activeModelId: VoiceModelId
+  downloading: boolean
+}
+
+/** Push payload for push:voiceDownloadProgress (throttled to ~4/s). */
+export interface VoiceDownloadProgressEvent {
+  item: 'binary' | 'model'
+  modelId?: VoiceModelId
+  receivedBytes: number
+  /** Content-Length (or the pinned size), null when unknown. */
+  totalBytes: number | null
+  status: 'downloading' | 'verifying' | 'extracting' | 'done' | 'error'
+  error?: string
 }
 
 /** Sampling parameters; all optional — provider defaults apply when unset. */
@@ -400,6 +515,27 @@ export interface Conversation {
   summaryText?: string | null
   /** Highest message seq the summary covers; messages at/below it are pruned. */
   summaryThroughSeq?: number | null
+  /**
+   * Conversation this one was forked from (v41), or null. A plain pointer,
+   * not an FK — the parent may since have been deleted.
+   */
+  parentConversationId?: string | null
+  /** Id of the SOURCE message the fork was taken at (ids are regenerated in the fork). */
+  forkedAtMessageId?: string | null
+  /**
+   * Monthly spend cap in USD (v44): generation pauses to ask once this
+   * conversation's month-to-date estimate reaches it. Null/absent = no cap.
+   */
+  budgetUsd?: number | null
+  /** Private space this conversation belongs to, or null = default space (v45). */
+  spaceId?: string | null
+  /**
+   * Bot Mode (v46): the agent profile that owns this conversation — set only
+   * on a bot's canonical chat. The bot's persona, memories, model pin and
+   * toolset apply to every turn, and `message_agent` becomes available.
+   * Bot-owned conversations are excluded from the regular sidebar listing.
+   */
+  agentId?: string | null
   createdAt: number
   updatedAt: number
 }
@@ -413,6 +549,61 @@ export interface ConversationSummary {
   snippet: string | null
   /** Organizational Project this task belongs to, or null = unfiled. */
   projectRef: string | null
+  /** Private space membership (v45); null = default space. */
+  spaceId?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Private spaces + app lock (v45)
+// ---------------------------------------------------------------------------
+
+/**
+ * A private space: a named partition of the conversation list. Conversations
+ * in a private space are excluded from the default listing/search, backups
+ * (unless explicitly included), the phone tunnel, the Telegram bridge and
+ * notification previews. NOT encryption at rest — a privacy screen only.
+ */
+export interface Space {
+  id: string
+  name: string
+  /** Provider ids generation in this space may use; null = all providers. */
+  providerAllowlist: string[] | null
+  createdAt: number
+}
+
+export interface SpacePatch {
+  name?: string
+  providerAllowlist?: string[] | null
+}
+
+/**
+ * The stored scrypt verifier for the app-lock passphrase. Never the
+ * passphrase itself; params live beside the hash so they can be raised later
+ * without invalidating existing hashes.
+ */
+export interface AppLockHash {
+  algo: 'scrypt'
+  saltBase64: string
+  hashBase64: string
+  n: number
+  r: number
+  p: number
+  keyLen: number
+}
+
+export interface AppLockStatus {
+  /** A passphrase is set (the app locks on launch and on idle). */
+  configured: boolean
+  locked: boolean
+  /** Minutes of system idle before auto-lock; null = never. */
+  idleMinutes: number | null
+}
+
+export interface AppLockSetPassphraseInput {
+  /** Required when a passphrase is already set. */
+  current?: string
+  /** The new passphrase, or null to remove the lock. */
+  next: string | null
 }
 
 /**
@@ -563,6 +754,12 @@ export type StreamEvent =
   | { type: 'research-activity'; activity: ResearchActivity }
   /** A generated image was stored and attached to the assistant message. */
   | { type: 'attachment'; attachment: Attachment }
+  /**
+   * Reliability failover: the placeholder was reset and now re-runs on a
+   * fallback model. Replace the message wholesale (clearing pushed partial
+   * text); streaming state is unchanged — same streamId across attempts.
+   */
+  | { type: 'failover'; message: Message }
   | {
       type: 'done'
       finishReason: 'stop' | 'length' | 'tool_calls' | 'aborted' | 'error'
@@ -586,6 +783,33 @@ export interface StartStreamResult {
 }
 
 // ---------------------------------------------------------------------------
+// Quick assistant (global-shortcut clipboard mini window)
+// ---------------------------------------------------------------------------
+
+/** The clipboard text captured when the quick window was summoned. */
+export interface QuickContext {
+  selectionText: string
+  /** True when the capture was cut at QUICK_SELECTION_MAX_CHARS. */
+  truncated: boolean
+}
+
+/**
+ * Events of one ephemeral quick-assistant generation. The delta variants are
+ * shape-identical to StreamEvent's so StreamDeltaBuffer coalesces them as-is;
+ * nothing here is ever persisted.
+ */
+export type QuickStreamEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'reasoning-delta'; text: string }
+  | { type: 'done'; finishReason: 'stop' | 'length' | 'aborted'; text: string; usage?: TokenUsage }
+  | { type: 'error'; error: NormalizedError }
+
+export interface QuickStreamEventEnvelope {
+  streamId: string
+  event: QuickStreamEvent
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
@@ -596,6 +820,71 @@ export interface ModeModelDefault {
   providerId: string | null
   modelId: string | null
 }
+
+/** Morning brief config (null in AppSettings = never configured / off). */
+export interface MorningBriefSettings {
+  enabled: boolean
+  /** Local time of day, 'HH:mm'. */
+  time: string
+  /** Agent profile that writes the brief; null = economy/default model. */
+  agentId: string | null
+  deliverTelegram: boolean
+  deliverNotification: boolean
+}
+
+/** One generated morning brief (stored in settings, newest first, max 7). */
+export interface MorningBrief {
+  id: string
+  /** Local calendar day the brief covers, 'YYYY-MM-DD'. */
+  dateKey: string
+  generatedAt: number
+  status: 'ok' | 'error'
+  /** Markdown body ('' when status is 'error'). */
+  content: string
+  error: string | null
+  /** Ran later than its slot (the app was closed at brief time). */
+  catchUp: boolean
+  dismissedAt: number | null
+}
+
+/**
+ * One quick-assistant action (a button in the quick window). `{selection}` in
+ * the prompt is replaced with the copied text; a prompt without the placeholder
+ * gets the text appended after a blank line, so an edited action can never
+ * silently drop it.
+ */
+export interface QuickAction {
+  id: string
+  label: string
+  prompt: string
+  /** Optional per-action model; unset = the default resolution chain. */
+  providerId?: string
+  modelId?: string
+}
+
+export const DEFAULT_QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'explain',
+    label: 'Explain',
+    prompt: 'Explain the following text clearly and concisely:\n\n{selection}',
+  },
+  {
+    id: 'translate',
+    label: 'Translate',
+    prompt: 'Translate the following text to English:\n\n{selection}',
+  },
+  {
+    id: 'rewrite',
+    label: 'Rewrite',
+    prompt:
+      'Rewrite the following text to be clearer and more polished, keeping its meaning and tone:\n\n{selection}',
+  },
+  {
+    id: 'summarize',
+    label: 'Summarize',
+    prompt: 'Summarize the following text in a few bullet points:\n\n{selection}',
+  },
+]
 
 export interface AppSettings {
   theme: ThemeSetting
@@ -644,9 +933,9 @@ export interface AppSettings {
    */
   dreamingEnabled: boolean
   /**
-   * Opt-in: allow the run_shell_command tool to actually execute commands
-   * (still gated by per-call approval). Off by default — the app otherwise
-   * only ever *suggests* shell commands.
+   * Opt-in: expose run_shell_command when the conversation also uses the Full
+   * sandbox level (still gated by per-call approval). Off by default — the app
+   * otherwise only ever *suggests* shell commands.
    */
   shellExecutionEnabled: boolean
   /**
@@ -711,6 +1000,17 @@ export interface AppSettings {
   autoRoutingPolicy: 'balanced' | 'lowest_cost' | 'highest_quality' | 'local_only'
   /** Optional soft budget displayed/enforced by future multi-round routing. */
   autoRoutingMaxCostUsd: number | null
+  /**
+   * Global soft cap on month-to-date estimated spend (priced models only, v44):
+   * interactive sends ask once, headless runs are skipped. Null = off.
+   */
+  monthlyBudgetUsd: number | null
+  /**
+   * Reliability Autopilot: ordered fallback models tried when a generation
+   * fails with a transient provider error or returns nothing before any tool
+   * has run. Empty chains = failover off.
+   */
+  failoverChains: FailoverChains
   /** User-configurable lifecycle hooks. Commands remain disabled unless shell
    * execution is enabled and the exact command matches the allowlist. */
   projectHooks: ProjectHook[]
@@ -768,6 +1068,8 @@ export interface AppSettings {
    * attacker's server. Never imported from a backup.
    */
   remoteRelayUrl: string | null
+  /** Separately trusted HTTPS origin that serves the static phone client. */
+  remoteClientUrl: string | null
   /**
    * Public routing id of this desktop on the relay (random, minted on first
    * enable). Not a secret: it only identifies WHICH desktop a phone connects
@@ -775,6 +1077,46 @@ export interface AppSettings {
    * live in encrypted storage and never travel in a backup.
    */
   remoteDesktopId: string | null
+  /** Morning brief: a once-daily digest of overnight results. Null = off. */
+  morningBrief: MorningBriefSettings | null
+  /**
+   * Last 7 briefs, newest first. Written ONLY by main (BriefService);
+   * deliberately not part of the renderer patch surface — see
+   * settingsPatchSchema.
+   */
+  morningBriefHistory: MorningBrief[]
+  /**
+   * Push-to-talk dictation (offline whisper.cpp). Also gates the microphone
+   * permission grant in main — the mic is never available while this is off.
+   */
+  voiceInputEnabled: boolean
+  /** Per-message read-aloud with the OS voice (speechSynthesis, offline). */
+  voiceReadAloudEnabled: boolean
+  /** Which downloaded ggml model transcription uses. */
+  voiceModelId: VoiceModelId
+  /**
+   * Custom/manual whisper-cli path (macOS has no downloadable CLI binary).
+   * Main-owned: set ONLY by the voice:pickBinary handler's native dialog —
+   * never from a renderer patch or an imported backup, since it is an
+   * executable main will spawn.
+   */
+  voiceWhisperBinaryPath: string | null
+  /** Quick-assistant actions shown in the mini window (editable in Settings). */
+  quickActions: QuickAction[]
+  /**
+   * Electron accelerator that summons the quick-assistant window. Empty string
+   * disables it. Registration is try/catch — another app may own the combo.
+   */
+  quickAssistantShortcut: string
+  /**
+   * App-lock passphrase verifier (scrypt), or null = no lock. Main-owned:
+   * deliberately absent from settingsPatchSchema (only lock:setPassphrase
+   * writes it) and a member of SECURITY_SENSITIVE_SETTING_KEYS so it never
+   * travels in a backup. Never the passphrase itself.
+   */
+  appLockHash: AppLockHash | null
+  /** Minutes of system idle before auto-lock; null = never auto-lock. */
+  appLockIdleMinutes: number | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -817,6 +1159,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoRoutingEnabled: false,
   autoRoutingPolicy: 'balanced',
   autoRoutingMaxCostUsd: null,
+  monthlyBudgetUsd: null,
+  failoverChains: {},
   projectHooks: [],
   ideCommand: 'auto',
   gettingStartedDismissedAt: null,
@@ -829,7 +1173,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   workflowWebhookToken: null,
   remoteAccessEnabled: false,
   remoteRelayUrl: null,
+  remoteClientUrl: null,
   remoteDesktopId: null,
+  morningBrief: null,
+  morningBriefHistory: [],
+  voiceInputEnabled: false,
+  voiceReadAloudEnabled: false,
+  voiceModelId: 'base',
+  voiceWhisperBinaryPath: null,
+  quickActions: DEFAULT_QUICK_ACTIONS,
+  quickAssistantShortcut: 'CommandOrControl+Shift+Space',
+  appLockHash: null,
+  appLockIdleMinutes: null,
 }
 
 /**
@@ -862,6 +1217,13 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   // the backup's author controls.
   'remoteAccessEnabled',
   'remoteRelayUrl',
+  'remoteClientUrl',
+  // An imported backup could otherwise point main at an arbitrary executable
+  // that transcription would then spawn.
+  'voiceWhisperBinaryPath',
+  // Importing this would silently swap the app-lock passphrase for whatever
+  // the backup's author chose.
+  'appLockHash',
 ] satisfies readonly (keyof AppSettings)[])
 
 // ---------------------------------------------------------------------------
@@ -956,11 +1318,18 @@ export interface OptimizerRun {
   providerId: string | null
   modelId: string | null
   maxRounds: number
+  /** Whether a higher score wins ('maximize', e.g. ops/sec) or a lower one ('minimize', e.g. runtime). */
+  direction: 'maximize' | 'minimize'
   status: 'running' | 'stopped' | 'done' | 'failed'
   roundsDone: number
   bestScore: number | null
   bestVersion: number | null
   lastError: string | null
+  /** App-owned isolated checkout used by this run (kept on publish conflict). */
+  worktreePath: string | null
+  worktreeBranch: string | null
+  baseBranch: string | null
+  baseSha: string | null
   createdAt: number
   updatedAt: number
 }
@@ -984,6 +1353,8 @@ export interface OptimizerStartInput {
   providerId?: string | null
   modelId?: string | null
   maxRounds?: number
+  /** Higher score wins by default; set 'minimize' when a lower score is better (runtime, memory). */
+  direction?: 'maximize' | 'minimize'
   /** Let the optimization agent run shell commands itself (eval runs regardless). */
   allowShell?: boolean
 }
@@ -1127,6 +1498,8 @@ export type CodeChangeStatus = 'proposed' | 'applied' | 'rejected' | 'reverted'
 export interface GitFileChange {
   path: string
   status: string
+  /** Original path for a porcelain rename/copy record. */
+  oldPath?: string
 }
 
 /** Working-tree status for the Code-mode commit bar. */
@@ -1565,8 +1938,28 @@ export interface AgentProfile {
   /** Max reasoning/tool rounds; null = the delegate default. */
   maxRounds: number | null
   enabled: boolean
+  /** Bot Mode (v46): the bot's role designation ("Researcher", "Editor"). */
+  title: string
+  /** Bot Mode (v46): visual identity in the roster; null = initials + hashed color. */
+  avatar: BotAvatar | null
+  /**
+   * Bot Mode (v46): hidden from the roster. Display-only — @mentions still
+   * resolve, group memberships stay, routines keep running (Hermes semantics).
+   */
+  hidden: boolean
+  /**
+   * Bot Mode (v46): the bot's canonical chat (a `conversations` row with
+   * agent_id = this profile), created lazily on first open. Null until then.
+   */
+  chatConversationId: string | null
   createdAt: number
   updatedAt: number
+}
+
+/** Bot roster avatar: an emoji and/or an accent color (hex). */
+export interface BotAvatar {
+  emoji?: string | null
+  color?: string | null
 }
 
 export interface AgentProfileInput {
@@ -1578,9 +1971,58 @@ export interface AgentProfileInput {
   toolIds?: string[] | null
   maxRounds?: number | null
   enabled?: boolean
+  title?: string
+  avatar?: BotAvatar | null
+  hidden?: boolean
 }
 
 export type AgentProfilePatch = Partial<AgentProfileInput>
+
+// ---------------------------------------------------------------------------
+// Bot Mode (v46) — roster, bot-to-bot messaging, group rooms
+// ---------------------------------------------------------------------------
+
+/**
+ * A group room: 2–6 bots deliberating in one shared conversation
+ * (`conversationId` holds the transcript; member turns are assistant messages
+ * attributed via `messages.agent_id`). Mirrors Hermes group chats: up to three
+ * serial reply-or-pass rounds per user message, capped at 10 bot messages.
+ */
+export interface BotGroup {
+  id: string
+  name: string
+  conversationId: string
+  /** A member escalated with @user and the user hasn't opened the room since. */
+  needsUser: boolean
+  memberIds: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** One roster row of the Bots pane: a bot plus its canonical-chat activity. */
+export interface BotRosterItem {
+  agent: AgentProfile
+  /** Canonical chat id, or null when the chat hasn't been opened yet. */
+  conversationId: string | null
+  lastMessageAt: number | null
+  snippet: string | null
+  /** Generating right now, or wrote within the last 90 s (active-now strip). */
+  active: boolean
+}
+
+/** One group-room row of the Bots pane roster. */
+export interface BotGroupRosterItem {
+  group: BotGroup
+  lastMessageAt: number | null
+  snippet: string | null
+  /** A round is currently running in this room. */
+  active: boolean
+}
+
+export interface BotRoster {
+  bots: BotRosterItem[]
+  groups: BotGroupRosterItem[]
+}
 
 // ---------------------------------------------------------------------------
 // Workflows (visual node graph)
@@ -1645,6 +2087,19 @@ export interface WorkflowCalendarSchedule {
   time: string
 }
 
+/**
+ * Folder-watch trigger config (v42). `folderPath` always comes from the OS
+ * folder picker — a user grant, never free text. Empty `glob` matches every
+ * file; the enabled flag lives inside the config (no separate column).
+ */
+export interface WorkflowWatchConfig {
+  enabled: boolean
+  folderPath: string
+  glob: string
+  event: 'created' | 'changed'
+  debounceMs?: number
+}
+
 export interface Workflow {
   id: string
   name: string
@@ -1658,8 +2113,14 @@ export interface Workflow {
    * PER WORKFLOW so switching the endpoint on never exposes the whole library.
    */
   webhookEnabled: boolean
+  /** Folder-watch trigger; null = none configured (v42). */
+  watch: WorkflowWatchConfig | null
+  /** Monthly spend cap in USD (v44): runs are skipped past it. Null = no cap. */
+  budgetUsd?: number | null
   /** Last time a run started (any trigger), for the scheduler's due check. */
   lastRunAt: number | null
+  /** Last time the schedule or its enabled state changed. */
+  scheduleUpdatedAt: number
   createdAt: number
   updatedAt: number
 }
@@ -1670,10 +2131,15 @@ export interface WorkflowInput {
   schedule?: WorkflowSchedule | null
   scheduleEnabled?: boolean
   webhookEnabled?: boolean
+  watch?: WorkflowWatchConfig | null
+  budgetUsd?: number | null
 }
 
-/** How a run was started. 'webhook' = the local trigger endpoint (v35). */
-export type WorkflowRunTrigger = 'manual' | 'schedule' | 'webhook'
+/**
+ * How a run was started. 'webhook' = the local trigger endpoint (v35);
+ * 'watch' = the folder watcher (v42).
+ */
+export type WorkflowRunTrigger = 'manual' | 'schedule' | 'webhook' | 'watch'
 
 /** State of the local trigger endpoint, for the settings + builder UI. */
 export interface WorkflowTriggerInfo {
@@ -1686,6 +2152,12 @@ export interface WorkflowTriggerInfo {
    * while the endpoint is off or unbound.
    */
   url: string | null
+}
+
+/** Live state of one workflow's folder watch, for the builder's Watch panel. */
+export interface WorkflowWatchStatus {
+  watching: boolean
+  lastError: string | null
 }
 
 /** A persisted execution of a saved workflow. */
@@ -1770,6 +2242,8 @@ export interface ScheduledTask {
    * memories are used for the run. Null = the default model, no persona.
    */
   agentId: string | null
+  /** Monthly spend cap in USD (v44): runs are skipped past it. Null = no cap. */
+  budgetUsd?: number | null
   lastRunAt: number | null
   lastStatus: ScheduledTaskStatus
   lastOutput: string
@@ -1866,6 +2340,7 @@ export interface RemoteDevice {
 export interface RemoteStatus {
   enabled: boolean
   relayUrl: string | null
+  clientUrl: string | null
   /** Whether the outbound tunnel to the relay is currently established. */
   connected: boolean
   /** Last connection error, redacted; null while healthy. */
@@ -1884,6 +2359,8 @@ export interface RemoteSetConfigInput {
   enabled: boolean
   /** Relay base URL (https:// or ws://localhost for local testing); null keeps the current one. */
   relayUrl?: string | null
+  /** Trusted static mobile-client URL; must have a different origin from the relay. */
+  clientUrl?: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +2458,63 @@ export interface MemoryInput {
 export interface MemoryPatch {
   title?: string
   content?: string
+}
+
+// ---------------------------------------------------------------------------
+// Notebooks (Home-level living Markdown documents, documents table revived in
+// v43). Versions are written by the repository before every content change,
+// capped at 20 per document — that is the undo story for model edits.
+// ---------------------------------------------------------------------------
+
+export interface NotebookDoc {
+  id: string
+  title: string
+  /** Markdown content. */
+  content: string
+  /** Legacy conversation-scoped rows only; notebooks carry null. */
+  conversationId: string | null
+  /** 'doc' for notebooks; 'html' rows are legacy prototypes, never listed. */
+  kind: 'doc' | 'html'
+  createdAt: number
+  updatedAt: number
+}
+
+/** List row without the content (Home card weight): length stands in. */
+export interface NotebookDocSummary {
+  id: string
+  title: string
+  contentLength: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface NotebookDocInput {
+  title: string
+  content?: string
+}
+
+export interface NotebookDocPatch {
+  title?: string
+  content?: string
+}
+
+/** One snapshot of a notebook's previous content (newest first by id). */
+export interface NotebookDocVersion {
+  id: number
+  documentId: string
+  content: string
+  createdAt: number
+}
+
+/**
+ * Version row without the content (the history panel only shows a length and
+ * restores by id — shipping up to 20 full contents over IPC is dead weight).
+ */
+export interface NotebookDocVersionSummary {
+  id: number
+  documentId: string
+  contentLength: number
+  createdAt: number
 }
 
 /** Outcome of a memory-consolidation ("dreaming") run. */

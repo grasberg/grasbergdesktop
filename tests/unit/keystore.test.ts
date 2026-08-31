@@ -13,14 +13,24 @@ import { openDatabase, type AppDatabase } from '../../src/main/db/database'
 
 const safeStorage = {
   available: true,
+  backend: 'gnome_libsecret' as
+    | 'basic_text'
+    | 'gnome_libsecret'
+    | 'kwallet'
+    | 'kwallet5'
+    | 'kwallet6'
+    | 'unknown',
   isEncryptionAvailable: (): boolean => safeStorage.available,
+  getSelectedStorageBackend: () => safeStorage.backend,
   encryptString: (plain: string): Buffer => Buffer.from(`os:${plain}`, 'utf8'),
   decryptString: (buf: Buffer): string => buf.toString('utf8').slice(3),
 }
 
 vi.mock('electron', () => ({ safeStorage }))
 
-const { reencryptInsecureKeys } = await import('../../src/main/keys/keystore')
+const { hasSecureStorageBackend, reencryptInsecureKeys } = await import(
+  '../../src/main/keys/keystore'
+)
 
 const insecure = (plain: string): string =>
   `insecure:${Buffer.from(plain, 'utf8').toString('base64')}`
@@ -33,6 +43,7 @@ let db: AppDatabase
 
 beforeEach(() => {
   safeStorage.available = true
+  safeStorage.backend = 'gnome_libsecret'
   dir = mkdtempSync(join(tmpdir(), 'uld-keystore-'))
   db = openDatabase(join(dir, 'app.db'))
 })
@@ -64,6 +75,17 @@ function seedInsecureSecrets(): void {
 }
 
 describe('reencryptInsecureKeys', () => {
+  it('rejects Linux basic_text and unknown backends despite reported availability', () => {
+    safeStorage.backend = 'basic_text'
+    expect(hasSecureStorageBackend(safeStorage, 'linux')).toBe(false)
+    safeStorage.backend = 'unknown'
+    expect(hasSecureStorageBackend(safeStorage, 'linux')).toBe(false)
+    safeStorage.backend = 'kwallet6'
+    expect(hasSecureStorageBackend(safeStorage, 'linux')).toBe(true)
+    safeStorage.backend = 'basic_text'
+    expect(hasSecureStorageBackend(safeStorage, 'win32')).toBe(true)
+  })
+
   it('upgrades every insecure secret, not just provider keys', () => {
     seedInsecureSecrets()
 

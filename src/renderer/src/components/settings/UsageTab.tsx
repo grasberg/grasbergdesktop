@@ -1,15 +1,27 @@
 /**
  * Settings → Usage: a local, estimate-only summary of token usage and cost
  * per provider+model over a selectable window. Everything is computed from
- * locally stored messages — nothing is sent anywhere.
+ * locally stored messages — nothing is sent anywhere. Since v44 it also shows
+ * headless (background) spend and holds the global monthly budget cap.
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { UsageSummaryEntry } from '@shared/types'
+import type { HeadlessUsageSummaryEntry, UsageSummaryEntry } from '@shared/types'
 import { PRICING_DISCLAIMER, formatCost } from '@shared/pricing'
+import { BUDGET_UNPRICED_NOTE } from '@shared/budget'
 import { toNormalized, unwrap } from '@/api/uld'
+import { useSettingsStore } from '@/stores/settings'
 
 const WINDOWS = [7, 30, 90] as const
+
+const RUN_KIND_LABEL: Record<string, string> = {
+  workflow: 'Workflows',
+  scheduled_task: 'Scheduled tasks',
+  agent_run: 'Agent runs',
+  arena: 'Code Arena',
+  brief: 'Morning brief',
+  other: 'Other background',
+}
 
 function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
@@ -18,13 +30,17 @@ function formatTokens(value: number): string {
 }
 
 export default function UsageTab(): ReactElement {
+  const settings = useSettingsStore((state) => state.settings)
+  const update = useSettingsStore((state) => state.update)
   const [days, setDays] = useState<number>(30)
   const [entries, setEntries] = useState<UsageSummaryEntry[] | null>(null)
+  const [headless, setHeadless] = useState<HeadlessUsageSummaryEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let stale = false
     setEntries(null)
+    setHeadless(null)
     setError(null)
     unwrap(window.uld.usage.summary(days))
       .then((rows) => {
@@ -32,6 +48,13 @@ export default function UsageTab(): ReactElement {
       })
       .catch((e: unknown) => {
         if (!stale) setError(toNormalized(e).message)
+      })
+    unwrap(window.uld.usage.headlessSummary(days))
+      .then((rows) => {
+        if (!stale) setHeadless(rows)
+      })
+      .catch(() => {
+        // The message table above still renders; the section shows nothing.
       })
     return () => {
       stale = true
@@ -47,6 +70,31 @@ export default function UsageTab(): ReactElement {
       <p className="field-hint">
         Token usage recorded on locally stored messages, grouped by provider and model. Cost is an
         estimate from a built-in price list. {PRICING_DISCLAIMER}
+      </p>
+
+      {settings ? (
+        <div className="param-row">
+          <label className="field-label" htmlFor="usage-monthly-budget">
+            Monthly budget (USD)
+          </label>
+          <span className="param-spacer" aria-hidden="true" />
+          <input
+            id="usage-monthly-budget"
+            className="input param-num wide"
+            type="number"
+            min="0.01"
+            step="0.01"
+            placeholder="No cap"
+            value={settings.monthlyBudgetUsd ?? ''}
+            onChange={(e) =>
+              void update({ monthlyBudgetUsd: e.target.value ? Number(e.target.value) : null })
+            }
+          />
+        </div>
+      ) : null}
+      <p className="field-hint">
+        Global cap on month-to-date spend: sends ask once, background runs are skipped. Caps count
+        only priced spend — estimate, unpriced models excluded.
       </p>
 
       <div className="param-row">
@@ -114,6 +162,42 @@ export default function UsageTab(): ReactElement {
               Estimated total: <strong>{formatCost(totalCost)}</strong>
             </p>
           ) : null}
+        </>
+      ) : null}
+
+      {headless && headless.length > 0 ? (
+        <>
+          <h4 className="section-subhead">Background spend</h4>
+          <table className="usage-table">
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th className="num">Runs</th>
+                <th className="num">In</th>
+                <th className="num">Out</th>
+                <th className="num">Est. cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {headless.map((entry) => (
+                <tr key={entry.runKind}>
+                  <td>
+                    {RUN_KIND_LABEL[entry.runKind] ?? entry.runKind}
+                    {entry.unpricedRuns > 0 ? (
+                      <span className="field-hint"> +{entry.unpricedRuns} unpriced</span>
+                    ) : null}
+                  </td>
+                  <td className="num">{entry.runs}</td>
+                  <td className="num">{formatTokens(entry.promptTokens)}</td>
+                  <td className="num">{formatTokens(entry.completionTokens)}</td>
+                  <td className="num">
+                    {entry.estimatedCostUsd !== null ? formatCost(entry.estimatedCostUsd) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="field-hint">{BUDGET_UNPRICED_NOTE}</p>
         </>
       ) : null}
     </section>

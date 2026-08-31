@@ -56,7 +56,12 @@ function userContent(content: string | ContentPart[]): Block[] {
   const blocks: Block[] = []
   for (const p of content) {
     if (p.type === 'text') blocks.push({ text: p.text })
-    else {
+    else if (p.type === 'document') {
+      // This adapter strips document parts: substitute the extracted text.
+      blocks.push({
+        text: p.fallbackText ?? `[Attached PDF: ${p.name ?? 'document'} — not supported by this provider]`,
+      })
+    } else {
       const img = imageBlock(p.image_url.url)
       if (img) blocks.push(img)
     }

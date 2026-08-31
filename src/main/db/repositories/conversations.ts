@@ -32,12 +32,33 @@ export interface ConversationCreateInput {
    * Never accepted over IPC (the convCreate schema has no id field).
    */
   id?: string
+  /**
+   * Fork provenance — set only by the conv:fork handler; never accepted over
+   * IPC (the convCreate schema has no such fields).
+   */
+  parentConversationId?: string | null
+  forkedAtMessageId?: string | null
+  /** Private space (v45); null/absent = the default space. */
+  spaceId?: string | null
+  /**
+   * Bot Mode (v46): the agent profile owning this conversation (canonical bot
+   * chat). Repository-only — set by the bot service, never accepted over IPC.
+   */
+  agentId?: string | null
 }
 
 export type ConversationPatch = ConvUpdateRequest['patch']
 
 export interface ConversationsRepository {
-  list(req?: ConversationListRequest): ConversationSummary[]
+  /**
+   * Default-space rows only unless `spaceId` names a private space —
+   * the safe default: a caller that doesn't know about spaces can never
+   * leak a private conversation. `allSpaces` is repository-only (never
+   * accepted over IPC); backup export with the include flag is its caller.
+   */
+  list(
+    req?: ConversationListRequest & { allSpaces?: boolean; includeBots?: boolean }
+  ): ConversationSummary[]
   /** Generates the id (crypto.randomUUID) and timestamps. */
   create(input: ConversationCreateInput): Conversation
   getById(id: string): Conversation | null
@@ -55,6 +76,10 @@ export interface ConversationsRepository {
   setSummary(id: string, summaryText: string, throughSeq: number): void
   /** Drop the compaction summary — the history it covered no longer exists. */
   clearSummary(id: string): void
+  /** Forks of a conversation (sibling lookup for the backlink chip), oldest first. */
+  listForks(parentId: string): Array<{ id: string; title: string; createdAt: number }>
+  /** Ids of every conversation living in a private space (exclusion filters). */
+  listPrivateSpaceConversationIds(): string[]
 }
 
 interface ConversationRow {
@@ -72,6 +97,11 @@ interface ConversationRow {
   knowledge_base_id: string | null
   summary_text: string | null
   summary_through_seq: number | null
+  parent_conversation_id: string | null
+  forked_at_message_id: string | null
+  budget_usd: number | null
+  space_id: string | null
+  agent_id: string | null
   created_at: number
   updated_at: number
 }
@@ -82,6 +112,7 @@ interface SummaryRow {
   title: string
   updated_at: number
   project_ref: string | null
+  space_id: string | null
   snippet: string | null
 }
 
@@ -109,6 +140,11 @@ function toConversation(row: ConversationRow): Conversation {
     knowledgeBaseId: row.knowledge_base_id,
     summaryText: row.summary_text,
     summaryThroughSeq: row.summary_through_seq,
+    parentConversationId: row.parent_conversation_id,
+    forkedAtMessageId: row.forked_at_message_id,
+    budgetUsd: row.budget_usd ?? null,
+    spaceId: row.space_id,
+    agentId: row.agent_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -129,6 +165,24 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
     list(req = {}) {
       const where: string[] = []
       const params: SqlValue[] = []
+      // Space scoping FIRST so the search clause (and its snippet subquery)
+      // can never match across spaces.
+      if (!req.allSpaces) {
+        if (req.spaceId) {
+          where.push('c.space_id = ?')
+          params.push(req.spaceId)
+        } else {
+          where.push('c.space_id IS NULL')
+        }
+      }
+      // Bot-owned conversations (canonical bot chats + group-room transcripts)
+      // live in the Bots pane, not the regular sidebar. Backup export opts back
+      // in with includeBots so they are never lost from an exported backup.
+      if (!req.includeBots) {
+        where.push(
+          'c.agent_id IS NULL AND c.id NOT IN (SELECT conversation_id FROM bot_groups)'
+        )
+      }
       if (req.mode) {
         where.push('c.mode = ?')
         params.push(req.mode)
@@ -155,7 +209,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         params.push(Math.max(1, Math.floor(req.limit)))
       }
       const rows = driver.all<SummaryRow>(
-        `SELECT c.id, c.mode, c.title, c.updated_at, c.project_ref,
+        `SELECT c.id, c.mode, c.title, c.updated_at, c.project_ref, c.space_id,
            (SELECT substr(m2.content, 1, 400) FROM messages m2
             WHERE m2.conversation_id = c.id
               AND m2.status <> 'streaming'
@@ -173,6 +227,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         title: row.title,
         updatedAt: row.updated_at,
         projectRef: row.project_ref,
+        spaceId: row.space_id,
         snippet: toSnippet(row.snippet),
       }))
     },
@@ -192,6 +247,12 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         projectRef: input.projectRef ?? null,
         moaPresetId: input.moaPresetId ?? null,
         knowledgeBaseId: input.knowledgeBaseId ?? null,
+        parentConversationId: input.parentConversationId ?? null,
+        forkedAtMessageId: input.forkedAtMessageId ?? null,
+        // Not in the INSERT below — the column simply defaults to NULL.
+        budgetUsd: null,
+        spaceId: input.spaceId ?? null,
+        agentId: input.agentId ?? null,
         createdAt: now,
         updatedAt: now,
       }
@@ -199,8 +260,8 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         `INSERT INTO conversations
            (id, mode, title, provider_id, model_id, system_prompt, params_json,
             workspace_id, project_id, project_ref, moa_preset_id, knowledge_base_id,
-            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            parent_conversation_id, forked_at_message_id, space_id, agent_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           conversation.id,
           conversation.mode,
@@ -214,6 +275,10 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           conversation.projectRef,
           conversation.moaPresetId,
           conversation.knowledgeBaseId ?? null,
+          conversation.parentConversationId ?? null,
+          conversation.forkedAtMessageId ?? null,
+          conversation.spaceId ?? null,
+          conversation.agentId ?? null,
           conversation.createdAt,
           conversation.updatedAt,
         ]
@@ -239,6 +304,7 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
           project_ref: patch.projectRef,
           moa_preset_id: patch.moaPresetId,
           knowledge_base_id: patch.knowledgeBaseId,
+          budget_usd: patch.budgetUsd,
         },
         { touchUpdatedAt: true }
       )
@@ -285,6 +351,23 @@ export function createConversationsRepository(driver: SqliteDriver): Conversatio
         'UPDATE conversations SET summary_text = NULL, summary_through_seq = NULL WHERE id = ?',
         [id]
       )
+    },
+
+    listForks(parentId) {
+      const rows = driver.all<{ id: string; title: string; created_at: number }>(
+        `SELECT id, title, created_at FROM conversations
+         WHERE parent_conversation_id = ?
+         ORDER BY created_at ASC`,
+        [parentId]
+      )
+      return rows.map((row) => ({ id: row.id, title: row.title, createdAt: row.created_at }))
+    },
+
+    listPrivateSpaceConversationIds() {
+      const rows = driver.all<{ id: string }>(
+        'SELECT id FROM conversations WHERE space_id IS NOT NULL'
+      )
+      return rows.map((row) => row.id)
     },
   }
 }

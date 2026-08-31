@@ -5,6 +5,8 @@
  */
 
 import type {
+  AppLockSetPassphraseInput,
+  AppLockStatus,
   AppSettings,
   Attachment,
   Conversation,
@@ -27,8 +29,12 @@ import type {
   ScheduledTaskInput,
   ScheduledTasksChangedEvent,
   ScheduledWorkflowStatus,
+  Space,
   StreamEventEnvelope,
   TestConnectionResult,
+  VoiceDownloadProgressEvent,
+  VoiceModelId,
+  VoiceStatus,
   WorkflowRunFinishedEvent,
   WorkflowRunListItem,
 } from '@shared/types'
@@ -87,11 +93,46 @@ export interface ConversationsStoreState {
    * `projectRef` when given, otherwise standalone (unfiled).
    */
   create(mode: ConversationMode, projectRef?: string | null): Promise<Conversation>
+  /** Forks a conversation at a message (whole transcript when messageId omitted), then selects the fork. */
+  fork(id: string, messageId?: string): Promise<void>
   select(id: string | null): void
   rename(id: string, title: string): Promise<void>
   /** Files/unfiles a task under a project, updating the list in place. */
   setProject(id: string, projectRef: string | null): Promise<void>
   remove(id: string): Promise<void>
+}
+
+/** Private spaces (v45): the sidebar switcher + Settings → Privacy editor. */
+export interface SpacesStoreState {
+  spaces: Space[]
+  /**
+   * Renderer-session state only — every launch lands in the default space
+   * (deliberate privacy posture; nothing persisted). Null = default space.
+   */
+  activeSpaceId: string | null
+  loaded: boolean
+  load(): Promise<void>
+  /** Switches space: deselects the open conversation and reloads the list. */
+  setActive(id: string | null): void
+  create(name: string): Promise<void>
+  rename(id: string, name: string): Promise<void>
+  /** null = all providers. */
+  setAllowlist(id: string, providerIds: string[] | null): Promise<void>
+  remove(id: string): Promise<void>
+}
+
+/** App lock (v45): boot gating + the lock screen. */
+export interface LockStoreState {
+  status: AppLockStatus | null
+  /** Error line for the lock screen (wrong passphrase / lockout), not a toast. */
+  unlockError: string | null
+  load(): Promise<void>
+  /** False on a wrong passphrase (the error lands in unlockError). */
+  unlock(passphrase: string): Promise<boolean>
+  lockNow(): Promise<void>
+  setPassphrase(input: AppLockSetPassphraseInput): Promise<void>
+  /** Wired once at app start to window.uld.lock.onChanged. */
+  handleChanged(evt: { locked: boolean }): void
 }
 
 export interface ProjectsStoreState {
@@ -159,6 +200,8 @@ export interface ChatStoreState {
     systemPrompt?: string | null
     moaPresetId?: string | null
     knowledgeBaseId?: string | null
+    /** Monthly spend cap in USD; null clears (v44). */
+    budgetUsd?: number | null
   }): Promise<void>
   /** Wired once at app start to window.uld.chat.onStreamEvent. */
   handleStreamEvent(envelope: StreamEventEnvelope): void
@@ -186,9 +229,10 @@ export interface ArtifactPreview {
 /**
  * Which surface fills the main area. 'home' is the boot default (the overview
  * dashboard); 'conversation' shows the active conversation's mode view and
- * falls back to Home while no conversation is selected.
+ * falls back to Home while no conversation is selected. 'bots' is the Bot
+ * Mode roster + group rooms surface (v46).
  */
-export type AppView = 'home' | 'conversation' | 'workflows'
+export type AppView = 'home' | 'conversation' | 'workflows' | 'bots'
 
 export interface UiStoreState {
   /** Resolved theme actually applied to <html data-theme>. */
@@ -255,6 +299,31 @@ export interface ScheduledTasksStoreState {
   setEnabled(id: string, enabled: boolean): Promise<void>
   remove(id: string): Promise<void>
   handleChanged(event: ScheduledTasksChangedEvent): void
+}
+
+/** Offline voice: whisper model management, push-to-talk STT and read-aloud. */
+export interface VoiceStoreState {
+  status: VoiceStatus | null
+  loaded: boolean
+  /** Push-to-talk capture in progress (composer mic button state). */
+  recording: boolean
+  /** Message currently being read aloud, null when silent. */
+  speakingMessageId: string | null
+  /** Latest download progress event (null when nothing is in flight). */
+  downloadProgress: VoiceDownloadProgressEvent | null
+  load(): Promise<void>
+  download(modelId: VoiceModelId): Promise<void>
+  cancelDownload(): Promise<void>
+  remove(modelId: VoiceModelId): Promise<void>
+  pickBinary(clear: boolean): Promise<void>
+  /** Uploads a recorded WAV in chunks and returns the transcript. */
+  sendRecording(wav: Uint8Array): Promise<string>
+  setRecording(on: boolean): void
+  /** Reads a message aloud (follows a still-streaming message live). */
+  play(messageId: string): void
+  stopSpeaking(): void
+  /** Wired once at app start to window.uld.voice.onDownloadProgress. */
+  handleDownloadProgress(e: VoiceDownloadProgressEvent): void
 }
 
 /** Optimizer runs (autonomous optimize-evaluate-commit loops per project). */

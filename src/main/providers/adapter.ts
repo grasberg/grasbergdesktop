@@ -25,10 +25,22 @@ import type { ProviderModelCatalog } from '@shared/catalog'
  * A part of a multimodal message. String content is used for text-only
  * messages (the common case); an array of parts carries text + images for
  * vision-capable models (OpenAI content-parts format).
+ *
+ * Document parts (raw PDFs) are consumed natively by Anthropic (document
+ * block) and Google (inlineData); every other adapter MUST strip them and
+ * substitute `fallbackText` — never forward an unsupported part type.
  */
 export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
+  | {
+      type: 'document'
+      mediaType: 'application/pdf'
+      dataBase64: string
+      name?: string
+      /** Extracted text substituted by adapters without document support. */
+      fallbackText?: string
+    }
 
 /** Wire-format message sent to the provider. */
 export interface AdapterMessage {

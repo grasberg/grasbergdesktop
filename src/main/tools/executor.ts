@@ -25,6 +25,10 @@
  */
 
 import { promises as fs } from 'node:fs'
+import { lookup as dnsLookup, type LookupOneOptions } from 'node:dns'
+import { request as httpsRequest } from 'node:https'
+import type { LookupFunction } from 'node:net'
+import { Readable } from 'node:stream'
 import path from 'node:path'
 import type {
   ActivityDecision,
@@ -35,6 +39,8 @@ import type {
   GitHubPrInput,
   GitHubPrResult,
   GitHubPrReviewInput,
+  NotebookDoc,
+  NotebookDocSummary,
   SandboxLevel,
   ScheduledTask,
   ScheduledTaskInput,
@@ -139,7 +145,9 @@ export interface ToolExecutorDeps {
   /** Knowledge-base retrieval for the 'knowledge_search' tool. */
   knowledgeSearch?: (
     knowledgeBaseId: string,
-    query: string
+    query: string,
+    /** Originating conversation's space (private-space provider allowlist). */
+    spaceId?: string | null
   ) => Promise<Array<{ source: string; content: string; score: number }>>
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
   delegate?: (task: string, ctx: ToolExecuteContext, agentName?: string) => Promise<string>
@@ -152,6 +160,8 @@ export interface ToolExecutorDeps {
       prompt: string
       count?: number
       size?: 'auto' | 'square' | 'landscape' | 'portrait'
+      /** Originating conversation's space (private-space provider allowlist). */
+      spaceId?: string | null
     }): Promise<Attachment[]>
   } | null
   /**
@@ -217,6 +227,18 @@ export interface ToolExecutorDeps {
     projectPath(projectId: string): string | null
   } | null
   /**
+   * Home-level notebooks for the *_document tools (wired to db.documents;
+   * mutations signal main so the Home Notes card stays live). Absent => the
+   * tools report themselves unavailable.
+   */
+  documents?: {
+    list(): NotebookDocSummary[]
+    getById(id: string): NotebookDoc | null
+    findByTitle(title: string): NotebookDoc | null
+    create(input: { title: string; content?: string }): NotebookDoc
+    update(id: string, patch: { title?: string; content?: string }): NotebookDoc | null
+  } | null
+  /**
    * Lazily creates + links a Work task's own workspace folder (registered as
    * a code_projects row) so edit_file/write_file work without a user-granted
    * folder. Absent => the tools require an explicitly granted folder.
@@ -234,6 +256,15 @@ export interface ToolExecutorDeps {
   skills?: {
     getEnabledByName(name: string): { name: string; content: string } | null
     listEnabledNames(): string[]
+  } | null
+  /**
+   * Bot Mode (v46): fire-and-forget bot-to-bot delivery for the
+   * 'message_agent' tool. Only callable from a canonical bot chat; the
+   * service resolves the target by name, queues the delivery, and later
+   * routes the reply back into the sender's chat. Absent => unavailable.
+   */
+  botMessenger?: {
+    send(senderConversationId: string, target: string, message: string): Promise<string>
   } | null
   /** Absolute path of the project folder granted to this conversation, or null. */
   getProjectRoot: (conversation: Conversation) => string | null
@@ -269,9 +300,10 @@ export interface ToolExecuteContext {
   /** Plan mode (code conversations): mutating tools are refused. */
   planMode?: boolean
   /**
-   * Sandbox posture: 'read-only' refuses every mutating tool; 'full' allows
-   * run_shell_command an absolute cwd outside the project folder. Unset
-   * behaves as 'workspace-write' (the pre-sandbox default).
+   * Sandbox posture: 'read-only' refuses every mutating tool;
+   * 'workspace-write' permits only audited file mutations inside the project;
+   * 'full' additionally enables the unrestricted host shell. Unset behaves as
+   * 'workspace-write' (the safe default).
    */
   sandboxLevel?: SandboxLevel
   /** Auto-accept edits: edit_file/write_file skip the approval dialog. */
@@ -565,8 +597,8 @@ function isPrivateIpv6(groups: number[]): boolean {
  * not be fetched by model-driven network tools (SSRF guard). Covers literal
  * IPv4/IPv6 (incl. IPv4-mapped IPv6) plus the common internal hostnames. This
  * is a literal-host guard; DNS rebinding (a public name resolving to a private
- * IP) is a documented residual accepted for this local-first, approval-gated,
- * GET-only surface.
+ * IP). Host spelling is only the first check; the socket lookup below applies
+ * the same classification to the address actually used for the connection.
  */
 function isBlockedHostname(hostnameRaw: string): boolean {
   // Drop the IPv6 brackets and a single trailing FQDN dot ('localhost.' and
@@ -599,6 +631,67 @@ function ssrfRefusal(parsed: URL): string | null {
 
 /** Thrown inside guarded fetches; message is surfaced to the model verbatim. */
 class FetchGuardError extends Error {}
+
+/** Error text for a DNS result that must not be connected to. */
+export function resolvedAddressRefusal(address: string): string | null {
+  return isBlockedHostname(address)
+    ? `Error: refusing to fetch internal/loopback/link-local resolved address '${address}'.`
+    : null
+}
+
+/**
+ * HTTPS lookup hook: validates the DNS answer in the exact lookup used by the
+ * socket, avoiding the pre-resolve-then-fetch TOCTOU/rebinding gap.
+ */
+const publicLookup: LookupFunction = (hostname, options, callback): void => {
+  const lookupOptions: LookupOneOptions = { ...options, all: false }
+  dnsLookup(hostname, lookupOptions, (error, address, family) => {
+    if (error) return callback(error, address, family)
+    const refusal = resolvedAddressRefusal(address)
+    if (refusal) return callback(new FetchGuardError(refusal), address, family)
+    callback(null, address, family)
+  })
+}
+
+/** Fetch-compatible HTTPS GET using the pinned, public-only socket lookup. */
+function fetchPublicHttps(url: string, init: RequestInit): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {}
+    new Headers(init.headers).forEach((value, name) => {
+      headers[name] = value
+    })
+    const req = httpsRequest(
+      url,
+      {
+        method: init.method,
+        headers,
+        signal: init.signal ?? undefined,
+        agent: false,
+        lookup: publicLookup,
+      },
+      (res) => {
+        const responseHeaders = new Headers()
+        for (const [name, value] of Object.entries(res.headers)) {
+          if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item)
+          else if (value !== undefined) responseHeaders.set(name, value)
+        }
+        const body =
+          init.method === 'HEAD'
+            ? null
+            : (Readable.toWeb(res) as unknown as ConstructorParameters<typeof Response>[0])
+        resolve(
+          new Response(body, {
+            status: res.statusCode ?? 500,
+            statusText: res.statusMessage,
+            headers: responseHeaders,
+          })
+        )
+      }
+    )
+    req.once('error', reject)
+    req.end()
+  })
+}
 
 /**
  * Converts a glob pattern to an anchored RegExp over forward-slash relative
@@ -871,6 +964,10 @@ function requireStringArg(
 /** schedule_task limits — mirror the Scheduled tasks IPC schema. */
 const SCHEDULE_TITLE_MAX_CHARS = 120
 const SCHEDULE_PROMPT_MAX_CHARS = 20_000
+
+/** edit_document limits — mirror the documents IPC schema. */
+const NOTEBOOK_TITLE_MAX_CHARS = 200
+const NOTEBOOK_CONTENT_MAX_CHARS = 200_000
 
 const SCHEDULE_RECURRENCES: readonly string[] = ['once', 'hourly', 'daily', 'weekly']
 
@@ -1183,6 +1280,14 @@ export class ToolExecutor {
         "before calling '" + definition.name + "'."
       )
     }
+    if (definition.id === 'run_shell_command' && ctx.sandboxLevel !== 'full') {
+      audit.decision = 'blocked'
+      audit.detail = 'shell requires full sandbox'
+      return (
+        "Shell commands require sandbox level 'full' because a host shell cannot be confined " +
+        'to the project folder. Use the file tools at workspace-write, or explicitly choose full.'
+      )
+    }
 
     const decision = this.deps.registry.getPermission(definition)
     if (decision === 'deny') {
@@ -1238,6 +1343,7 @@ export class ToolExecutor {
     ctx: ToolExecuteContext
   ): Promise<string | undefined> {
     if (definition.id === 'schedule_task') return this.scheduleTaskNote(args, ctx)
+    if (definition.id === 'edit_document') return this.editDocumentNote(args)
     if (definition.id !== 'git_write' || !this.deps.gitWrite) return undefined
     const root = this.deps.getProjectRoot(ctx.conversation)
     if (!root) return undefined
@@ -1412,6 +1518,12 @@ export class ToolExecutor {
         return this.runUpdateTaskList(args, ctx)
       case 'schedule_task':
         return this.runScheduleTask(args, ctx)
+      case 'list_documents':
+        return this.runListDocuments()
+      case 'read_document':
+        return this.runReadDocument(args)
+      case 'edit_document':
+        return this.runEditDocument(args)
       case 'ask_user_question':
         return this.runAskUserQuestion(args, ctx)
       case 'repo_map':
@@ -1432,6 +1544,8 @@ export class ToolExecutor {
         return this.runKnowledgeSearch(args, ctx)
       case 'delegate':
         return this.runDelegate(args, ctx)
+      case 'message_agent':
+        return this.runMessageAgent(args, ctx)
       case 'browser':
         return this.runBrowser(args)
       case 'computer':
@@ -2114,6 +2228,97 @@ export class ToolExecutor {
     )
   }
 
+  // -- notebooks ------------------------------------------------------------------
+
+  /** Approval-dialog context line for edit_document (best-effort). */
+  private editDocumentNote(args: Record<string, unknown>): string | undefined {
+    try {
+      const title = getString(args, 'title') ?? ''
+      const content = getString(args, 'content') ?? ''
+      // Resolve exactly like runEditDocument: trimmed id wins, an unknown
+      // non-empty id will FAIL there (never a create), empty id falls back
+      // to the title lookup.
+      const id = (getString(args, 'id') ?? '').trim()
+      if (id.length > 0) {
+        const existing = this.deps.documents?.getById(id) ?? null
+        if (!existing) return `Will fail: no notebook with id '${id}'`
+        return `Replaces the content of notebook "${existing.title}" (was ${existing.content.length} chars, now ${content.length})`
+      }
+      const existing = this.deps.documents?.findByTitle(title) ?? null
+      if (existing) {
+        return `Replaces the content of notebook "${existing.title}" (was ${existing.content.length} chars, now ${content.length})`
+      }
+      return `Creates notebook "${title}" (${content.length} chars)`
+    } catch {
+      // The dialog still shows the raw arguments.
+    }
+    return undefined
+  }
+
+  private runListDocuments(): string {
+    if (!this.deps.documents) return 'Error: notebooks are unavailable in this context.'
+    const docs = this.deps.documents.list()
+    if (docs.length === 0) return 'No notebooks exist yet. Use edit_document to create one.'
+    const lines = docs.map(
+      (doc) =>
+        `- "${doc.title}" (id: ${doc.id}, ${doc.contentLength} chars, updated ${new Date(doc.updatedAt).toISOString()})`
+    )
+    return `Notebooks:\n${lines.join('\n')}`
+  }
+
+  private runReadDocument(args: Record<string, unknown>): string {
+    if (!this.deps.documents) return 'Error: notebooks are unavailable in this context.'
+    const id = (getString(args, 'id') ?? '').trim()
+    const title = (getString(args, 'title') ?? '').trim()
+    if (id.length === 0 && title.length === 0) return "Error: provide 'id' or 'title'."
+    const doc =
+      id.length > 0 ? this.deps.documents.getById(id) : this.deps.documents.findByTitle(title)
+    if (!doc) {
+      return id.length > 0
+        ? `Error: no notebook with id '${id}'. Use list_documents to see ids.`
+        : `Error: no notebook titled '${title}'. Use list_documents to see titles.`
+    }
+    // The global capToolResult truncates very long notebooks.
+    return `Notebook "${doc.title}" (id: ${doc.id}):\n\n${doc.content}`
+  }
+
+  private runEditDocument(args: Record<string, unknown>): string {
+    const documents = this.deps.documents
+    if (!documents) return 'Error: notebooks are unavailable in this context.'
+    const [title, titleError] = requireStringArg(args, 'title')
+    if (titleError) return titleError
+    const content = getString(args, 'content')
+    if (content === null) return "Error: 'content' must be a string."
+    if (title.length > NOTEBOOK_TITLE_MAX_CHARS) {
+      return `Error: 'title' must be at most ${NOTEBOOK_TITLE_MAX_CHARS} characters.`
+    }
+    if (content.length > NOTEBOOK_CONTENT_MAX_CHARS) {
+      return `Error: 'content' must be at most ${NOTEBOOK_CONTENT_MAX_CHARS} characters.`
+    }
+    const id = (getString(args, 'id') ?? '').trim()
+    let target: NotebookDoc | null = null
+    if (id.length > 0) {
+      // An unknown explicit id is an error, never a silent create.
+      target = documents.getById(id)
+      if (!target) return `Error: no notebook with id '${id}'. Use list_documents to see ids.`
+    } else {
+      target = documents.findByTitle(title)
+    }
+    if (!target) {
+      const doc = documents.create({ title, content })
+      return `Created notebook "${doc.title}" (${content.length} chars).`
+    }
+    // Content-only update: 'title' locates (or names a created) notebook, it
+    // never renames an existing one — a rename would be an undescribed,
+    // unversioned mutation the approval note does not cover.
+    const updated = documents.update(target.id, { content })
+    if (!updated) return `Error: no notebook with id '${target.id}'.`
+    return (
+      `Updated notebook "${updated.title}" (${content.length} chars). ` +
+      'The previous content was saved as a version the user can restore.'
+    )
+  }
+
   private async runAskUserQuestion(
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
@@ -2149,7 +2354,8 @@ export class ToolExecutor {
     consume: (res: Response) => Promise<T>,
     guard?: { blockInternal?: boolean; sameOriginRedirectsOnly?: boolean }
   ): Promise<T> {
-    const fetchImpl = this.deps.fetchImpl ?? fetch
+    const fetchImpl =
+      this.deps.fetchImpl ?? (guard?.blockInternal ? fetchPublicHttps : fetch)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
@@ -2368,7 +2574,12 @@ export class ToolExecutor {
     const size =
       sizeRaw === 'square' || sizeRaw === 'landscape' || sizeRaw === 'portrait' ? sizeRaw : 'auto'
     try {
-      const attachments = await generator.generate({ prompt, count, size })
+      const attachments = await generator.generate({
+        prompt,
+        count,
+        size,
+        spaceId: ctx.conversation.spaceId ?? null,
+      })
       for (const attachment of attachments) ctx.onAttachment(attachment)
       const modelId = attachments[0]?.generatedBy?.modelId ?? 'the configured image model'
       return (
@@ -2517,7 +2728,7 @@ export class ToolExecutor {
     }
     const [query, queryError] = requireStringArg(args, 'query')
     if (queryError) return queryError
-    const hits = await this.deps.knowledgeSearch(kbId, query)
+    const hits = await this.deps.knowledgeSearch(kbId, query, ctx.conversation.spaceId ?? null)
     if (hits.length === 0) return 'No relevant passages found in the knowledge base.'
     return hits
       .map(
@@ -2548,6 +2759,30 @@ export class ToolExecutor {
     return this.deps.delegate(prompt, ctx, agentName)
   }
 
+  /**
+   * Bot Mode (v46): fire-and-forget message to another bot. Available ONLY
+   * inside a canonical bot chat (the tool is not even offered elsewhere, but
+   * a delegate loop could reach here via a profile toolset — hence the
+   * belt-and-braces conversation gate). The message parameter travels as raw
+   * data: nothing is shell-interpreted (Hermes contract).
+   */
+  private async runMessageAgent(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!this.deps.botMessenger) {
+      return 'Error: bot-to-bot messaging is unavailable in this build.'
+    }
+    if (!ctx.conversation.agentId) {
+      return 'Error: message_agent is only available inside a bot chat (Bot Mode).'
+    }
+    const [target, targetError] = requireStringArg(args, 'target')
+    if (targetError) return targetError
+    const [message, messageError] = requireStringArg(args, 'message')
+    if (messageError) return messageError
+    return this.deps.botMessenger.send(ctx.conversation.id, target, message)
+  }
+
   // -- shell execution (opt-in, approval-gated) --------------------------------
 
   private async runShellCommand(
@@ -2563,18 +2798,11 @@ export class ToolExecutor {
     const [command, commandError] = requireStringArg(args, 'command')
     if (commandError) return commandError
 
-    // Optional working directory: relative stays jailed to the project root;
-    // absolute paths are a 'full'-sandbox capability (still approval-gated).
+    // The caller already opted into unrestricted/full host-shell access.
     let workingDir = root
     const cwdArg = getString(args, 'cwd')?.trim()
     if (cwdArg) {
       if (path.isAbsolute(cwdArg) || /^[A-Za-z]:/.test(cwdArg)) {
-        if (ctx.sandboxLevel !== 'full') {
-          return (
-            "Error: an absolute cwd requires sandbox level 'full'. At the current level, " +
-            'shell commands run inside the granted project folder (relative cwd only).'
-          )
-        }
         workingDir = path.resolve(cwdArg)
       } else {
         const resolved = resolveWithinRoot(root, cwdArg)

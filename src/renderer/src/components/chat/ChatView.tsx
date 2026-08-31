@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import type { ConvForkLineage } from '@shared/ipc'
 import type { KnowledgeBase, ProviderErrorCode } from '@shared/types'
 import { useChatStore } from '@/stores/chat'
+import { useConversationsStore } from '@/stores/conversations'
 import { usePromptsStore } from '@/stores/prompts'
 import { useUiStore } from '@/stores/ui'
 import { STARTER_PROMPTS } from '@/lib/starter-prompts'
 import MessageItem from './MessageItem'
 import Composer from './Composer'
+import CostBadge from './CostBadge'
 import './chat.css'
 
 const FRIENDLY_ERROR: Record<ProviderErrorCode, string> = {
@@ -31,6 +34,7 @@ function ConversationSettingsButton(): ReactElement {
   const loadPrompts = usePromptsStore((s) => s.load)
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
+  const [budgetDraft, setBudgetDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
@@ -38,6 +42,7 @@ function ConversationSettingsButton(): ReactElement {
   const toggle = (): void => {
     if (!open) {
       setDraft(conversation?.systemPrompt ?? '')
+      setBudgetDraft(conversation?.budgetUsd != null ? String(conversation.budgetUsd) : '')
       void loadPrompts()
       void window.uld.knowledge.list().then((res) => {
         if (res.ok) setKnowledgeBases(res.data)
@@ -71,7 +76,11 @@ function ConversationSettingsButton(): ReactElement {
   const save = async (): Promise<void> => {
     setSaving(true)
     try {
-      await updateConversation({ systemPrompt: draft.trim() ? draft : null })
+      const budget = Number(budgetDraft)
+      await updateConversation({
+        systemPrompt: draft.trim() ? draft : null,
+        budgetUsd: budgetDraft.trim() && Number.isFinite(budget) && budget > 0 ? budget : null,
+      })
       setOpen(false)
     } finally {
       setSaving(false)
@@ -144,6 +153,23 @@ function ConversationSettingsButton(): ReactElement {
               </select>
             </>
           )}
+          <label className="conv-settings-label" htmlFor="conv-budget-usd">
+            Monthly budget (USD)
+          </label>
+          <input
+            id="conv-budget-usd"
+            className="input"
+            type="number"
+            min="0.01"
+            step="0.01"
+            value={budgetDraft}
+            placeholder="No cap"
+            onChange={(e) => setBudgetDraft(e.target.value)}
+          />
+          <p className="field-hint">
+            Generation pauses to ask once this conversation&apos;s month-to-date estimate reaches
+            the cap. Estimates only — unpriced models excluded.
+          </p>
           <div className="conv-settings-actions">
             <button
               type="button"
@@ -157,6 +183,118 @@ function ConversationSettingsButton(): ReactElement {
               Cancel
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Backlink chip on forked conversations: "Forked from <parent>" navigates to
+ * the parent; when sibling forks exist it opens a small menu listing them.
+ */
+function ForkOriginChip(): ReactElement | null {
+  const conversation = useChatStore((s) => s.conversation)
+  const [lineage, setLineage] = useState<ConvForkLineage | null>(null)
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  const conversationId = conversation?.id ?? null
+  const isFork = Boolean(conversation?.parentConversationId)
+
+  useEffect(() => {
+    setLineage(null)
+    setOpen(false)
+    if (!conversationId || !isFork) return
+    let cancelled = false
+    void window.uld.conversations.forkLineage(conversationId).then((res) => {
+      if (!cancelled && res.ok) setLineage(res.data)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, isFork])
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: globalThis.KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        // Consume it: closing the menu must not also reach the global handler.
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  // Nothing until the lineage resolves — a placeholder chip would flash
+  // "deleted conversation" on every open of a healthy fork.
+  if (!conversation || !isFork || !lineage) return null
+
+  const parent = lineage.parent
+  const siblings = lineage.siblings
+  const label = `⑂ Forked from ${parent?.title ?? 'a deleted conversation'}`
+
+  if (!parent && siblings.length === 0) {
+    return <span className="chat-fork-chip chat-fork-chip-inert">{label}</span>
+  }
+
+  return (
+    <div className="chat-fork-origin" ref={rootRef}>
+      <button
+        type="button"
+        className="chat-fork-chip"
+        title={parent ? `Open "${parent.title}"` : undefined}
+        aria-expanded={siblings.length > 0 ? open : undefined}
+        onClick={() => {
+          if (siblings.length > 0) {
+            setOpen((o) => !o)
+          } else if (parent) {
+            useConversationsStore.getState().select(parent.id)
+          }
+        }}
+      >
+        {label}
+      </button>
+      {open && siblings.length > 0 && (
+        <div className="chat-fork-menu" role="menu" aria-label="Fork lineage">
+          {parent && (
+            <button
+              type="button"
+              className="chat-fork-menu-item"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false)
+                useConversationsStore.getState().select(parent.id)
+              }}
+            >
+              Open original: {parent.title}
+            </button>
+          )}
+          <div className="chat-fork-menu-heading">Other forks</div>
+          {siblings.map((sibling) => (
+            <button
+              key={sibling.id}
+              type="button"
+              className="chat-fork-menu-item"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false)
+                useConversationsStore.getState().select(sibling.id)
+              }}
+            >
+              {sibling.title}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -274,7 +412,9 @@ export default function ChatView(): ReactElement {
         <h1 className="chat-title" title={conversation?.title ?? undefined}>
           {conversation ? conversation.title : 'Chat'}
         </h1>
+        <ForkOriginChip />
         <div className="chat-header-actions">
+          {conversation && <CostBadge conversationId={conversation.id} />}
           <ConversationSettingsButton />
         </div>
       </header>

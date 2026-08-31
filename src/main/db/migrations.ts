@@ -1021,4 +1021,173 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_remote_devices_seen ON remote_devices(revoked_at, last_seen_at DESC)`,
     ],
   },
+  {
+    version: 39,
+    name: 'optimizer-direction',
+    // Which way is "better". Without this the loop assumes higher-is-better and
+    // silently commits regressions for the common runtime/latency benchmark
+    // (slower = larger number = accepted). A plain ADD COLUMN with a default is
+    // FK-safe and needs no table rebuild; existing runs keep the old behaviour.
+    statements: [
+      `ALTER TABLE optimizer_runs ADD COLUMN direction TEXT NOT NULL DEFAULT 'maximize'`,
+    ],
+  },
+  {
+    version: 40,
+    name: 'review-hardening-state',
+    // Persist security/concurrency state that must survive an app restart:
+    // remote anti-replay counters, schedule-only edit anchors, and optimizer
+    // isolation metadata used to recover app-owned worktrees safely.
+    statements: [
+      `ALTER TABLE remote_devices ADD COLUMN last_request_seq INTEGER NOT NULL DEFAULT 0`,
+      `UPDATE remote_devices SET revoked_at = COALESCE(revoked_at, created_at)`,
+      `DELETE FROM tool_secrets WHERE scope = 'remote' AND owner_id <> 'relay'`,
+      `ALTER TABLE workflows ADD COLUMN schedule_updated_at INTEGER`,
+      `UPDATE workflows SET schedule_updated_at = updated_at WHERE schedule_updated_at IS NULL`,
+      `ALTER TABLE optimizer_runs ADD COLUMN worktree_path TEXT`,
+      `ALTER TABLE optimizer_runs ADD COLUMN worktree_branch TEXT`,
+      `ALTER TABLE optimizer_runs ADD COLUMN base_branch TEXT`,
+      `ALTER TABLE optimizer_runs ADD COLUMN base_sha TEXT`,
+    ],
+  },
+  {
+    version: 41,
+    name: 'conversation-forking',
+    // Fork provenance. Plain nullable ADD COLUMNs — no rebuild needed.
+    // Deliberately NOT foreign keys (the workspace_id/project_id pattern) so a
+    // fork outlives its deleted parent; the backlink chip simply goes inert.
+    statements: [
+      `ALTER TABLE conversations ADD COLUMN parent_conversation_id TEXT`,
+      `ALTER TABLE conversations ADD COLUMN forked_at_message_id TEXT`,
+      `CREATE INDEX idx_conversations_parent ON conversations(parent_conversation_id)`,
+    ],
+  },
+  {
+    version: 42,
+    name: 'workflow-watch-trigger',
+    // Per-workflow folder-watch config (WorkflowWatchConfig JSON; the enabled
+    // flag lives inside it). A nullable ADD COLUMN needs no rebuild, and the
+    // new 'watch' run trigger needs none either: v35 already dropped
+    // workflow_runs' trigger CHECK (zod validates at the boundary).
+    statements: [`ALTER TABLE workflows ADD COLUMN watch_json TEXT`],
+  },
+  {
+    version: 43,
+    name: 'notebooks',
+    // Revives `documents` as Home-level living Markdown notebooks: the leaf
+    // rebuild makes conversation_id nullable (a notebook belongs to no
+    // conversation; legacy conversation-keyed rows keep their CASCADE
+    // lifecycle) and drops the kind CHECK (v13 pattern: zod enforces the
+    // enum at the boundary). A normal transactional migration — documents has
+    // no FK children until document_versions is created below, inside this
+    // same migration. document_versions is the model-edit undo story: the
+    // repository snapshots the previous content before every content change,
+    // capped at 20 versions per document (pruned on insert).
+    statements: [
+      `CREATE TABLE documents_new (
+         id TEXT PRIMARY KEY,
+         conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+         kind TEXT NOT NULL DEFAULT 'doc',
+         title TEXT NOT NULL DEFAULT '',
+         content TEXT NOT NULL DEFAULT '',
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `INSERT INTO documents_new (id, conversation_id, kind, title, content, created_at, updated_at)
+         SELECT id, conversation_id, kind, title, content, created_at, updated_at FROM documents`,
+      `DROP TABLE documents`,
+      `ALTER TABLE documents_new RENAME TO documents`,
+      `CREATE INDEX IF NOT EXISTS idx_documents_conv ON documents(conversation_id, updated_at DESC)`,
+      `CREATE INDEX idx_documents_updated ON documents(updated_at DESC)`,
+      `CREATE TABLE document_versions (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+         content TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_document_versions_doc ON document_versions(document_id, id DESC)`,
+    ],
+  },
+  {
+    version: 44,
+    name: 'budget-guardrails',
+    // Spend ledger for headless generation plus per-scope monthly caps. No FKs
+    // on headless_usage by design — a row outlives the run it describes (the
+    // inbox_state/activity_log precedent, v30/v34). est_cost_usd is NULL for
+    // unpriced models; those rows never count toward a cap.
+    statements: [
+      `CREATE TABLE headless_usage (
+         id TEXT PRIMARY KEY,
+         run_kind TEXT NOT NULL,
+         ref_id TEXT,
+         provider_id TEXT NOT NULL,
+         model_id TEXT NOT NULL,
+         prompt_tokens INTEGER NOT NULL DEFAULT 0,
+         completion_tokens INTEGER NOT NULL DEFAULT 0,
+         cached_tokens INTEGER NOT NULL DEFAULT 0,
+         est_cost_usd REAL,
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_headless_usage_created ON headless_usage(created_at DESC)`,
+      `CREATE INDEX idx_headless_usage_ref ON headless_usage(run_kind, ref_id, created_at DESC)`,
+      `ALTER TABLE conversations ADD COLUMN budget_usd REAL`,
+      `ALTER TABLE workflows ADD COLUMN budget_usd REAL`,
+      `ALTER TABLE scheduled_tasks ADD COLUMN budget_usd REAL`,
+    ],
+  },
+  {
+    version: 45,
+    name: 'app-lock-private-spaces',
+    // Private spaces: NULL space_id = the default space. No FK on space_id by
+    // the inbox_state/activity_log precedent — spaces:delete is app-guarded to
+    // empty spaces, so a dangling reference cannot arise. Plain nullable ADD
+    // COLUMN, no rebuild needed.
+    statements: [
+      `CREATE TABLE spaces (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         provider_allowlist_json TEXT,
+         created_at INTEGER NOT NULL
+       )`,
+      `ALTER TABLE conversations ADD COLUMN space_id TEXT`,
+      `CREATE INDEX idx_conversations_space ON conversations(space_id)`,
+    ],
+  },
+  {
+    version: 46,
+    name: 'bot-mode',
+    // Bot Mode (Hermes-style): agent profiles become a roster of named bots.
+    // A bot's canonical chat is a real conversation owned via
+    // conversations.agent_id; messages.agent_id attributes a group-room turn
+    // (and any bot-authored message) to its author. bot_groups rooms keep
+    // their transcript in one conversation (bot_groups.conversation_id).
+    // All pointers are deliberately WITHOUT foreign keys (the v30/v34
+    // precedent): deleting an agent must never cascade-delete a transcript —
+    // the app cleans up canonical chats itself on bots:delete, and a dangling
+    // agent_id simply renders as an unknown author. Plain nullable/defaulted
+    // ADD COLUMNs — no table rebuild needed.
+    statements: [
+      `ALTER TABLE agents ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE agents ADD COLUMN avatar_json TEXT`,
+      `ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN chat_conversation_id TEXT`,
+      `ALTER TABLE conversations ADD COLUMN agent_id TEXT`,
+      `CREATE INDEX idx_conversations_agent ON conversations(agent_id)`,
+      `ALTER TABLE messages ADD COLUMN agent_id TEXT`,
+      `CREATE TABLE bot_groups (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         conversation_id TEXT NOT NULL,
+         needs_user INTEGER NOT NULL DEFAULT 0,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `CREATE TABLE bot_group_members (
+         group_id TEXT NOT NULL REFERENCES bot_groups(id) ON DELETE CASCADE,
+         agent_id TEXT NOT NULL,
+         added_at INTEGER NOT NULL,
+         PRIMARY KEY (group_id, agent_id)
+       )`,
+    ],
+  },
 ]

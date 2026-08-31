@@ -90,17 +90,28 @@ function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
+    let settled = false
     req.on('data', (chunk: Buffer) => {
+      if (settled) return
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
+        // Stop reading but do NOT destroy the socket here: the caller still has
+        // to write a 413, and a destroyed socket turns that into an ECONNRESET
+        // the client sees instead of the status code. Pausing halts the flood;
+        // handle() releases the socket after responding.
+        settled = true
+        req.pause()
         resolve(null)
-        req.destroy()
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', () => resolve(null))
+    req.on('end', () => {
+      if (!settled) resolve(Buffer.concat(chunks).toString('utf8'))
+    })
+    req.on('error', () => {
+      if (!settled) resolve(null)
+    })
   })
 }
 
@@ -116,6 +127,11 @@ function send(res: ServerResponse, status: number, message: string): void {
 export class WorkflowTriggerServer {
   private server: Server | null = null
   private boundPort: number | null = null
+  // The port a currently-tracked server was asked to bind. Set synchronously in
+  // listen() (boundPort is only known later, in the async callback), so a
+  // second sync() during the bind window recognises the in-flight server
+  // instead of starting a duplicate that orphans the first on EADDRINUSE.
+  private requestedPort: number | null = null
 
   constructor(private readonly deps: TriggerServerDeps) {}
 
@@ -126,9 +142,9 @@ export class WorkflowTriggerServer {
     return `http://127.0.0.1:${this.boundPort}/run/${workflowId}?token=${token}`
   }
 
-  /** True while the listener is actually bound. */
+  /** True once the listener is actually bound (not merely mid-bind). */
   get running(): boolean {
-    return this.server !== null
+    return this.boundPort !== null
   }
 
   /** Applies the current settings: (re)binds, rebinds on a port change, or stops. */
@@ -138,7 +154,7 @@ export class WorkflowTriggerServer {
       this.stop()
       return
     }
-    if (this.server && this.boundPort === port) return
+    if (this.server && this.requestedPort === port) return
     this.stop()
     this.listen(port)
   }
@@ -147,9 +163,18 @@ export class WorkflowTriggerServer {
     const server = createServer((req, res) => {
       void this.handle(req, res)
     })
+    // Claim the slot synchronously so a concurrent sync() sees this server as
+    // in-flight (boundPort is not known until the listen callback fires).
+    this.server = server
+    this.requestedPort = port
     server.on('error', (e: NodeJS.ErrnoException) => {
-      this.server = null
-      this.boundPort = null
+      // Only disown the server if it is still the one we are tracking — a later
+      // rebind may already have replaced it.
+      if (this.server === server) {
+        this.server = null
+        this.boundPort = null
+        this.requestedPort = null
+      }
       this.deps.onError?.(
         e.code === 'EADDRINUSE'
           ? `Port ${port} is already in use — pick another one for the trigger endpoint.`
@@ -159,7 +184,8 @@ export class WorkflowTriggerServer {
     server.setTimeout(REQUEST_TIMEOUT_MS)
     // Loopback only. Passing no host would bind every interface.
     server.listen(port, '127.0.0.1', () => {
-      this.server = server
+      // Ignore a stale callback for a server we've since replaced/stopped.
+      if (this.server !== server) return
       // The port ACTUALLY bound, not the one requested — they differ whenever
       // the OS assigns one (port 0), and a URL naming the wrong port is worse
       // than no URL at all.
@@ -214,7 +240,12 @@ export class WorkflowTriggerServer {
 
     const body = await readBody(req)
     if (body === null) {
+      res.setHeader('connection', 'close')
+      res.once('finish', () => req.destroy())
       send(res, 413, 'Payload too large.')
+      // Drain without retaining bytes. Destroying immediately races the 413
+      // write and makes callers observe ECONNRESET instead of the status.
+      req.resume()
       return
     }
 
@@ -260,5 +291,6 @@ export class WorkflowTriggerServer {
     }
     this.server = null
     this.boundPort = null
+    this.requestedPort = null
   }
 }

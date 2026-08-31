@@ -17,6 +17,8 @@ import type {
   ChatParams,
   Conversation,
   ConversationMode,
+  FailoverAttempt,
+  FailoverReason,
   Message,
   MessageStatus,
   MoaPreset,
@@ -24,8 +26,12 @@ import type {
   NormalizedError,
   ProviderConfig,
   ProviderType,
+  QuickAction,
+  QuickStreamEvent,
+  QuickStreamEventEnvelope,
   ResearchDepth,
   ResearchRunInfo,
+  SandboxLevel,
   StartStreamResult,
   StreamEvent,
   StreamEventEnvelope,
@@ -43,6 +49,8 @@ import {
   type ChatPickCompareWinnerResult,
   type ChatRegenerateRequest,
   type ChatSendRequest,
+  type QuickPromoteRequest,
+  type QuickRunResult,
 } from '@shared/ipc'
 import {
   PROVIDER_TYPES,
@@ -56,6 +64,7 @@ import {
 import type { AppDatabase } from '../db/database'
 import type { MessagePatch } from '../db/repositories/messages'
 import type {
+  AdapterChatResult,
   AdapterContext,
   AdapterImageRequest,
   AdapterMessage,
@@ -66,29 +75,49 @@ import type {
 import { resolveAdapter as resolveAdapterForProvider } from '../providers/registry'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { decryptKey } from '../keys/keystore'
-import { buildMemorySection, buildModeSystemPrompt, type ModePromptOptions } from '../prompts'
+import {
+  QUICK_SYSTEM_PROMPT,
+  buildMemorySection,
+  buildModeSystemPrompt,
+  type ModePromptOptions,
+} from '../prompts'
 import {
   STALL_LIMIT_NOTE,
   STALL_STOP_ROUNDS,
   roundWasProductive,
   stallNudge,
 } from './stall-supervisor'
+import { isFailoverEligible, nextChainEntry, recordFailoverActivity } from './failover'
 import type { ToolExecuteContext } from '../tools/executor'
 import { HEADLESS_CONVERSATION_ID, USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
 import { redactSecrets } from '../providers/redact'
+import { currentInvocationPolicy } from '../invocation-context'
 import { KEYLESS_API_KEY, isLoopbackBaseUrl, isValidStorageKey } from '@shared/schemas'
 import { formatSourcesSection } from '@shared/citations'
-import { storeGeneratedImage } from '../ipc/attachments'
+import { MAX_RAW_ATTACH_BYTES, storeGeneratedImage } from '../ipc/attachments'
+import { buildBotChatSection } from './bot-prompts'
 import { runCompletionHooks } from './completion-hooks'
 import { extractMemoryDirectives } from './mode-artifacts'
 import { findPricing } from '@shared/pricing'
 import { presetPricing } from '@shared/presets'
+import { BUDGET_CAP_REACHED, type HeadlessRunKind } from '@shared/budget'
+import {
+  budgetHitText,
+  checkHeadlessBudget,
+  checkInteractiveBudget,
+  recordHeadlessUsage,
+  type HeadlessUsageRef,
+} from './budget'
 import { runResearchPipeline, type ResearchDeps, type ResearchOutcome } from './research'
 import { StreamDeltaBuffer } from './stream-delta-buffer'
+import { buildQuickPrompt } from '@shared/quick-actions'
 
 const DEFAULT_TITLE = 'New chat'
 const TITLE_MAX_CHARS = 60
+
+/** The exact dialog answer that lets a send continue past a budget cap. */
+export const BUDGET_CONTINUE_OPTION = 'Continue this time'
 
 /** Pure policy core used by Auto routing and unit tests. */
 export function pickAutoRouteProvider(
@@ -158,6 +187,13 @@ const TOOL_LIMIT_NOTE =
 
 /** Placeholder held in activeByConversation between reservation and start(). */
 const PENDING_STREAM = '__pending__'
+
+/**
+ * Sentinel conversation id of the ephemeral quick-assistant stream. Never a
+ * real row and never entered in activeByConversation — quick streams live only
+ * in the streams map so chat:stop and stopAll() reach them.
+ */
+const QUICK_STREAM_CONVERSATION_ID = '__quick__'
 
 /**
  * Cap on each tool result replayed from an earlier turn, so old tool output
@@ -438,28 +474,95 @@ function imageDataUrl(
 }
 
 /**
- * User message as sent to the provider. Text attachments are inlined into the
- * text; images become OpenAI content parts when the model supports vision.
- * Returns a plain string when there are no images (zero-regression path).
+ * Reads a stored PDF attachment as a raw document part, or null when the
+ * bytes are unavailable or over the raw-attach cap (callers then fall back
+ * to inlining the extracted text).
  */
-function composeUserContent(
+function documentPart(
+  attachment: NonNullable<Message['attachments']>[number],
+  imageDir: string | undefined
+): ContentPart | null {
+  if (!imageDir || !attachment.storageKey) return null
+  // Same defense in depth as imageDataUrl: the storageKey arrives over IPC
+  // shape-checked only — reject anything but the app-generated form.
+  if (!isValidStorageKey(attachment.storageKey)) return null
+  if (!attachment.storageKey.endsWith('.pdf')) return null
+  try {
+    const buffer = readFileSync(join(imageDir, attachment.storageKey))
+    if (buffer.byteLength > MAX_RAW_ATTACH_BYTES) return null
+    return {
+      type: 'document',
+      mediaType: 'application/pdf',
+      dataBase64: buffer.toString('base64'),
+      name: attachment.name,
+      fallbackText: attachment.extractedText
+        ? `[Attached PDF: ${attachment.name}]\n${attachment.extractedText}`
+        : `[Attached PDF: ${attachment.name} — no extracted text available]`,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * User message as sent to the provider. Text attachments are inlined into the
+ * text; images become OpenAI content parts when the model supports vision;
+ * PDFs inline their extracted text, or travel as raw document parts when
+ * rawAttach is set (adapters without document support substitute the text).
+ * Returns a plain string when there are no media parts (zero-regression path).
+ * Exported for unit tests.
+ */
+export function composeUserContent(
   message: Message,
   visionEnabled: boolean,
   imageDir: string | undefined
 ): string | ContentPart[] {
   let text = message.content
-  const images: ContentPart[] = []
+  const mediaParts: ContentPart[] = []
   for (const attachment of message.attachments ?? []) {
+    if (attachment.kind === 'pdf') {
+      if (attachment.rawAttach) {
+        const part = documentPart(attachment, imageDir)
+        if (part) {
+          mediaParts.push(part)
+          continue
+        }
+        // Raw bytes unavailable/over cap: fall through to the text path.
+      }
+      if (attachment.extractedText) {
+        text += `\n\n[Attached PDF: ${attachment.name}]\n\`\`\`\n${attachment.extractedText}\n\`\`\``
+      } else {
+        text += `\n\n[Attached PDF: ${attachment.name} — no machine-readable text was extracted and it was not sent]`
+      }
+      continue
+    }
     if (attachment.kind === 'image') {
+      // OCR text a user extracted from the image is inlined in addition to the
+      // image part — that is how it reaches the model, and it survives the
+      // non-vision path.
+      if (attachment.extractedText) {
+        text += `\n\n[OCR text of image ${attachment.name}]\n\`\`\`\n${attachment.extractedText}\n\`\`\``
+      }
       if (!visionEnabled) {
-        text += `\n\n[Attached image: ${attachment.name} — this model has no vision support and it was not sent]`
+        if (!attachment.extractedText) {
+          text += `\n\n[Attached image: ${attachment.name} — this model has no vision support and it was not sent]`
+        }
         continue
       }
       const dataUrl = imageDataUrl(attachment, imageDir)
       if (dataUrl) {
-        images.push({ type: 'image_url', image_url: { url: dataUrl } })
+        mediaParts.push({ type: 'image_url', image_url: { url: dataUrl } })
       } else {
         text += `\n\n[Attached image: ${attachment.name} — could not be read and was not sent]`
+      }
+      continue
+    }
+    if (attachment.kind === 'audio') {
+      // Audio never travels as bytes — its transcript does (or an honest note).
+      if (attachment.extractedText) {
+        text += `\n\n[Transcript of audio ${attachment.name}]\n\`\`\`\n${attachment.extractedText}\n\`\`\``
+      } else {
+        text += `\n\n[Attached audio: ${attachment.name} — not transcribed; use the Transcribe action to include its content]`
       }
       continue
     }
@@ -471,10 +574,10 @@ function composeUserContent(
     }
     text += `\n\n[Attached file: ${attachment.name}]\n\`\`\`\n${attachment.textContent}\n\`\`\``
   }
-  if (images.length === 0) return text
+  if (mediaParts.length === 0) return text
   const parts: ContentPart[] = []
   if (text.trim().length > 0) parts.push({ type: 'text', text })
-  parts.push(...images)
+  parts.push(...mediaParts)
   return parts
 }
 
@@ -593,6 +696,7 @@ function messageEstimateText(message: Message): string {
   let text = message.content
   for (const attachment of message.attachments ?? []) {
     if (attachment.textContent) text += attachment.textContent
+    if (attachment.extractedText) text += attachment.extractedText
   }
   return text
 }
@@ -619,6 +723,8 @@ export class ChatService {
   private readonly pendingControllers = new Map<string, AbortController>()
   private readonly backgroundTasks = new Map<string, BackgroundTask>()
   private backgroundTaskSeq = 0
+  /** The single in-flight quick-assistant stream, or null. */
+  private quickStreamId: string | null = null
 
   constructor(
     private readonly db: AppDatabase,
@@ -777,7 +883,8 @@ export class ChatService {
       buildOpts,
       updated,
       controller,
-      [original]
+      [original],
+      challenger
     )
     return { streamId, userMessage: null, assistantMessage: updated }
   }
@@ -815,6 +922,18 @@ export class ChatService {
 
   stop(streamId: string): void {
     this.streams.get(streamId)?.controller.abort()
+  }
+
+  /**
+   * Whether a generation is running (or pending) in this conversation right
+   * now. Bot Mode uses it for the active-now strip and to defer bot-to-bot
+   * deliveries into a busy chat instead of colliding with its reservation.
+   */
+  isConversationActive(conversationId: string): boolean {
+    return (
+      this.activeByConversation.has(conversationId) ||
+      this.pendingControllers.has(conversationId)
+    )
   }
 
   /** Aborts the stream (if any) currently generating in a conversation. */
@@ -970,9 +1089,14 @@ export class ChatService {
     settings: AppSettings,
     overrides: ChatSendRequest['overrides']
   ): Promise<ResolvedTarget> {
+    // Bot chat (v46): the owning profile's model pin is the conversation-level
+    // fallback — an explicit per-conversation override still wins, mirroring
+    // how generateForWorkflow resolves an agent's pin.
+    const botAgent = conversation.agentId ? this.db.agents.getById(conversation.agentId) : null
     const providerId =
       overrides?.providerId ??
       conversation.providerId ??
+      botAgent?.providerId ??
       (settings.autoRoutingEnabled ? this.autoRouteProvider(settings) : null) ??
       settings.defaultProviderId
     if (!providerId) {
@@ -987,6 +1111,22 @@ export class ChatService {
         'invalid_request',
         `${provider.label} is disabled — enable it in Settings.`
       )
+    }
+
+    // Private-space provider allowlist (v45): one check here covers every
+    // generation path (send/regenerate/edit/compare, MoA advisors + aggregator,
+    // generateHeadless, delegate sub-agents). Headless one-shot stubs carry no
+    // spaceId and are untouched.
+    if (conversation.spaceId) {
+      const space = this.db.spaces.getById(conversation.spaceId)
+      const allowlist = space?.providerAllowlist
+      if (allowlist && allowlist.length > 0 && !allowlist.includes(provider.id)) {
+        throw new ProviderError(
+          'invalid_request',
+          `The space "${space.name}" does not allow ${provider.label}. Choose an allowed provider or edit the space in Settings → Privacy.`,
+          { retryable: false }
+        )
+      }
     }
 
     // Auth: OAuth providers resolve an access token (refreshing if needed);
@@ -1031,6 +1171,8 @@ export class ChatService {
     const modelId = firstNonEmpty(
       overrides?.modelId,
       conversation.modelId,
+      // Same independent provider/model pin precedence as generateForWorkflow.
+      botAgent?.modelId,
       provider.defaultModelId,
       PROVIDER_TYPES[provider.type].defaultModelId
     )
@@ -1046,6 +1188,11 @@ export class ChatService {
       ...conversation.params,
       ...overrides?.params,
     }
+    const invocationPolicy = currentInvocationPolicy()
+    if (invocationPolicy?.origin === 'remote') {
+      params.autoAcceptEdits = invocationPolicy.autoAcceptEdits
+      params.sandboxLevel = invocationPolicy.sandboxLevel
+    }
     return { provider, modelId, params, apiKey, accountId }
   }
 
@@ -1057,6 +1204,57 @@ export class ChatService {
    */
   private autoRouteProvider(settings: AppSettings): string | null {
     return pickAutoRouteProvider(this.db.providers.list(), settings)
+  }
+
+  /**
+   * Reliability Autopilot: the next usable chain entry for a qualifying
+   * failure. Entries already attempted this turn are skipped (the primary
+   * counts as attempted), and entries that no longer resolve (disabled,
+   * deleted or keyless provider) are marked attempted and skipped too, so
+   * the walk can never loop. Null = chain exhausted.
+   */
+  private async resolveFailoverTarget(
+    kind: 'interactive' | 'headless',
+    conversation: Conversation,
+    settings: AppSettings,
+    attempted: Array<{ providerId: string; modelId: string }>
+  ): Promise<ResolvedTarget | null> {
+    for (;;) {
+      const entry = nextChainEntry(settings.failoverChains[kind], attempted)
+      if (!entry) return null
+      attempted.push({ providerId: entry.providerId, modelId: entry.modelId })
+      try {
+        return await this.resolveTarget(conversation, settings, {
+          providerId: entry.providerId,
+          modelId: entry.modelId,
+        })
+      } catch {
+        // Unresolvable entry — skip to the next one.
+      }
+    }
+  }
+
+  /** Records one failover hop (message annotation + activity log). */
+  private failoverHop(
+    hops: FailoverAttempt[],
+    from: ResolvedTarget,
+    to: ResolvedTarget,
+    code: FailoverReason,
+    conversationId: string | null,
+    context: 'interactive' | 'headless'
+  ): void {
+    hops.push({ providerId: from.provider.id, modelId: from.modelId, code })
+    recordFailoverActivity(this.db.activity, {
+      conversationId,
+      from: {
+        providerId: from.provider.id,
+        providerLabel: from.provider.label,
+        modelId: from.modelId,
+      },
+      to: { providerId: to.provider.id, providerLabel: to.provider.label, modelId: to.modelId },
+      code,
+      context,
+    })
   }
 
   /**
@@ -1209,12 +1407,14 @@ export class ChatService {
       // Marked at insert so the renderer lays the advisors out side by side
       // from the first 'moa-reference' event.
       ...(compare && moa ? { compare: { pickedIndex: null } } : {}),
+      // Bot chat (v46): attribute the turn to the owning bot.
+      ...(conversation.agentId ? { agentId: conversation.agentId } : {}),
       seq: this.db.messages.nextSeq(conversation.id),
       createdAt: Date.now(),
     }
     this.db.messages.insert(assistantMessage)
 
-    const toolPlan = this.planTools(resolved)
+    const toolPlan = this.planTools(resolved, conversation)
     const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
     const { streamId, controller, active } = this.registerStream(conversation.id)
 
@@ -1242,7 +1442,16 @@ export class ChatService {
           controller
         )
       : compare && moa
-        ? this.runCompareStream(streamId, conversation, moa, buildOpts, assistantMessage, controller)
+        ? this.runCompareStream(
+            streamId,
+            conversation,
+            moa,
+            buildOpts,
+            assistantMessage,
+            controller,
+            [],
+            resolved
+          )
         : moa
           ? this.runMoaStream(
               streamId,
@@ -1274,10 +1483,25 @@ export class ChatService {
    * one tool is enabled. When tools exist but the model cannot call them, the
    * mode prompt gets the manual-instructions fallback instead.
    */
-  private planTools(resolved: ResolvedTarget): ToolPlan {
+  private planTools(resolved: ResolvedTarget, conversation?: Conversation): ToolPlan {
     const tools = this.options.tools
     if (!tools) return { promptOpts: {} }
-    const enabled = tools.registry.listEnabledDefinitions()
+    let enabled = tools.registry.listEnabledDefinitions()
+    // Bot Mode (v46): message_agent exists ONLY inside a bot's canonical chat
+    // (Hermes injects the protocol only there), and a bot's restricted
+    // toolset applies to its own chat exactly as it does to headless runs —
+    // with message_agent always kept so the messaging protocol works.
+    const botAgent = conversation?.agentId
+      ? this.db.agents.getById(conversation.agentId)
+      : null
+    if (conversation?.agentId) {
+      enabled = enabled.filter(
+        (def) =>
+          def.id === 'message_agent' || !botAgent?.toolIds || botAgent.toolIds.includes(def.id)
+      )
+    } else {
+      enabled = enabled.filter((def) => def.id !== 'message_agent')
+    }
     if (enabled.length === 0) return { promptOpts: {} }
 
     const toolNames = enabled.map((def) => def.name)
@@ -1340,10 +1564,11 @@ export class ChatService {
       ...(settings.memoryEnabled
         ? {
             memoryEnabled: true,
-            // Shared memories only: an agent profile's memories belong to
-            // that agent and never leak into an ordinary conversation.
+            // Shared memories for ordinary conversations; a bot chat (v46)
+            // gets the OWNING bot's memories instead — an agent profile's
+            // memories belong to that agent and never leak elsewhere.
             memories: this.db.memories
-              .listForAgent(null)
+              .listForAgent(conversation.agentId ?? null)
               .slice(0, MEMORY_MAX_INJECTED)
               .map((m) => ({ title: m.title, content: m.content })),
           }
@@ -1356,8 +1581,28 @@ export class ChatService {
           }
         : {}),
     }
-    const extras =
-      (conversation.systemPrompt ?? '').trim() || settings.defaultSystemPrompt.trim()
+    // Bot chat (v46): the owning bot's persona replaces the user's extras,
+    // and the Bot Mode section (identity + teammate roster + message_agent
+    // protocol) rides along. Ordinary conversations are untouched.
+    const botAgent = conversation.agentId ? this.db.agents.getById(conversation.agentId) : null
+    const extras = botAgent
+      ? [
+          botAgent.systemPrompt.trim(),
+          buildBotChatSection(
+            { name: botAgent.name, title: botAgent.title, description: botAgent.description },
+            this.db.agents
+              .listEnabled()
+              .filter((mate) => mate.id !== botAgent.id)
+              .map((mate) => ({
+                name: mate.name,
+                title: mate.title,
+                description: mate.description,
+              }))
+          ),
+        ]
+          .filter((part) => part.length > 0)
+          .join('\n\n')
+      : (conversation.systemPrompt ?? '').trim() || settings.defaultSystemPrompt.trim()
     const systemPrompt = [buildModeSystemPrompt(conversation.mode, effectiveOpts), extras]
       .filter((part) => part.length > 0)
       .join('\n\n')
@@ -1596,29 +1841,98 @@ export class ChatService {
     const settings = this.db.settings.get()
     const resolved = await this.resolveTarget(conversation, settings, undefined)
 
+    // Budget preflight BEFORE the user message is persisted: a skipped reply
+    // must not leave a dangling half-turn in the history. The refusal reaches
+    // the bridge as an error reply (its existing failure path).
+    const budgetHit = checkHeadlessBudget(
+      this.db,
+      { runKind: 'other', refId: conversationId },
+      resolved.provider,
+      resolved.modelId
+    )
+    if (budgetHit) {
+      throw new ProviderError(
+        'invalid_request',
+        `${BUDGET_CAP_REACHED}: ${budgetHitText(budgetHit)} — the reply was skipped. Raise or clear the cap to resume.`
+      )
+    }
+
     this.insertUserMessage(conversationId, userText)
 
-    // A headless reply (the IM bridge) is one non-streaming chat() call with no
-    // tools on the wire, so the prompt must not advertise any: empty promptOpts
-    // suppress both the tools section and the manual-instructions fallback.
-    const visionEnabled = modelSupportsVision(resolved.provider, resolved.modelId)
-    const history = this.buildHistory(
-      conversation,
-      settings,
-      {},
-      visionEnabled,
-      this.shouldReplayToolCalls(resolved)
-    )
-    const adapter = this.adapterFor(resolved)
-    const result = await adapter.chat(
-      {
-        modelId: resolved.modelId,
-        messages: history,
-        params: resolved.params,
-        stream: false,
-      },
-      this.adapterCtx(resolved, signal)
-    )
+    // Reliability Autopilot (headless chain): walk on a qualifying transient
+    // failure, and once on a completed-but-empty reply. No tools are on the
+    // wire here, so there is no executed-tool gate to respect.
+    let target = resolved
+    const hops: FailoverAttempt[] = []
+    const attempted: Array<{ providerId: string; modelId: string }> = [
+      { providerId: resolved.provider.id, modelId: resolved.modelId },
+    ]
+    let emptyRetryUsed = false
+    let result!: AdapterChatResult
+    for (;;) {
+      // A headless reply (the IM bridge) is one non-streaming chat() call with no
+      // tools on the wire, so the prompt must not advertise any: empty promptOpts
+      // suppress both the tools section and the manual-instructions fallback.
+      const visionEnabled = modelSupportsVision(target.provider, target.modelId)
+      const history = this.buildHistory(
+        conversation,
+        settings,
+        {},
+        visionEnabled,
+        this.shouldReplayToolCalls(target)
+      )
+      const adapter = this.adapterFor(target)
+      try {
+        result = await adapter.chat(
+          {
+            modelId: target.modelId,
+            messages: history,
+            params: target.params,
+            stream: false,
+          },
+          this.adapterCtx(target, signal)
+        )
+      } catch (e) {
+        const normalized = toNormalizedError(e, target.provider.type, [target.apiKey])
+        if (signal.aborted || normalized.code === 'aborted' || !isFailoverEligible(normalized.code)) {
+          throw e
+        }
+        const next = await this.resolveFailoverTarget('headless', conversation, settings, attempted)
+        // Re-check after the await: a Stop during chain resolution (e.g. a
+        // hung OAuth refresh) must surface as a stop, not a phantom hop.
+        if (!next || signal.aborted) throw e
+        this.failoverHop(hops, target, next, normalized.code, conversationId, 'headless')
+        target = next
+        continue
+      }
+      if (
+        !emptyRetryUsed &&
+        !signal.aborted &&
+        result.text.trim() === '' &&
+        (result.reasoning ?? '').trim() === '' &&
+        result.toolCalls.length === 0
+      ) {
+        const next = await this.resolveFailoverTarget('headless', conversation, settings, attempted)
+        if (next && !signal.aborted) {
+          emptyRetryUsed = true
+          this.failoverHop(hops, target, next, 'empty_reply', conversationId, 'headless')
+          target = next
+          continue
+        }
+      }
+      break
+    }
+    if (result.usage) {
+      // Ledger row for the reply. Aggregates dedupe it against the persisted
+      // assistant message ('other' rows ref'ing a live conversation).
+      recordHeadlessUsage(
+        this.db,
+        { runKind: 'other', refId: conversationId },
+        target.provider,
+        target.modelId,
+        result.usage
+      )
+    }
 
     const assistant: Message = {
       id: randomUUID(),
@@ -1627,9 +1941,10 @@ export class ChatService {
       content: result.text,
       reasoning: result.reasoning,
       status: 'complete',
-      providerId: resolved.provider.id,
-      modelId: resolved.modelId,
+      providerId: target.provider.id,
+      modelId: target.modelId,
       usage: result.usage,
+      ...(hops.length > 0 ? { failedOverFrom: hops } : {}),
       seq: this.db.messages.nextSeq(conversationId),
       createdAt: Date.now(),
     }
@@ -1662,12 +1977,19 @@ export class ChatService {
       approvedToolIds?: string[]
       /** Working folder (code_projects row) for file/shell tools. */
       projectId?: string | null
+      /** Explicit tool posture for trusted internal callers. */
+      sandboxLevel?: SandboxLevel
       /**
        * Internal plumbing generation (commit messages, dreaming): route to
        * the configured economy model when one is set. Explicit provider/model
        * ids and agent profiles always win over the economy routing.
        */
       economy?: boolean
+      /**
+       * Spend attribution + budget scope for the headless_usage ledger (v44).
+       * Omitted = run_kind 'other' with no ref (global cap only).
+       */
+      usage?: { runKind: HeadlessRunKind; refId?: string | null }
     }
   ): Promise<string> {
     const settings = this.db.settings.get()
@@ -1709,7 +2031,26 @@ export class ChatService {
       providerId: providerId ?? agent?.providerId ?? economy?.providerId,
       modelId: modelId ?? agent?.modelId ?? economy?.modelId,
     })
-    const adapter = this.adapterFor(resolved)
+    // Reliability Autopilot (headless chain): even an explicit node/agent/
+    // economy target walks the chain on a qualifying failure — the failed
+    // target is just skip-listed if it reappears there.
+    let target = resolved
+    let adapter = this.adapterFor(target)
+
+    // Budget preflight BEFORE the first adapter call: an exceeded scope skips
+    // the run; the caller's existing failure path (workflow/scheduled-task
+    // error row, arena candidate error) makes the outcome inbox-visible.
+    const usageRef: HeadlessUsageRef = {
+      runKind: opts?.usage?.runKind ?? 'other',
+      refId: opts?.usage?.refId ?? null,
+    }
+    const budgetHit = checkHeadlessBudget(this.db, usageRef, resolved.provider, resolved.modelId)
+    if (budgetHit) {
+      throw new ProviderError(
+        'invalid_request',
+        `${BUDGET_CAP_REACHED}: ${budgetHitText(budgetHit)} — the run was skipped. Raise or clear the cap to resume.`
+      )
+    }
 
     // Tool-enabled node: a bounded, non-streaming loop over the enabled tools.
     // Headless runs can never pop an approval dialog, so the approval callback
@@ -1724,12 +2065,16 @@ export class ChatService {
     // be mapped back to an id before the membership test below.
     const enabledDefs = opts?.useTools && tools ? tools.registry.listEnabledDefinitions() : []
     const toolDefs: AdapterToolDef[] = enabledDefs
+      // message_agent lives ONLY in canonical bot chats (v46) — a headless
+      // one-shot has no chat for a teammate's reply to land in.
+      .filter((d) => d.id !== 'message_agent')
       .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
       .map(toAdapterToolDef)
-    const params: ChatParams = {
-      ...resolved.params,
+    const paramsFor = (t: ResolvedTarget): ChatParams => ({
+      ...t.params,
       ...(opts?.json ? { responseFormat: 'json' as const } : {}),
-    }
+    })
+    let params = paramsFor(target)
     // An agent profile brings its OWN memories: what "Watcher" remembers is
     // invisible to every other agent and to ordinary conversations, so a
     // recurring job builds up its own context instead of one global pile.
@@ -1744,55 +2089,317 @@ export class ChatService {
       agent?.maxRounds && agent.maxRounds >= 1
         ? Math.min(agent.maxRounds, MAX_TOOL_ROUNDS)
         : WORKFLOW_AGENT_MAX_ROUNDS
+    const hops: FailoverAttempt[] = []
+    const attempted: Array<{ providerId: string; modelId: string }> = [
+      { providerId: target.provider.id, modelId: target.modelId },
+    ]
+    let emptyRetryUsed = false
+    // Tool side effects close the failover gate: a retry could re-run them.
+    let toolExecuted = false
     let final = ''
-    for (let round = 0; round < maxRounds; round++) {
-      if (opts?.signal?.aborted) {
-        throw new ProviderError('aborted', 'The workflow run was cancelled.')
-      }
-      const result = await adapter.chat(
-        {
-          modelId: resolved.modelId,
-          messages,
-          params,
-          tools: toolDefs.length > 0 ? toolDefs : undefined,
-          stream: false,
-        },
-        this.adapterCtx(resolved, opts?.signal)
-      )
-      if (result.text.trim()) final = result.text
-      if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
-      messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
-      for (const call of result.toolCalls) {
-        const out = await tools.executor.execute(call, {
-          conversation: stub,
-          approval: async (req) => {
-            const def = enabledDefs.find(
-              (d) => d.id === req.toolCall.name || d.name === req.toolCall.name
+    // Charter's empty-reply definition includes zero REASONING: a reasoning
+    // model that burned its budget thinking is not an empty reply.
+    let lastReasoning = ''
+    // One ledger row per invocation, summed across rounds; the finally means
+    // spend from completed rounds is recorded even when a later round throws.
+    let usageTotal: TokenUsage | undefined
+    try {
+      walk: for (;;) {
+        for (let round = 0; round < maxRounds; round++) {
+          if (opts?.signal?.aborted) {
+            throw new ProviderError('aborted', 'The workflow run was cancelled.')
+          }
+          let result: AdapterChatResult
+          try {
+            result = await adapter.chat(
+              {
+                modelId: target.modelId,
+                messages,
+                params,
+                tools: toolDefs.length > 0 ? toolDefs : undefined,
+                stream: false,
+              },
+              this.adapterCtx(target, opts?.signal)
             )
-            if (def && approvedTools.has(def.id)) {
-              return { approved: true, scope: 'once' as const }
+          } catch (e) {
+            if (!toolExecuted && !opts?.signal?.aborted) {
+              const normalized = toNormalizedError(e, target.provider.type, [target.apiKey])
+              if (normalized.code !== 'aborted' && isFailoverEligible(normalized.code)) {
+                const next = await this.resolveFailoverTarget('headless', stub, settings, attempted)
+                // Re-check after the await: never hop on a stream stopped
+                // while the chain was resolving.
+                if (next && !opts?.signal?.aborted) {
+                  this.failoverHop(hops, target, next, normalized.code, null, 'headless')
+                  target = next
+                  adapter = this.adapterFor(target)
+                  params = paramsFor(target)
+                  final = ''
+                  lastReasoning = ''
+                  // `messages` is untouched before the first executed tool
+                  // round, so restarting the round loop is safe.
+                  continue walk
+                }
+              }
             }
-            // Nothing pre-approved covers this call. Rather than auto-declining
-            // (the old behaviour, which failed the run silently), ask the user
-            // on their phone if remote approvals are configured. A missing
-            // channel or an unanswered question still resolves to declined.
-            const approved = await this.askRemoteApproval(req, opts?.signal)
-            return { approved, scope: 'once' as const }
-          },
-          // A headless run has no dialog either, so ask_user_question goes to
-          // the same side channel. Without one it resolves to null and the
-          // tool tells the model to proceed on its own judgement.
-          askUser: (question, options) => this.askRemoteChoice(question, options, opts?.signal),
-          ...(agent ? { agentName: agent.name } : {}),
-          ...(opts?.signal ? { signal: opts.signal } : {}),
-        })
-        messages.push({ role: 'tool', content: out, toolCallId: call.id })
+            throw e
+          }
+          if (result.usage) usageTotal = addUsage(usageTotal, result.usage)
+          if (result.text.trim()) final = result.text
+          lastReasoning = result.reasoning ?? ''
+          if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
+          messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
+          toolExecuted = true
+          for (const call of result.toolCalls) {
+            const out = await tools.executor.execute(call, {
+              conversation: stub,
+              approval: async (req) => {
+                const def = enabledDefs.find(
+                  (d) => d.id === req.toolCall.name || d.name === req.toolCall.name
+                )
+                if (def && approvedTools.has(def.id)) {
+                  return { approved: true, scope: 'once' as const }
+                }
+                // Nothing pre-approved covers this call. Rather than auto-declining
+                // (the old behaviour, which failed the run silently), ask the user
+                // on their phone if remote approvals are configured. A missing
+                // channel or an unanswered question still resolves to declined.
+                const approved = await this.askRemoteApproval(req, opts?.signal)
+                return { approved, scope: 'once' as const }
+              },
+              // A headless run has no dialog either, so ask_user_question goes to
+              // the same side channel. Without one it resolves to null and the
+              // tool tells the model to proceed on its own judgement.
+              askUser: (question, options) => this.askRemoteChoice(question, options, opts?.signal),
+              ...(agent ? { agentName: agent.name } : {}),
+              ...(opts?.sandboxLevel ? { sandboxLevel: opts.sandboxLevel } : {}),
+              ...(opts?.signal ? { signal: opts.signal } : {}),
+            })
+            messages.push({ role: 'tool', content: out, toolCallId: call.id })
+          }
+        }
+        // Empty-reply heuristic: one retry when the whole run produced nothing
+        // (no text AND no reasoning) and no tool ran.
+        if (
+          final.trim() === '' &&
+          lastReasoning.trim() === '' &&
+          !toolExecuted &&
+          !emptyRetryUsed &&
+          !opts?.signal?.aborted
+        ) {
+          const next = await this.resolveFailoverTarget('headless', stub, settings, attempted)
+          if (next && !opts?.signal?.aborted) {
+            emptyRetryUsed = true
+            this.failoverHop(hops, target, next, 'empty_reply', null, 'headless')
+            target = next
+            adapter = this.adapterFor(target)
+            params = paramsFor(target)
+            continue walk
+          }
+        }
+        break
+      }
+    } finally {
+      if (usageTotal) {
+        recordHeadlessUsage(this.db, usageRef, target.provider, target.modelId, usageTotal)
       }
     }
     // Headless runs never create a message row, so the memory completion hook
     // cannot see them — an agent's own memories are persisted here instead.
     if (agent) this.persistAgentMemories(agent.id, final)
     return final
+  }
+
+  /**
+   * Quick assistant: an ephemeral, tool-free, non-persisting stream over the
+   * copied text. Events go ONLY to the caller's emit (targeted at the quick
+   * window's webContents, never the main event bus). The stream registers in
+   * the shared streams map — but never in activeByConversation — so the
+   * existing chat:stop handler and stopAll() reach it for free. One quick
+   * stream at a time: starting a new one aborts the previous first.
+   */
+  async startQuickStream(input: {
+    action: QuickAction
+    selection: string
+    emit: (envelope: QuickStreamEventEnvelope) => void
+  }): Promise<QuickRunResult> {
+    this.stopQuickStream()
+    const settings = this.db.settings.get()
+    const streamId = randomUUID()
+    // Reserve the quick slot SYNCHRONOUSLY: two quick:run invokes interleaving
+    // during the awaited resolveTarget below would otherwise both pass
+    // stopQuickStream (quickStreamId still stale) and stream concurrently.
+    this.quickStreamId = streamId
+    const stub: Conversation = {
+      id: QUICK_STREAM_CONVERSATION_ID,
+      mode: 'chat',
+      title: '',
+      providerId: null,
+      modelId: null,
+      systemPrompt: null,
+      params: {},
+      workspaceId: null,
+      projectId: null,
+      projectRef: null,
+      moaPresetId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    }
+    // Per-action model override wins; otherwise the usual default chain
+    // (auto-route → global default) applies, keys/OAuth included.
+    let resolved: ResolvedTarget
+    try {
+      resolved = await this.resolveTarget(stub, settings, {
+        providerId: input.action.providerId,
+        modelId: input.action.modelId,
+      })
+    } catch (e) {
+      if (this.quickStreamId === streamId) this.quickStreamId = null
+      throw e
+    }
+    if (this.quickStreamId !== streamId) {
+      // A newer quick run superseded this one during resolution.
+      throw new ProviderError('aborted', 'Superseded by a newer quick action.')
+    }
+    // The global monthly cap applies to quick actions like every other
+    // generation path (no ref scope — quick streams own no conversation).
+    const budgetHit = checkHeadlessBudget(
+      this.db,
+      { runKind: 'other', refId: null },
+      resolved.provider,
+      resolved.modelId
+    )
+    if (budgetHit) {
+      this.quickStreamId = null
+      throw new ProviderError(
+        'invalid_request',
+        `${BUDGET_CAP_REACHED}: ${budgetHitText(budgetHit)}. Raise or clear the cap to continue.`
+      )
+    }
+    const prompt = buildQuickPrompt(input.action.prompt, input.selection)
+    const controller = new AbortController()
+    const active: ActiveStream = {
+      controller,
+      conversationId: QUICK_STREAM_CONVERSATION_ID,
+      done: Promise.resolve(),
+    }
+    this.streams.set(streamId, active)
+
+    const emitNow = (event: QuickStreamEvent): void => {
+      try {
+        input.emit({ streamId, event })
+      } catch {
+        // The quick window can be destroyed mid-stream; the loop still settles.
+      }
+    }
+    // The quick delta variants are shape-identical to StreamEvent's, so the
+    // same coalescing buffer applies unchanged.
+    const deltaBuffer = new StreamDeltaBuffer((event) => {
+      if (event.type === 'text-delta' || event.type === 'reasoning-delta') emitNow(event)
+    })
+
+    active.done = (async () => {
+      let text = ''
+      let usage: TokenUsage | undefined
+      let finishReason: 'stop' | 'length' = 'stop'
+      try {
+        const stream = this.adapterFor(resolved).chatStream(
+          {
+            modelId: resolved.modelId,
+            messages: [
+              { role: 'system', content: QUICK_SYSTEM_PROMPT },
+              { role: 'user', content: prompt },
+            ],
+            params: resolved.params,
+            stream: true,
+          },
+          this.adapterCtx(resolved, controller.signal)
+        )
+        for await (const event of stream) {
+          if (event.type === 'text') {
+            text += event.text
+            deltaBuffer.push({ type: 'text-delta', text: event.text })
+          } else if (event.type === 'reasoning') {
+            deltaBuffer.push({ type: 'reasoning-delta', text: event.text })
+          } else if (event.type === 'usage') {
+            usage = addUsage(usage, event.usage)
+          } else if (event.type === 'finish') {
+            finishReason = event.reason === 'length' ? 'length' : 'stop'
+          }
+        }
+        deltaBuffer.flush()
+        emitNow({ type: 'done', finishReason, text, ...(usage ? { usage } : {}) })
+      } catch (e) {
+        deltaBuffer.flush()
+        const normalized = toNormalizedError(e, resolved.provider.type, [resolved.apiKey])
+        if (normalized.code === 'aborted' || controller.signal.aborted) {
+          // Stop keeps the partial text, mirroring the chat surface.
+          emitNow({ type: 'done', finishReason: 'aborted', text, ...(usage ? { usage } : {}) })
+        } else {
+          emitNow({ type: 'error', error: normalized })
+        }
+      } finally {
+        this.streams.delete(streamId)
+        if (this.quickStreamId === streamId) this.quickStreamId = null
+        // No message rows exist for quick runs, so the headless ledger is the
+        // only place their spend shows up (best-effort; never throws).
+        if (usage) {
+          recordHeadlessUsage(
+            this.db,
+            { runKind: 'other', refId: streamId },
+            resolved.provider,
+            resolved.modelId,
+            usage
+          )
+        }
+      }
+    })()
+
+    return { streamId, prompt, providerId: resolved.provider.id, modelId: resolved.modelId }
+  }
+
+  /** Aborts the in-flight quick-assistant stream, if any (hide/close/quit). */
+  stopQuickStream(): void {
+    if (!this.quickStreamId) return
+    this.streams.get(this.quickStreamId)?.controller.abort()
+  }
+
+  /**
+   * "Open as conversation": persists a finished quick exchange as a real chat
+   * conversation (user prompt + completed assistant answer) and announces it
+   * on the broadcast bus so the main window can navigate to it.
+   */
+  promoteQuick(input: QuickPromoteRequest): Conversation {
+    const fallbackTitle = input.userText.replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX_CHARS)
+    const conversation = this.db.conversations.create({
+      mode: 'chat',
+      title: input.title?.trim() || fallbackTitle || 'Quick assistant',
+      providerId: input.providerId,
+      modelId: input.modelId,
+    })
+    const now = Date.now()
+    this.db.messages.insert({
+      id: randomUUID(),
+      conversationId: conversation.id,
+      role: 'user',
+      content: input.userText,
+      status: 'complete',
+      seq: this.db.messages.nextSeq(conversation.id),
+      createdAt: now,
+    })
+    this.db.messages.insert({
+      id: randomUUID(),
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: input.answer,
+      status: 'complete',
+      providerId: input.providerId,
+      modelId: input.modelId,
+      seq: this.db.messages.nextSeq(conversation.id),
+      createdAt: now,
+    })
+    this.db.conversations.touch(conversation.id, now)
+    this.broadcast(CHANNELS.quickPromoted, { conversationId: conversation.id })
+    return conversation
   }
 
   /**
@@ -1885,7 +2492,12 @@ export class ChatService {
    * Text embeddings for the knowledge-base service: resolves the provider,
    * decrypts its key (never leaves main) and calls the adapter's /embeddings.
    */
-  async embedTexts(providerId: string, modelId: string, texts: string[]): Promise<number[][]> {
+  async embedTexts(
+    providerId: string,
+    modelId: string,
+    texts: string[],
+    spaceId?: string | null
+  ): Promise<number[][]> {
     const settings = this.db.settings.get()
     const stub: Conversation = {
       id: 'knowledge',
@@ -1899,6 +2511,9 @@ export class ChatService {
       projectId: null,
       projectRef: null,
       moaPresetId: null,
+      // Carries the originating conversation's private space so resolveTarget
+      // enforces the space's provider allowlist on the embeddings call too.
+      spaceId: spaceId ?? null,
       createdAt: 0,
       updatedAt: 0,
     }
@@ -1923,6 +2538,8 @@ export class ChatService {
     prompt: string
     count?: number
     size?: AdapterImageRequest['size']
+    /** Originating conversation's space (private-space provider allowlist). */
+    spaceId?: string | null
   }): Promise<Attachment[]> {
     const imageDir = this.options.imageDir
     if (!imageDir) {
@@ -1970,6 +2587,8 @@ export class ChatService {
       projectId: null,
       projectRef: null,
       moaPresetId: null,
+      // The space allowlist applies to the model-authored image prompt too.
+      spaceId: req.spaceId ?? null,
       createdAt: 0,
       updatedAt: 0,
     }
@@ -2282,9 +2901,12 @@ export class ChatService {
             ...(profile.modelId ? { modelId: profile.modelId } : {}),
           }
         }
-        // No nesting regardless of the profile's tool list.
+        // No nesting regardless of the profile's tool list; message_agent is
+        // chat-only (v46) — a delegate run has no chat for replies to land in.
         if (profile.toolIds) {
-          allowedToolIds = new Set(profile.toolIds.filter((id) => id !== 'delegate'))
+          allowedToolIds = new Set(
+            profile.toolIds.filter((id) => id !== 'delegate' && id !== 'message_agent')
+          )
         }
         if (profile.maxRounds && profile.maxRounds >= 1) {
           maxRounds = Math.min(profile.maxRounds, MAX_TOOL_ROUNDS)
@@ -2484,6 +3106,22 @@ export class ChatService {
         // A window can be torn down mid-broadcast; persistence still happens.
       }
     }
+    // Budget gate BEFORE the paid research phase (its own try: the pipeline
+    // try below deliberately swallows failures into a fallback outcome, which
+    // must not swallow a budget refusal into a free synthesis).
+    try {
+      await this.enforceInteractiveBudget(
+        conversation,
+        resolved,
+        buildOpts.settings,
+        streamId,
+        controller.signal
+      )
+    } catch (e) {
+      this.failPlaceholder(conversationId, placeholder, e, emit, resolved)
+      this.releaseStream(streamId, conversationId)
+      return
+    }
     let outcome: ResearchOutcome
     try {
       const workerTarget = await this.resolveResearchWorkerTarget(
@@ -2552,7 +3190,11 @@ export class ChatService {
       placeholder,
       controller,
       undefined,
-      { injectedContext: outcome.injectedContext, research: outcome.research }
+      {
+        injectedContext: outcome.injectedContext,
+        research: outcome.research,
+        budgetChecked: true,
+      }
     )
   }
 
@@ -2626,6 +3268,15 @@ export class ChatService {
     }
     let references: MoaReferenceOutput[]
     try {
+      // Budget gate BEFORE the paid advisor fan-out — runStream's own gate
+      // would fire only after the advisors had already been paid for.
+      await this.enforceInteractiveBudget(
+        conversation,
+        aggregator,
+        buildOpts.settings,
+        streamId,
+        controller.signal
+      )
       references = await this.runAdvisors(
         conversation,
         preset,
@@ -2650,8 +3301,12 @@ export class ChatService {
       controller,
       adapterTools,
       anyReferences
-        ? { injectedContext: formatMoaContext(references, preset), moaReferences: references }
-        : undefined
+        ? {
+            injectedContext: formatMoaContext(references, preset),
+            moaReferences: references,
+            budgetChecked: true,
+          }
+        : { budgetChecked: true }
     )
   }
 
@@ -2669,7 +3324,10 @@ export class ChatService {
     placeholder: Message,
     controller: AbortController,
     /** Pre-seeded final blocks (second opinion) — see runAdvisors. */
-    seed: MoaReferenceOutput[] = []
+    seed: MoaReferenceOutput[] = [],
+    /** Target used for the budget preflight's price estimate (compare never
+     * reaches runStream, so this is its only gate). */
+    gateTarget?: ResolvedTarget
   ): Promise<void> {
     const conversationId = conversation.id
     const emit = (event: StreamEvent): void => {
@@ -2680,6 +3338,15 @@ export class ChatService {
       }
     }
     try {
+      if (gateTarget) {
+        await this.enforceInteractiveBudget(
+          conversation,
+          gateTarget,
+          buildOpts.settings,
+          streamId,
+          controller.signal
+        )
+      }
       const references = await this.runAdvisors(
         conversation,
         preset,
@@ -2817,6 +3484,11 @@ export class ChatService {
       injectedContext?: string
       moaReferences?: MoaReferenceOutput[]
       research?: ResearchRunInfo
+      /**
+       * The fan-out caller already ran the budget preflight BEFORE its paid
+       * fan-out phase — don't ask the user the same question twice.
+       */
+      budgetChecked?: boolean
     }
   ): Promise<void> {
     const conversationId = conversation.id
@@ -2847,6 +3519,17 @@ export class ChatService {
     let usage: TokenUsage | undefined
     let finishReason: 'stop' | 'length' | 'tool_calls' = 'stop'
 
+    // Reliability Autopilot: `target` hops along the interactive failover
+    // chain; each hop resets the accumulators and the placeholder. The primary
+    // counts as attempted so a chain naming it again is skipped.
+    let target = resolved
+    const failoverHops: FailoverAttempt[] = []
+    const attempted: Array<{ providerId: string; modelId: string }> = [
+      { providerId: resolved.provider.id, modelId: resolved.modelId },
+    ]
+    let emptyRetryUsed = false
+    let toolExecutedThisTurn = false
+
     // Returns the persisted (or best-effort fallback) message, or null when the
     // placeholder row is gone — its conversation was deleted mid-stream, so the
     // caller must skip completion hooks and any further broadcast for it.
@@ -2859,6 +3542,7 @@ export class ChatService {
         toolCalls: toolCalls.length > 0 ? toolCalls : null,
         error: error ?? null,
         ...(generatedAttachments.length > 0 ? { attachments: generatedAttachments } : {}),
+        ...(failoverHops.length > 0 ? { failedOverFrom: failoverHops } : {}),
         ...(extraOpts?.moaReferences ? { moaReferences: extraOpts.moaReferences } : {}),
         ...(extraOpts?.research ? { research: extraOpts.research } : {}),
       }
@@ -2878,9 +3562,40 @@ export class ChatService {
         if (usage) fallback.usage = usage
         if (toolCalls.length > 0) fallback.toolCalls = toolCalls
         if (generatedAttachments.length > 0) fallback.attachments = generatedAttachments
+        if (failoverHops.length > 0) fallback.failedOverFrom = failoverHops
         if (error) fallback.error = error
         return fallback
       }
+    }
+
+    // Resets the accumulators and the persisted placeholder for a fresh
+    // attempt on `next`, and tells the renderer to replace the message
+    // wholesale (clearing pushed partial text). Same streamId across attempts.
+    const applyFailover = (code: FailoverReason, next: ResolvedTarget): void => {
+      this.failoverHop(failoverHops, target, next, code, conversationId, 'interactive')
+      text = ''
+      reasoning = ''
+      toolCalls.length = 0
+      generatedAttachments.length = 0
+      usage = undefined
+      finishReason = 'stop'
+      const updated = this.db.messages.update(placeholder.id, {
+        content: '',
+        reasoning: null,
+        toolCalls: null,
+        attachments: null,
+        usage: null,
+        error: null,
+        status: 'streaming',
+        providerId: next.provider.id,
+        modelId: next.modelId,
+        failedOverFrom: [...failoverHops],
+      })
+      // Same contract as finalize: a missing row means the conversation was
+      // deleted mid-stream — bail out as a stop.
+      if (!updated) throw new ProviderError('aborted', 'Generation stopped.')
+      emit({ type: 'failover', message: updated })
+      target = next
     }
 
     try {
@@ -2891,202 +3606,286 @@ export class ChatService {
       // run INSIDE the try so a DB read error is caught and finalized (and the
       // finally clears the stream slot) instead of leaving the conversation
       // wedged as 'streaming' forever with an unhandled rejection.
-      await this.maybeCompact(conversation, resolved, buildOpts.settings, controller.signal)
-      const history = this.buildHistory(
-        conversation,
-        buildOpts.settings,
-        buildOpts.promptOpts,
-        buildOpts.visionEnabled,
-        this.shouldReplayToolCalls(resolved)
-      )
-      const adapter = this.adapterFor(resolved)
-      const tools = this.options.tools
-      const messages: AdapterMessage[] = [...history]
-      // MoA/research: fold the injected context into the latest user turn.
-      if (extraOpts?.injectedContext) appendContextToLastUser(messages, extraOpts.injectedContext)
-
+      // Budget preflight (v44): may pause on a question dialog; any answer but
+      // the explicit continue throws, which the catch below finalizes as an
+      // error message — no partial user turn is lost, no adapter call is made.
+      if (!extraOpts?.budgetChecked) {
+        await this.enforceInteractiveBudget(
+          conversation,
+          resolved,
+          buildOpts.settings,
+          streamId,
+          controller.signal
+        )
+      }
       const appendText = (chunk: string): void => {
         if (chunk.length === 0) return
         text += chunk
         emit({ type: 'text-delta', text: chunk })
       }
 
-      let toolRounds = 0
-      // Stall supervision: consecutive rounds whose tool calls ALL failed.
-      let unproductiveRounds = 0
-      for (;;) {
-        const roundCalls: ToolCallRecord[] = []
-        let roundText = ''
-        let roundFinish: 'stop' | 'length' | 'tool_calls' = 'stop'
-        // '\n\n' separator once per round, only when the placeholder already
-        // has text (i.e. this is a follow-up round after tool results).
-        let separatorPending = text.length > 0
-
-        const stream = adapter.chatStream(
-          {
-            modelId: resolved.modelId,
-            messages,
-            params: resolved.params,
-            tools: adapterTools,
-            stream: true,
-          },
-          this.adapterCtx(resolved, controller.signal)
-        )
-        for await (const event of stream) {
-          switch (event.type) {
-            case 'text':
-              if (event.text.length === 0) break
-              if (separatorPending) {
-                separatorPending = false
-                appendText('\n\n')
-              }
-              roundText += event.text
-              appendText(event.text)
-              break
-            case 'reasoning':
-              reasoning += event.text
-              emit({ type: 'reasoning-delta', text: event.text })
-              break
-            case 'tool_call':
-              // Accumulate only; broadcast happens when the round settles.
-              roundCalls.push({ ...event.toolCall, status: 'proposed' })
-              break
-            case 'usage':
-              usage = addUsage(usage, event.usage)
-              emit({ type: 'usage', usage })
-              break
-            case 'finish':
-              roundFinish = event.reason === 'other' ? 'stop' : event.reason
-              break
-          }
-        }
-
-        // Final round: the model is done (or emitted calls we cannot run).
-        if (roundFinish !== 'tool_calls' || roundCalls.length === 0 || !tools) {
-          for (const call of roundCalls) emit({ type: 'tool-call', toolCall: call })
-          toolCalls.push(...roundCalls)
-          finishReason = roundFinish
-          break
-        }
-
-        // Round cap exceeded: record the unexecuted calls, note it, finish.
-        if (toolRounds >= MAX_TOOL_ROUNDS) {
-          for (const call of roundCalls) emit({ type: 'tool-call', toolCall: call })
-          toolCalls.push(...roundCalls)
-          appendText(text.length > 0 ? `\n\n${TOOL_LIMIT_NOTE}` : TOOL_LIMIT_NOTE)
-          finishReason = 'stop'
-          break
-        }
-        toolRounds += 1
-
-        // A stop issued while the adapter round was streaming must abort before
-        // we run any tool (or ask for approval).
-        if (controller.signal.aborted) {
-          throw new ProviderError('aborted', 'Generation stopped.')
-        }
-
-        // Execute the round's calls sequentially (model emission order). The
-        // executor handles permission short-circuits ('deny'/'always_allow')
-        // and routes 'ask' through the broker -> renderer approval click. The
-        // stream's AbortSignal is threaded through so a pending approval
-        // resolves false immediately when the stream is stopped.
-        const approval = (
-          req: Omit<ToolApprovalRequest, 'requestId'>
-        ): Promise<ToolApprovalAnswer> =>
-          tools.broker.request(req, this.broadcast, controller.signal)
-        const questions = tools.questions
-        const askUser = questions
-          ? (question: string, options: string[]): Promise<string | null> =>
-              questions.request(
-                { streamId, conversationId, question, options },
-                this.broadcast,
-                controller.signal
-              )
-          : undefined
-        const planMode = conversation.mode === 'work' && conversation.params.planMode === true
-        const autoAcceptEdits = !planMode && conversation.params.autoAcceptEdits === true
-        const sandboxLevel =
-          conversation.mode === 'work' ? conversation.params.sandboxLevel : undefined
-        // Live tool output (shell commands) streams into the same envelope
-        // channel so the renderer can show it while the tool runs.
-        const onToolOutput = (toolCallId: string, chunk: string): void =>
-          emit({ type: 'tool-output', toolCallId, chunk })
-        // Generated images: collected for the final message and streamed live.
-        const onAttachment = (attachment: Attachment): void => {
-          generatedAttachments.push(attachment)
-          emit({ type: 'attachment', attachment })
-        }
-        for (const call of roundCalls) {
-          if (controller.signal.aborted) {
-            throw new ProviderError('aborted', 'Generation stopped.')
-          }
-          emit({ type: 'tool-call', toolCall: { ...call } }) // status 'proposed'
-          const result = await tools.executor.execute(call, {
+      // Reliability Autopilot walk: each attempt is one full pass (compaction →
+      // history → round loop) against `target`. A qualifying transient failure
+      // BEFORE any tool has executed resets the placeholder and retries on the
+      // next chain entry; a completed-but-empty reply retries once.
+      attempt: for (;;) {
+        try {
+          await this.maybeCompact(conversation, target, buildOpts.settings, controller.signal)
+          // Per-model capabilities, recomputed for each attempt (identical to
+          // the caller-computed buildOpts/adapterTools values on attempt 0).
+          const visionEnabled = modelSupportsVision(target.provider, target.modelId)
+          const attemptTools = modelSupportsTools(target.provider, target.modelId)
+            ? adapterTools
+            : undefined
+          const history = this.buildHistory(
             conversation,
-            streamId,
-            approval,
-            ...(askUser ? { askUser } : {}),
-            planMode,
-            autoAcceptEdits,
-            ...(sandboxLevel ? { sandboxLevel } : {}),
-            onToolOutput,
-            onAttachment,
-            signal: controller.signal,
-          })
-          call.result = result
-          call.status = toolCallStatus(result)
-          // Recorded as it settles, not after the round: a Stop between two
-          // calls throws out of this loop, and a call whose side effects already
-          // happened must never be missing from the persisted message.
-          toolCalls.push(call)
-          emit({ type: 'tool-call', toolCall: { ...call } }) // with result/status
-        }
-
-        // Feed the round back: assistant message with toolCalls, then one
-        // role-'tool' message per result, and re-invoke the adapter.
-        messages.push({ role: 'assistant', content: roundText, toolCalls: roundCalls })
-        for (const call of roundCalls) {
-          messages.push({ role: 'tool', content: call.result ?? '', toolCallId: call.id })
-        }
-
-        // Stall supervision (see stall-supervisor.ts): a run stuck in rounds
-        // of failing calls gets redirected first, then stopped — instead of
-        // silently burning the whole round cap.
-        if (roundWasProductive(roundCalls.map((call) => call.result ?? ''))) {
-          unproductiveRounds = 0
-        } else {
-          unproductiveRounds += 1
-          if (unproductiveRounds >= STALL_STOP_ROUNDS) {
-            appendText(text.length > 0 ? `\n\n${STALL_LIMIT_NOTE}` : STALL_LIMIT_NOTE)
-            finishReason = 'stop'
-            break
+            buildOpts.settings,
+            buildOpts.promptOpts,
+            visionEnabled,
+            this.shouldReplayToolCalls(target)
+          )
+          const adapter = this.adapterFor(target)
+          const tools = this.options.tools
+          const messages: AdapterMessage[] = [...history]
+          // MoA/research: fold the injected context into the latest user turn.
+          if (extraOpts?.injectedContext) {
+            appendContextToLastUser(messages, extraOpts.injectedContext)
           }
-          const nudge = stallNudge(unproductiveRounds)
-          if (nudge) {
-            messages.push({ role: 'user', content: nudge })
+
+          let toolRounds = 0
+          // Stall supervision: consecutive rounds whose tool calls ALL failed.
+          let unproductiveRounds = 0
+          for (;;) {
+            const roundCalls: ToolCallRecord[] = []
+            let roundText = ''
+            let roundFinish: 'stop' | 'length' | 'tool_calls' = 'stop'
+            // '\n\n' separator once per round, only when the placeholder already
+            // has text (i.e. this is a follow-up round after tool results).
+            let separatorPending = text.length > 0
+
+            const stream = adapter.chatStream(
+              {
+                modelId: target.modelId,
+                messages,
+                params: target.params,
+                tools: attemptTools,
+                stream: true,
+              },
+              this.adapterCtx(target, controller.signal)
+            )
+            for await (const event of stream) {
+              switch (event.type) {
+                case 'text':
+                  if (event.text.length === 0) break
+                  if (separatorPending) {
+                    separatorPending = false
+                    appendText('\n\n')
+                  }
+                  roundText += event.text
+                  appendText(event.text)
+                  break
+                case 'reasoning':
+                  reasoning += event.text
+                  emit({ type: 'reasoning-delta', text: event.text })
+                  break
+                case 'tool_call':
+                  // Accumulate only; broadcast happens when the round settles.
+                  roundCalls.push({ ...event.toolCall, status: 'proposed' })
+                  break
+                case 'usage':
+                  usage = addUsage(usage, event.usage)
+                  emit({ type: 'usage', usage })
+                  break
+                case 'finish':
+                  roundFinish = event.reason === 'other' ? 'stop' : event.reason
+                  break
+              }
+            }
+
+            // Final round: the model is done (or emitted calls we cannot run).
+            if (roundFinish !== 'tool_calls' || roundCalls.length === 0 || !tools) {
+              for (const call of roundCalls) emit({ type: 'tool-call', toolCall: call })
+              toolCalls.push(...roundCalls)
+              finishReason = roundFinish
+              break
+            }
+
+            // Round cap exceeded: record the unexecuted calls, note it, finish.
+            if (toolRounds >= MAX_TOOL_ROUNDS) {
+              for (const call of roundCalls) emit({ type: 'tool-call', toolCall: call })
+              toolCalls.push(...roundCalls)
+              appendText(text.length > 0 ? `\n\n${TOOL_LIMIT_NOTE}` : TOOL_LIMIT_NOTE)
+              finishReason = 'stop'
+              break
+            }
+            toolRounds += 1
+
+            // A stop issued while the adapter round was streaming must abort before
+            // we run any tool (or ask for approval).
+            if (controller.signal.aborted) {
+              throw new ProviderError('aborted', 'Generation stopped.')
+            }
+
+            // Execute the round's calls sequentially (model emission order). The
+            // executor handles permission short-circuits ('deny'/'always_allow')
+            // and routes 'ask' through the broker -> renderer approval click. The
+            // stream's AbortSignal is threaded through so a pending approval
+            // resolves false immediately when the stream is stopped.
+            const approval = (
+              req: Omit<ToolApprovalRequest, 'requestId'>
+            ): Promise<ToolApprovalAnswer> =>
+              tools.broker.request(req, this.broadcast, controller.signal)
+            const questions = tools.questions
+            const askUser = questions
+              ? (question: string, options: string[]): Promise<string | null> =>
+                  questions.request(
+                    { streamId, conversationId, question, options },
+                    this.broadcast,
+                    controller.signal
+                  )
+              : undefined
+            const planMode = conversation.mode === 'work' && conversation.params.planMode === true
+            const invocationPolicy = currentInvocationPolicy()
+            const autoAcceptEdits =
+              invocationPolicy?.origin === 'remote'
+                ? false
+                : !planMode && conversation.params.autoAcceptEdits === true
+            const sandboxLevel =
+              conversation.mode === 'work'
+                ? invocationPolicy?.origin === 'remote'
+                  ? invocationPolicy.sandboxLevel
+                  : conversation.params.sandboxLevel
+                : undefined
+            // Live tool output (shell commands) streams into the same envelope
+            // channel so the renderer can show it while the tool runs.
+            const onToolOutput = (toolCallId: string, chunk: string): void =>
+              emit({ type: 'tool-output', toolCallId, chunk })
+            // Generated images: collected for the final message and streamed live.
+            const onAttachment = (attachment: Attachment): void => {
+              generatedAttachments.push(attachment)
+              emit({ type: 'attachment', attachment })
+            }
+            // From here on tool side effects happen — the failover gate closes
+            // for the rest of this turn (a retry could re-run the tools).
+            toolExecutedThisTurn = true
+            for (const call of roundCalls) {
+              if (controller.signal.aborted) {
+                throw new ProviderError('aborted', 'Generation stopped.')
+              }
+              emit({ type: 'tool-call', toolCall: { ...call } }) // status 'proposed'
+              const result = await tools.executor.execute(call, {
+                conversation,
+                streamId,
+                approval,
+                ...(askUser ? { askUser } : {}),
+                planMode,
+                autoAcceptEdits,
+                ...(sandboxLevel ? { sandboxLevel } : {}),
+                onToolOutput,
+                onAttachment,
+                signal: controller.signal,
+              })
+              call.result = result
+              call.status = toolCallStatus(result)
+              // Recorded as it settles, not after the round: a Stop between two
+              // calls throws out of this loop, and a call whose side effects already
+              // happened must never be missing from the persisted message.
+              toolCalls.push(call)
+              emit({ type: 'tool-call', toolCall: { ...call } }) // with result/status
+            }
+
+            // Feed the round back: assistant message with toolCalls, then one
+            // role-'tool' message per result, and re-invoke the adapter.
+            messages.push({ role: 'assistant', content: roundText, toolCalls: roundCalls })
+            for (const call of roundCalls) {
+              messages.push({ role: 'tool', content: call.result ?? '', toolCallId: call.id })
+            }
+
+            // Stall supervision (see stall-supervisor.ts): a run stuck in rounds
+            // of failing calls gets redirected first, then stopped — instead of
+            // silently burning the whole round cap.
+            if (roundWasProductive(roundCalls.map((call) => call.result ?? ''))) {
+              unproductiveRounds = 0
+            } else {
+              unproductiveRounds += 1
+              if (unproductiveRounds >= STALL_STOP_ROUNDS) {
+                appendText(text.length > 0 ? `\n\n${STALL_LIMIT_NOTE}` : STALL_LIMIT_NOTE)
+                finishReason = 'stop'
+                break
+              }
+              const nudge = stallNudge(unproductiveRounds)
+              if (nudge) {
+                messages.push({ role: 'user', content: nudge })
+              }
+            }
+
+            // A computer-use action leaves a screenshot on the shared browser
+            // session. ALWAYS consume it here (draining every round, vision or not)
+            // so a non-vision generation can never leave one parked for a later
+            // vision generation in another conversation to pick up. It is only
+            // injected as a synthetic user image when this model has vision
+            // (OpenAI rejects images in tool messages).
+            const shot = this.options.browser?.consumePendingScreenshot() ?? null
+            if (shot && visionEnabled) {
+              messages.push({
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'Screenshot after the computer action:' },
+                  { type: 'image_url', image_url: { url: shot } },
+                ],
+              })
+            }
+
+            if (controller.signal.aborted) {
+              throw new ProviderError('aborted', 'Generation stopped.')
+            }
+          }
+        } catch (e) {
+          const normalized = toNormalizedError(e, target.provider.type, [target.apiKey])
+          if (
+            controller.signal.aborted ||
+            normalized.code === 'aborted' ||
+            toolExecutedThisTurn ||
+            !isFailoverEligible(normalized.code)
+          ) {
+            throw e
+          }
+          const next = await this.resolveFailoverTarget(
+            'interactive',
+            conversation,
+            buildOpts.settings,
+            attempted
+          )
+          // Re-check after the await: a Stop during chain resolution (a hung
+          // OAuth refresh, say) must keep the stop contract — partial text
+          // preserved, no wiped placeholder, no phantom failover entry.
+          if (!next || controller.signal.aborted) throw e
+          applyFailover(normalized.code, next)
+          continue attempt
+        }
+
+        // Empty-reply heuristic: a COMPLETED stream with zero text, reasoning
+        // and tool calls fails over once — never on stop.
+        if (
+          !emptyRetryUsed &&
+          !controller.signal.aborted &&
+          text.trim() === '' &&
+          reasoning.trim() === '' &&
+          toolCalls.length === 0
+        ) {
+          const next = await this.resolveFailoverTarget(
+            'interactive',
+            conversation,
+            buildOpts.settings,
+            attempted
+          )
+          if (next && !controller.signal.aborted) {
+            emptyRetryUsed = true
+            applyFailover('empty_reply', next)
+            continue attempt
           }
         }
-
-        // A computer-use action leaves a screenshot on the shared browser
-        // session. ALWAYS consume it here (draining every round, vision or not)
-        // so a non-vision generation can never leave one parked for a later
-        // vision generation in another conversation to pick up. It is only
-        // injected as a synthetic user image when this model has vision
-        // (OpenAI rejects images in tool messages).
-        const shot = this.options.browser?.consumePendingScreenshot() ?? null
-        if (shot && buildOpts.visionEnabled) {
-          messages.push({
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Screenshot after the computer action:' },
-              { type: 'image_url', image_url: { url: shot } },
-            ],
-          })
-        }
-
-        if (controller.signal.aborted) {
-          throw new ProviderError('aborted', 'Generation stopped.')
-        }
+        break
       }
 
       // Research report: append the deterministic Sources section (built from
@@ -3108,7 +3907,7 @@ export class ChatService {
       await runCompletionHooks(conversation, finalMessage)
       emit({ type: 'done', finishReason, message: finalMessage })
     } catch (e) {
-      const normalized = toNormalizedError(e, resolved.provider.type, [resolved.apiKey])
+      const normalized = toNormalizedError(e, target.provider.type, [target.apiKey])
       if (controller.signal.aborted || normalized.code === 'aborted') {
         const finalMessage = finalize('stopped')
         if (finalMessage) emit({ type: 'done', finishReason: 'aborted', message: finalMessage })
@@ -3120,6 +3919,45 @@ export class ChatService {
       deltaBuffer.flush()
       this.releaseStream(streamId, conversationId)
     }
+  }
+
+  /**
+   * Interactive budget gate: when a cap is exceeded, ask ONCE per generation
+   * through the question broker. Only the exact continue answer proceeds —
+   * null (timeout/dismiss/stop), custom text, or a missing broker all refuse.
+   */
+  private async enforceInteractiveBudget(
+    conversation: Conversation,
+    resolved: ResolvedTarget,
+    settings: AppSettings,
+    streamId: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const hit = checkInteractiveBudget(
+      this.db,
+      conversation,
+      settings.monthlyBudgetUsd,
+      resolved.provider,
+      resolved.modelId
+    )
+    if (!hit) return
+    const refusal = new ProviderError(
+      'invalid_request',
+      `${BUDGET_CAP_REACHED}: ${budgetHitText(hit)}. Raise or clear the cap to continue.`
+    )
+    const questions = this.options.tools?.questions
+    if (!questions) throw refusal
+    const answer = await questions.request(
+      {
+        streamId,
+        conversationId: conversation.id,
+        question: `${BUDGET_CAP_REACHED}: ${budgetHitText(hit)}. Continue anyway?`,
+        options: [BUDGET_CONTINUE_OPTION, 'Stop'],
+      },
+      this.broadcast,
+      signal
+    )
+    if (answer !== BUDGET_CONTINUE_OPTION) throw refusal
   }
 
   private maybeAutoTitle(conversationId: string): void {

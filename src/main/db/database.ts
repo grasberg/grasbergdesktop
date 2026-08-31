@@ -31,8 +31,10 @@ import { createMcpServersRepository, type McpServersRepository } from './reposit
 import { createWorkflowsRepository, type WorkflowsRepository } from './repositories/workflows'
 import { createInboxRepository, type InboxRepository } from './repositories/inbox'
 import { createMemoriesRepository, type MemoriesRepository } from './repositories/memories'
+import { createDocumentsRepository, type DocumentsRepository } from './repositories/documents'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
+import { createBotGroupsRepository, type BotGroupsRepository } from './repositories/bot-groups'
 import { createToolRulesRepository, type ToolRulesRepository } from './repositories/tool-rules'
 import { createActivityRepository, type ActivityRepository } from './repositories/activity'
 import {
@@ -57,6 +59,11 @@ import {
   createRemoteDevicesRepository,
   type RemoteDevicesRepository,
 } from './repositories/remote'
+import {
+  createHeadlessUsageRepository,
+  type HeadlessUsageRepository,
+} from './repositories/headless-usage'
+import { createSpacesRepository, type SpacesRepository } from './repositories/spaces'
 
 export interface AppDatabase {
   driver: SqliteDriver
@@ -74,8 +81,11 @@ export interface AppDatabase {
   mcpServers: McpServersRepository
   workflows: WorkflowsRepository
   memories: MemoriesRepository
+  /** Home-level living Markdown notebooks (documents table, revived v43). */
+  documents: DocumentsRepository
   skills: SkillsRepository
   agents: AgentsRepository
+  botGroups: BotGroupsRepository
   /** Standing approval rules ("always allow" / "always ask"). */
   toolRules: ToolRulesRepository
   /** Every tool call, with why it was allowed (the Activity view). */
@@ -92,6 +102,10 @@ export interface AppDatabase {
   experiments: ExperimentsRepository
   /** Phones paired through the relay tunnel (remote access). */
   remoteDevices: RemoteDevicesRepository
+  /** Per-run token/cost ledger for headless generation (no FKs by design). */
+  headlessUsage: HeadlessUsageRepository
+  /** Private spaces (v45): named partitions of the conversation list. */
+  spaces: SpacesRepository
   close(): void
 }
 
@@ -232,8 +246,10 @@ export function openDatabase(filePath: string): AppDatabase {
     mcpServers: createMcpServersRepository(driver),
     workflows: createWorkflowsRepository(driver),
     memories: createMemoriesRepository(driver),
+    documents: createDocumentsRepository(driver),
     skills: createSkillsRepository(driver),
     agents: createAgentsRepository(driver),
+    botGroups: createBotGroupsRepository(driver),
     toolRules: createToolRulesRepository(driver),
     activity: createActivityRepository(driver),
     scheduledTaskRuns: createScheduledTaskRunsRepository(driver),
@@ -244,6 +260,8 @@ export function openDatabase(filePath: string): AppDatabase {
     optimizer: createOptimizerRepository(driver),
     experiments: createExperimentsRepository(driver),
     remoteDevices: createRemoteDevicesRepository(driver),
+    headlessUsage: createHeadlessUsageRepository(driver),
+    spaces: createSpacesRepository(driver),
     close() {
       driver.close()
     },

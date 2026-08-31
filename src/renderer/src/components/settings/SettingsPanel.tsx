@@ -21,6 +21,8 @@ const KnowledgeTab = lazy(() => import('./KnowledgeTab'))
 const AgentPlatformTab = lazy(() => import('./AgentPlatformTab'))
 const UsageTab = lazy(() => import('./UsageTab'))
 const ActivityTab = lazy(() => import('./ActivityTab'))
+const VoiceTab = lazy(() => import('./VoiceTab'))
+const QuickAssistantTab = lazy(() => import('./QuickAssistantTab'))
 
 const TABS = [
   { id: 'providers', label: 'Providers' },
@@ -33,8 +35,10 @@ const TABS = [
   { id: 'mcp', label: 'MCP' },
   { id: 'bridges', label: 'Bridges' },
   { id: 'prompts', label: 'Prompts' },
+  { id: 'quick', label: 'Quick assistant' },
   { id: 'skills', label: 'Skills' },
   { id: 'memory', label: 'Memory' },
+  { id: 'voice', label: 'Voice' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'activity', label: 'Activity' },
   { id: 'usage', label: 'Usage' },
@@ -140,8 +144,10 @@ export default function SettingsPanel() {
               {tab === 'mcp' ? <McpServersTab /> : null}
               {tab === 'bridges' ? <BridgesTab /> : null}
               {tab === 'prompts' ? <PromptsTab /> : null}
+              {tab === 'quick' ? <QuickAssistantTab /> : null}
               {tab === 'skills' ? <SkillsTab /> : null}
               {tab === 'memory' ? <MemoryTab /> : null}
+              {tab === 'voice' ? <VoiceTab /> : null}
               {tab === 'appearance' ? <AppearanceTab /> : null}
               {tab === 'activity' ? <ActivityTab /> : null}
               {tab === 'usage' ? <UsageTab /> : null}

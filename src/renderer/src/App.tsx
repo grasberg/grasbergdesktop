@@ -1,6 +1,6 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { ConversationMode } from '@shared/types'
-import HomeView from '@/components/home/HomeView'
+import LockScreen from '@/components/LockScreen'
 import Sidebar from '@/components/Sidebar'
 import ToolApprovalDialog from '@/components/ToolApprovalDialog'
 import UserQuestionDialog from '@/components/UserQuestionDialog'
@@ -9,18 +9,26 @@ import Toasts from '@/components/Toasts'
 import { GLOBAL_SHORTCUT_KEYS, useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useChatStore } from '@/stores/chat'
 import { useConversationsStore } from '@/stores/conversations'
+import { useLockStore } from '@/stores/lock'
 import { useMcpStore } from '@/stores/mcp'
 import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
+import { useSpacesStore } from '@/stores/spaces'
 import { useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
 import { useWorkflowsStore } from '@/stores/workflows'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 import { useOptimizerStore } from '@/stores/optimizer'
+import { useVoiceStore } from '@/stores/voice'
 
+// Lazy like the other views (it already renders inside the view Suspense):
+// Home pulls the Markdown pipeline via its cards, which kept the CI-gated
+// entry chunk over budget when bundled statically.
+const HomeView = lazy(() => import('@/components/home/HomeView'))
 const ChatView = lazy(() => import('@/components/chat/ChatView'))
 const WorkView = lazy(() => import('@/components/work/WorkView'))
 const WorkflowsView = lazy(() => import('@/components/workflows/WorkflowsView'))
+const BotsView = lazy(() => import('@/components/bots/BotsView'))
 const SettingsPanel = lazy(() => import('@/components/settings/SettingsPanel'))
 const Onboarding = lazy(() => import('@/components/onboarding/Onboarding'))
 const CommandPalette = lazy(() => import('@/components/CommandPalette'))
@@ -39,6 +47,10 @@ function ModeView({ mode }: { mode: ConversationMode }): React.JSX.Element {
 export default function App(): React.JSX.Element {
   const settings = useSettingsStore((s) => s.settings)
   const settingsLoaded = useSettingsStore((s) => s.loaded)
+  const lockStatus = useLockStore((s) => s.status)
+  // Guards the boot data-load: it must run once per app lifetime, not again
+  // after an idle re-lock/unlock cycle.
+  const bootedRef = useRef(false)
   const activeId = useConversationsStore((s) => s.activeId)
   // Mode of the active conversation: the sidebar summary knows it immediately
   // on select; the chat store's copy (once loaded) is authoritative.
@@ -91,10 +103,22 @@ export default function App(): React.JSX.Element {
     return () => document.removeEventListener('keydown', block, true)
   }, [onboardingActive])
 
-  // Initial data load + stream/approval subscriptions (once per app lifetime;
-  // effect is idempotent under StrictMode double-invoke since the loads just
-  // refresh state and the subscriptions are torn down in cleanup).
+  // Lock state first: while locked every other IPC channel is refused, so the
+  // boot data-load below waits for the unlocked signal.
   useEffect(() => {
+    void useLockStore.getState().load()
+    const unsubscribeLock = window.uld.lock.onChanged((evt) => {
+      useLockStore.getState().handleChanged(evt)
+    })
+    return () => unsubscribeLock()
+  }, [])
+
+  // Initial data load, deferred until the app is known unlocked (a locked
+  // launch would just collect auth-error toasts). Runs once per app lifetime —
+  // an idle re-lock/unlock cycle must not re-boot.
+  useEffect(() => {
+    if (bootedRef.current || lockStatus === null || lockStatus.locked) return
+    bootedRef.current = true
     void useSettingsStore.getState().load()
     void useProvidersStore.getState().load()
     void useConversationsStore.getState().load()
@@ -102,6 +126,35 @@ export default function App(): React.JSX.Element {
     // section and failure dot work from the first paint.
     void useWorkflowsStore.getState().load()
     void useScheduledTasksStore.getState().load()
+    // Cheap status read; the composer mic and Transcribe actions gate on it.
+    void useVoiceStore.getState().load()
+  }, [lockStatus])
+
+  // Lock transitions: read-aloud is renderer-global and would keep reciting the
+  // conversation over the lock screen, so silence it the moment the lock
+  // engages. On unlock, pushes dropped while locked (stream done/notify events)
+  // have left the stores stale — re-sync the list and the open conversation.
+  const locked = lockStatus?.locked === true
+  const prevLockedRef = useRef(false)
+  useEffect(() => {
+    const wasLocked = prevLockedRef.current
+    prevLockedRef.current = locked
+    if (locked && !wasLocked) {
+      useVoiceStore.getState().stopSpeaking()
+      return
+    }
+    if (!locked && wasLocked && bootedRef.current) {
+      void useConversationsStore.getState().load()
+      const activeConversation = useConversationsStore.getState().activeId
+      if (activeConversation) {
+        void useChatStore.getState().openConversation(activeConversation)
+      }
+    }
+  }, [locked])
+
+  // Stream/approval subscriptions (once per app lifetime; the subscriptions
+  // are torn down in cleanup, and main suppresses pushes while locked).
+  useEffect(() => {
     const unsubscribeStream = window.uld.chat.onStreamEvent((envelope) => {
       useChatStore.getState().handleStreamEvent(envelope)
     })
@@ -146,7 +199,27 @@ export default function App(): React.JSX.Element {
     const unsubscribeNotices = window.uld.notices.onNotice((notice) => {
       useUiStore.getState().toast(notice.message, notice.level)
     })
+    const unsubscribeVoice = window.uld.voice.onDownloadProgress((event) => {
+      useVoiceStore.getState().handleDownloadProgress(event)
+    })
+    // A quick-assistant exchange was promoted into a real conversation:
+    // refresh the sidebar and navigate to it. Promoted conversations always
+    // land in the DEFAULT space (promoteQuick sets no spaceId), so switch
+    // there first — otherwise the row would be invisible in a private space's
+    // sidebar while the conversation view shows it.
+    const unsubscribeQuickPromoted = window.uld.quick.onPromoted(({ conversationId }) => {
+      const spaces = useSpacesStore.getState()
+      if (spaces.activeSpaceId !== null) spaces.setActive(null)
+      void useConversationsStore
+        .getState()
+        .load()
+        .then(() => {
+          useConversationsStore.getState().select(conversationId)
+        })
+    })
     return () => {
+      unsubscribeQuickPromoted()
+      unsubscribeVoice()
       unsubscribeStream()
       unsubscribeApproval()
       unsubscribeSettled()
@@ -185,6 +258,21 @@ export default function App(): React.JSX.Element {
     document.documentElement.dataset.fontSize = fontSize
   }, [fontSize])
 
+  if (lockStatus?.locked) {
+    return (
+      <>
+        <LockScreen />
+        <Toasts />
+      </>
+    )
+  }
+
+  // Lock state unknown yet (first IPC round-trip): the plain shell avoids a
+  // flash of the full app before a locked launch swaps to the lock screen.
+  if (lockStatus === null) {
+    return <ViewFallback />
+  }
+
   if (settingsLoaded && settings && !settings.onboardingCompleted) {
     return (
       <>
@@ -207,14 +295,18 @@ export default function App(): React.JSX.Element {
           aria-label={
             view === 'workflows'
               ? 'Workflows'
-              : view === 'conversation' && activeId
-                ? 'Conversation'
-                : 'Home overview'
+              : view === 'bots'
+                ? 'Bots'
+                : view === 'conversation' && activeId
+                  ? 'Conversation'
+                  : 'Home overview'
           }
         >
           <Suspense fallback={<ViewFallback />}>
             {view === 'workflows' ? (
               <WorkflowsView />
+            ) : view === 'bots' ? (
+              <BotsView />
             ) : view === 'conversation' && activeId ? (
               <ModeView mode={mode} />
             ) : (

@@ -376,6 +376,12 @@ export class ImBridgeManager {
     if (allowed !== chatId) {
       return 'This assistant is private and only responds to its owner.'
     }
+    // Runtime backstop behind the im:setTelegram bind guard: a conversation
+    // bound before v45 (or via a restored backup) must still never leak.
+    const conversation = this.deps.db.conversations.getById(conversationId)
+    if (conversation?.spaceId) {
+      return 'That conversation is in a private space and is not available over Telegram.'
+    }
     return this.deps.generateReply(conversationId, text)
   }
 
@@ -480,6 +486,8 @@ export class ImBridgeManager {
    */
   async onCompletion(conversation: Conversation, message: Message): Promise<void> {
     if (message.role !== 'assistant') return
+    // Private-space content never leaves the machine through the webhook.
+    if (conversation.spaceId) return
     await this.postWebhook({
       type: 'assistant_message',
       conversationId: conversation.id,
@@ -536,5 +544,15 @@ export class ImBridgeManager {
     if (!delivered) {
       throw new Error('Delivery failed on every configured channel (Telegram/webhook).')
     }
+  }
+
+  /**
+   * Best-effort Telegram-only send to the pinned owner chat (morning brief).
+   * Never throws; false when the bridge is down or no chat is paired.
+   */
+  async sendToOwner(text: string): Promise<boolean> {
+    const chatId = this.deps.db.settings.get().telegramBridgeAllowedChatId
+    if (!this.bridge || chatId === null) return false
+    return this.bridge.send(chatId, text.slice(0, 4000))
   }
 }

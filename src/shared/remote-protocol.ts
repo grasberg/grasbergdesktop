@@ -3,8 +3,8 @@
  *
  * Three parties see three different slices:
  *
- * - The RELAY (hosted, untrusted for content) sees the frames in the first
- *   section only: hello/auth, routing envelopes, HTTP asset tunneling. After
+ * - The RELAY (hosted, untrusted for content and code) sees the frames in the
+ *   first section only: hello/auth and routing envelopes. After
  *   pairing, every application frame between desktop and phone is an opaque
  *   `{t:'sec', n, ct}` AES-256-GCM ciphertext — the relay routes bytes, it
  *   cannot read conversations, tool arguments or approvals.
@@ -145,24 +145,6 @@ export interface RelayDevicesOnline {
   deviceIds: string[]
 }
 
-/** Relay → desktop: serve this path from the mobile bundle (asset tunnel). */
-export interface RelayHttpReq {
-  t: 'http'
-  reqId: string
-  method: string
-  path: string
-}
-
-/** Desktop → relay: the asset response (body base64). */
-export interface RelayHttpRes {
-  t: 'http-res'
-  reqId: string
-  status: number
-  contentType: string
-  etag: string | null
-  body: string
-}
-
 export interface RelayPing {
   t: 'ping'
 }
@@ -218,6 +200,8 @@ export interface InnerHelloRes {
 export interface InnerReq {
   t: 'req'
   id: string
+  /** Per-device monotonic sequence, persisted at both ends to reject replay. */
+  seq: number
   channel: string
   args: unknown[]
 }

@@ -72,6 +72,30 @@ export function open(filePath: string): SqliteDriver {
     return stmt
   }
 
+  /**
+   * Runs one cached-statement operation, evicting + finalizing the statement if
+   * it throws. node-sqlite3-wasm leaves a statement whose step() failed (a
+   * constraint violation, an FK error) in a state where the NEXT reset/bind on
+   * that same cached handle throws a spurious "Could not reset statement prior
+   * to binding new values" — turning one error into a second on an unrelated,
+   * valid call that happens to share the SQL string. Dropping the handle on
+   * error means the next call recompiles a clean statement.
+   */
+  const withStmt = <T>(sql: string, fn: (stmt: Statement) => T): T => {
+    const stmt = stmtFor(sql)
+    try {
+      return fn(stmt)
+    } catch (error) {
+      stmts.delete(sql)
+      try {
+        if (!stmt.isFinalized) stmt.finalize()
+      } catch {
+        // Best-effort teardown of a statement that is already in a bad state.
+      }
+      throw error
+    }
+  }
+
   /** Subscribers fired when the outermost transaction commits or rolls back. */
   const transactionEndHooks = new Set<() => void>()
   const fireTransactionEnd = (): void => {
@@ -88,8 +112,7 @@ export function open(filePath: string): SqliteDriver {
 
   return {
     run(sql, params) {
-      const result = stmtFor(sql).run(params)
-      return { changes: result.changes }
+      return withStmt(sql, (stmt) => ({ changes: stmt.run(params).changes }))
     },
 
     get<T>(sql: string, params?: SqlParams): T | undefined {
@@ -98,21 +121,23 @@ export function open(filePath: string): SqliteDriver {
       // write transaction on this connection then fails with SQLITE_LOCKED
       // ("database table is locked") — e.g. migrations rebuilding a table.
       // Reaching SQLITE_DONE releases the cursor.
-      const rows = stmtFor(sql).iterate(params)
-      let first: T | undefined
-      let seen = false
-      for (const row of rows) {
-        if (!seen) {
-          first = row as unknown as T
-          seen = true
+      return withStmt(sql, (stmt) => {
+        const rows = stmt.iterate(params)
+        let first: T | undefined
+        let seen = false
+        for (const row of rows) {
+          if (!seen) {
+            first = row as unknown as T
+            seen = true
+          }
         }
-      }
-      return first
+        return first
+      })
     },
 
     all<T>(sql: string, params?: SqlParams): T[] {
       // Array.from over iterate() drains to completion (same requirement).
-      return Array.from(stmtFor(sql).iterate(params)) as unknown as T[]
+      return withStmt(sql, (stmt) => Array.from(stmt.iterate(params)) as unknown as T[])
     },
 
     exec(sql) {

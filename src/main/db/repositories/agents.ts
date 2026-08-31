@@ -1,10 +1,12 @@
 /**
  * Agent-profile storage (migration v21): user-defined sub-agents with their
  * own persona, optional dedicated model, and optional restricted toolset.
+ * Since v46 a profile is also a Bot Mode roster entry: title (role), avatar,
+ * hidden flag and a lazily created canonical chat conversation.
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentProfile, AgentProfileInput, AgentProfilePatch } from '@shared/types'
+import type { AgentProfile, AgentProfileInput, AgentProfilePatch, BotAvatar } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 import { parseStringArray, updateById } from './util'
 
@@ -16,6 +18,8 @@ export interface AgentsRepository {
   getByName(name: string): AgentProfile | null
   create(input: AgentProfileInput): AgentProfile
   update(id: string, patch: AgentProfilePatch): AgentProfile | null
+  /** Records the bot's canonical chat conversation (created lazily). */
+  setChatConversation(id: string, conversationId: string | null): void
   remove(id: string): void
 }
 
@@ -29,8 +33,27 @@ interface AgentRow {
   tool_ids_json: string | null
   max_rounds: number | null
   enabled: number
+  title: string
+  avatar_json: string | null
+  hidden: number
+  chat_conversation_id: string | null
   created_at: number
   updated_at: number
+}
+
+function parseAvatar(json: string | null): BotAvatar | null {
+  if (!json) return null
+  try {
+    const parsed = JSON.parse(json) as unknown
+    if (!parsed || typeof parsed !== 'object') return null
+    const record = parsed as Record<string, unknown>
+    const emoji = typeof record.emoji === 'string' ? record.emoji : null
+    const color = typeof record.color === 'string' ? record.color : null
+    if (!emoji && !color) return null
+    return { emoji, color }
+  } catch {
+    return null
+  }
 }
 
 function toAgent(row: AgentRow): AgentProfile {
@@ -44,6 +67,10 @@ function toAgent(row: AgentRow): AgentProfile {
     toolIds: row.tool_ids_json === null ? null : parseStringArray(row.tool_ids_json, []),
     maxRounds: row.max_rounds,
     enabled: row.enabled === 1,
+    title: row.title,
+    avatar: parseAvatar(row.avatar_json),
+    hidden: row.hidden === 1,
+    chatConversationId: row.chat_conversation_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -87,14 +114,19 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         toolIds: input.toolIds ?? null,
         maxRounds: input.maxRounds ?? null,
         enabled: input.enabled !== false,
+        title: input.title ?? '',
+        avatar: input.avatar ?? null,
+        hidden: input.hidden === true,
+        chatConversationId: null,
         createdAt: now,
         updatedAt: now,
       }
       driver.run(
         `INSERT INTO agents
            (id, name, description, system_prompt, provider_id, model_id,
-            tool_ids_json, max_rounds, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            tool_ids_json, max_rounds, enabled, title, avatar_json, hidden,
+            chat_conversation_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           agent.id,
           agent.name,
@@ -105,6 +137,10 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
           agent.toolIds ? JSON.stringify(agent.toolIds) : null,
           agent.maxRounds,
           agent.enabled ? 1 : 0,
+          agent.title,
+          agent.avatar ? JSON.stringify(agent.avatar) : null,
+          agent.hidden ? 1 : 0,
+          null,
           now,
           now,
         ]
@@ -131,10 +167,22 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
                 : JSON.stringify(patch.toolIds),
           max_rounds: patch.maxRounds,
           enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+          title: patch.title,
+          avatar_json:
+            patch.avatar === undefined
+              ? undefined
+              : patch.avatar === null
+                ? null
+                : JSON.stringify(patch.avatar),
+          hidden: patch.hidden === undefined ? undefined : patch.hidden ? 1 : 0,
         },
         { touchUpdatedAt: true }
       )
       return getById(id)
+    },
+
+    setChatConversation(id, conversationId) {
+      driver.run('UPDATE agents SET chat_conversation_id = ? WHERE id = ?', [conversationId, id])
     },
 
     remove(id) {

@@ -20,6 +20,7 @@ interface DeviceRow {
   created_at: number
   last_seen_at: number | null
   revoked_at: number | null
+  last_request_seq: number
 }
 
 function toDevice(row: DeviceRow): RemoteDevice {
@@ -55,6 +56,8 @@ export interface RemoteDevicesRepository {
   getActiveByTokenHash(tokenHash: string): RemoteDevice | null
   /** Stamps last_seen_at = now; no-op for revoked or unknown devices. */
   touch(id: string): void
+  /** Atomically accepts a strictly newer authenticated request sequence. */
+  claimRequestSequence(id: string, seq: number): boolean
   /** Marks the device revoked; its token stops authenticating immediately. */
   revoke(id: string): void
   /** Removes the row entirely (used when the user deletes a revoked device). */
@@ -72,6 +75,7 @@ export function createRemoteDevicesRepository(driver: SqliteDriver): RemoteDevic
         created_at: Date.now(),
         last_seen_at: null,
         revoked_at: null,
+        last_request_seq: 0,
       }
       driver.run(
         `INSERT INTO remote_devices (id, name, token_hash, key_fingerprint, created_at, last_seen_at, revoked_at)
@@ -122,6 +126,17 @@ export function createRemoteDevicesRepository(driver: SqliteDriver): RemoteDevic
         Date.now(),
         id,
       ])
+    },
+
+    claimRequestSequence(id, seq) {
+      if (!Number.isSafeInteger(seq) || seq <= 0) return false
+      const result = driver.run(
+        `UPDATE remote_devices
+            SET last_request_seq = ?
+          WHERE id = ? AND revoked_at IS NULL AND last_request_seq < ?`,
+        [seq, id, seq]
+      )
+      return (result.changes ?? 0) === 1
     },
 
     revoke(id) {

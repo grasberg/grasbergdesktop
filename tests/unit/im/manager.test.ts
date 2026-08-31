@@ -80,6 +80,39 @@ describe('ImBridgeManager', () => {
     })
   })
 
+  it('never posts a private-space conversation to the outbound webhook (v45 exclusion)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('ok'))
+    const manager = new ImBridgeManager({
+      db,
+      keystore,
+      generateReply: async () => 'ok',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    manager.setWebhook('https://hook.example/incoming')
+
+    const space = db.spaces.create({ name: 'Secret' })
+    const privateConv = db.conversations.create({
+      mode: 'chat',
+      title: 'Private chat',
+      spaceId: space.id,
+    })
+    const message: Message = {
+      id: randomUUID(),
+      conversationId: privateConv.id,
+      role: 'assistant',
+      content: 'Confidential reply',
+      status: 'complete',
+      seq: 1,
+      createdAt: 0,
+    }
+    await manager.onCompletion(privateConv, message)
+    expect(fetchImpl).not.toHaveBeenCalled()
+
+    // The sibling default-space conversation still posts.
+    await manager.onCompletion(conv(), { ...message, conversationId: 'other' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
   it('delivers to an IPv6 loopback ([::1]) webhook accepted at set time', async () => {
     // isAllowedHttpUrl accepts http://[::1]:… at set time; delivery must use the
     // same rule so the webhook actually fires instead of being silently dropped.
@@ -208,6 +241,31 @@ describe('ImBridgeManager', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('refuses an inbound message bound to a private-space conversation (v45 backstop)', async () => {
+    const generateReply = vi.fn(async () => 'reply')
+    const manager = new ImBridgeManager({ db, keystore, generateReply })
+    const space = db.spaces.create({ name: 'Secret' })
+    const hidden = db.conversations.create({ mode: 'chat', title: 'H', spaceId: space.id })
+    // Paired owner chat — the bind predates the guard (or came from a backup).
+    db.settings.update({ telegramBridgeAllowedChatId: 100 })
+
+    const inbound = (chatId: number, text: string, conversationId: string): Promise<string> =>
+      (
+        manager as unknown as {
+          handleInbound(chatId: number, text: string, conversationId: string): Promise<string>
+        }
+      ).handleInbound(chatId, text, conversationId)
+
+    const refusal = await inbound(100, 'what is in there?', hidden.id)
+    expect(refusal).toMatch(/private space/i)
+    expect(generateReply).not.toHaveBeenCalled()
+
+    // A default-space conversation still generates.
+    const open = conv()
+    expect(await inbound(100, 'hello', open.id)).toBe('reply')
+    expect(generateReply).toHaveBeenCalledTimes(1)
   })
 
   it('drops the pinned chat and issues a new pairing code when a new bot token is set', () => {

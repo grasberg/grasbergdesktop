@@ -17,9 +17,13 @@ import type {
   AgentProfilePatch,
   AgentRun,
   AppInfo,
+  AppLockSetPassphraseInput,
+  AppLockStatus,
   AppSettings,
   Attachment,
   AuthMode,
+  BotGroup,
+  BotRoster,
   ChatParams,
   CodeChange,
   CheckpointLite,
@@ -45,6 +49,12 @@ import type {
   Memory,
   MemoryInput,
   MemoryPatch,
+  MorningBrief,
+  NotebookDoc,
+  NotebookDocInput,
+  NotebookDocPatch,
+  NotebookDocSummary,
+  NotebookDocVersionSummary,
   DreamResult,
   BackupSummary,
   SetTelegramBridgeInput,
@@ -53,6 +63,8 @@ import type {
   Skill,
   SkillInput,
   SkillPatch,
+  Space,
+  SpacePatch,
   Workflow,
   WorkflowGraph,
   WorkflowInput,
@@ -71,6 +83,8 @@ import type {
   ProviderConfigInput,
   ProviderConfigPatch,
   ProviderTypeMeta,
+  QuickContext,
+  QuickStreamEventEnvelope,
   ResearchDepth,
   ActivityCursor,
   ActivityEntry,
@@ -79,6 +93,7 @@ import type {
   ScheduledTaskRun,
   ScheduledTasksChangedEvent,
   WorkflowTriggerInfo,
+  WorkflowWatchStatus,
   ScheduledTaskInput,
   PromptTemplate,
   PromptTemplateInput,
@@ -93,9 +108,14 @@ import type {
   OptimizerVersion,
   InboxItem,
   InboxItemType,
+  ConversationCostSummary,
+  HeadlessUsageSummaryEntry,
   TerminalDataEvent,
   TerminalExitEvent,
   TerminalSessionInfo,
+  VoiceDownloadProgressEvent,
+  VoiceModelId,
+  VoiceStatus,
   UsageSummaryEntry,
   TestConnectionResult,
   ToolApprovalRequest,
@@ -132,6 +152,8 @@ export const CHANNELS = {
   appPickFiles: 'app:pickFiles',
   appStorePastedImage: 'app:storePastedImage',
   appReadAttachment: 'app:readAttachment',
+  /** Extract text from a stored PDF (text layer) or OCR a stored PDF/image. */
+  appExtractAttachmentText: 'app:extractAttachmentText',
   /** Save a stored (generated) image to a user-chosen path. */
   appSaveAttachmentAs: 'app:saveAttachmentAs',
 
@@ -164,6 +186,19 @@ export const CHANNELS = {
   convMessages: 'conv:messages',
   convExport: 'conv:export',
   convFork: 'conv:fork',
+  convForkLineage: 'conv:forkLineage',
+
+  // private spaces (v45; desktop-local, never exposed remotely)
+  spacesList: 'spaces:list',
+  spacesCreate: 'spaces:create',
+  spacesUpdate: 'spaces:update',
+  spacesDelete: 'spaces:delete',
+
+  // app lock (lock:status and lock:unlock are the ONLY channels served while locked)
+  lockStatus: 'lock:status',
+  lockUnlock: 'lock:unlock',
+  lockNow: 'lock:lockNow',
+  lockSetPassphrase: 'lock:setPassphrase',
 
   // projects (per-mode organizational grouping of conversations)
   projectsList: 'projects:list',
@@ -260,6 +295,16 @@ export const CHANNELS = {
   memoriesDelete: 'memories:delete',
   memoriesDream: 'memories:dream',
 
+  // notebooks (Home-level living Markdown docs)
+  documentsList: 'documents:list',
+  documentsGet: 'documents:get',
+  documentsCreate: 'documents:create',
+  documentsUpdate: 'documents:update',
+  documentsDelete: 'documents:delete',
+  documentsListVersions: 'documents:listVersions',
+  documentsRevert: 'documents:revert',
+  documentsExport: 'documents:export',
+
   // skills
   skillsList: 'skills:list',
   skillsCreate: 'skills:create',
@@ -306,11 +351,13 @@ export const CHANNELS = {
   workflowsOverview: 'workflows:overview',
   workflowsTriggerInfo: 'workflows:trigger:info',
   workflowsTriggerRegenerate: 'workflows:trigger:regenerate',
+  workflowsWatchInfo: 'workflows:watch:info',
 
   // Standalone scheduled tasks (clock menu; independent from workflows)
   scheduledTasksList: 'scheduledTasks:list',
   scheduledTasksCreate: 'scheduledTasks:create',
   scheduledTasksSetEnabled: 'scheduledTasks:setEnabled',
+  scheduledTasksSetBudget: 'scheduledTasks:setBudget',
   scheduledTasksDelete: 'scheduledTasks:delete',
   scheduledTaskRuns: 'scheduledTasks:runs',
 
@@ -323,6 +370,16 @@ export const CHANNELS = {
   agentRunStop: 'agents:runs:stop',
   agentPackExport: 'agents:pack:export',
   agentPackImport: 'agents:pack:import',
+
+  // Bot Mode (v46): roster, canonical bot chats, group rooms
+  botsRoster: 'bots:roster',
+  botsOpenChat: 'bots:openChat',
+  botGroupCreate: 'bots:groups:create',
+  botGroupUpdate: 'bots:groups:update',
+  botGroupDelete: 'bots:groups:delete',
+  botGroupSend: 'bots:groups:send',
+  botGroupStop: 'bots:groups:stop',
+  botGroupMarkSeen: 'bots:groups:markSeen',
 
   // knowledge bases (RAG)
   kbList: 'kb:list',
@@ -352,13 +409,41 @@ export const CHANNELS = {
   inboxList: 'inbox:list',
   inboxMarkReviewed: 'inbox:markReviewed',
 
+  // morning brief (daily digest generated main-side)
+  briefList: 'brief:list',
+  briefDismiss: 'brief:dismiss',
+
   // usage (local, estimate-only spend summary)
   usageSummary: 'usage:summary',
+  /** Month-to-date estimated cost of one conversation (header HUD). */
+  usageConversationCost: 'usage:conversationCost',
+  /** Headless-generation spend grouped by run kind (Settings → Usage). */
+  usageHeadless: 'usage:headless',
 
   // terminal (user-driven Work-view terminal; sessions are per conversation)
   terminalCreate: 'terminal:create',
   terminalInput: 'terminal:input',
   terminalDispose: 'terminal:dispose',
+
+  // voice (offline whisper.cpp STT; desktop-local, never exposed remotely)
+  voiceStatus: 'voice:status',
+  voiceDownload: 'voice:download',
+  voiceDownloadCancel: 'voice:download:cancel',
+  voiceRemove: 'voice:remove',
+  /** Main-side native picker for a locally built whisper-cli binary. */
+  voicePickBinary: 'voice:pickBinary',
+  voiceSttBegin: 'voice:stt:begin',
+  voiceSttChunk: 'voice:stt:chunk',
+  voiceSttEnd: 'voice:stt:end',
+  voiceSttCancel: 'voice:stt:cancel',
+  voiceTranscribeAttachment: 'voice:transcribeAttachment',
+
+  // quick assistant (global-shortcut clipboard mini window; desktop-local,
+  // never exposed remotely)
+  quickRun: 'quick:run',
+  quickGetContext: 'quick:getContext',
+  quickHide: 'quick:hide',
+  quickPromote: 'quick:promote',
 
   // push channels (main -> renderer, via webContents.send)
   streamEvent: 'push:streamEvent',
@@ -384,6 +469,10 @@ export const CHANNELS = {
    */
   workflowRunFinished: 'push:workflowRunFinished',
   scheduledTasksChanged: 'push:scheduledTasksChanged',
+  /** Sent with { brief } when a morning brief is generated or dismissed. */
+  briefChanged: 'push:briefChanged',
+  /** Sent (no payload) when a tool call created or edited a notebook. */
+  documentsChanged: 'push:documentsChanged',
   /** Standing approval rules changed (an approval answer created one). */
   toolRulesChanged: 'push:toolRulesChanged',
   /** A main-side notice for the user (e.g. the trigger endpoint failed to bind). */
@@ -401,6 +490,32 @@ export const CHANNELS = {
    * a device paired/revoked/seen. The Bridges tab refetches remote:status.
    */
   remoteChanged: 'push:remoteChanged',
+  /** Sent with VoiceDownloadProgressEvent while a whisper binary/model downloads. */
+  voiceDownloadProgress: 'push:voiceDownloadProgress',
+  /**
+   * Sent with QuickContext on a re-summon of the quick window. TARGETED at the
+   * quick window's webContents only — never the main event bus, so ephemeral
+   * quick content can't leak to other windows or the phone tunnel.
+   */
+  quickContext: 'push:quickContext',
+  /** Sent with QuickStreamEventEnvelope; TARGETED at the quick window only. */
+  quickStreamEvent: 'push:quickStreamEvent',
+  /**
+   * Sent with { conversationId } when a quick exchange was promoted into a
+   * real conversation (broadcast: the main window navigates to it).
+   */
+  quickPromoted: 'push:quickPromoted',
+  /**
+   * Sent with { locked: boolean } when the app lock engages or releases.
+   * The ONLY push forwarded to windows while locked.
+   */
+  appLockChanged: 'push:appLockChanged',
+  /**
+   * Bot Mode (v46): sent with { agentId?, groupId? } whenever the roster
+   * should refresh — a bot chat progressed, a delivery landed, a group turn
+   * persisted, membership changed. Coarse by design; the store refetches.
+   */
+  botsChanged: 'push:botsChanged',
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
@@ -430,6 +545,8 @@ export interface ConvListRequest {
   /** Restrict to tasks filed under this organizational Project. */
   projectRef?: string
   limit?: number
+  /** List this private space; omit for the default space. Stripped for remote callers. */
+  spaceId?: string
 }
 
 export interface ConvCreateRequest {
@@ -444,6 +561,8 @@ export interface ConvCreateRequest {
   projectRef?: string | null
   /** Generate this conversation through a Mixture-of-Agents preset. */
   moaPresetId?: string | null
+  /** Create in this private space; null/omit = the default space. Stripped for remote callers. */
+  spaceId?: string | null
 }
 
 export interface ConvUpdateRequest {
@@ -464,6 +583,8 @@ export interface ConvUpdateRequest {
     moaPresetId: string | null
     /** Attach/detach a knowledge base (retrieval via knowledge_search). */
     knowledgeBaseId: string | null
+    /** Monthly spend cap in USD; null clears (stripped on remote requests). */
+    budgetUsd: number | null
   }>
 }
 
@@ -484,6 +605,17 @@ export interface ConvExportResult {
   canceled: boolean
   /** Absolute path written to, when not canceled. */
   path?: string
+}
+
+export interface ConvForkLineage {
+  /**
+   * The conversation this one was forked from, or null — either not a fork or
+   * the parent was deleted (the caller distinguishes via
+   * `conversation.parentConversationId`).
+   */
+  parent: { id: string; title: string } | null
+  /** The parent's other forks (the asking conversation excluded), oldest first. */
+  siblings: Array<{ id: string; title: string; createdAt: number }>
 }
 
 export interface ChatSendRequest {
@@ -511,6 +643,32 @@ export interface ChatSendRequest {
      */
     research?: { depth?: ResearchDepth }
   }
+}
+
+/** Starts an ephemeral quick-assistant generation (nothing is persisted). */
+export interface QuickRunRequest {
+  /** Id of the QuickAction in AppSettings.quickActions. */
+  actionId: string
+  /** The captured clipboard text (already truncated renderer-side display-wise). */
+  selection: string
+}
+
+export interface QuickRunResult {
+  streamId: string
+  /** The composed prompt ({selection} substituted) — what promote records. */
+  prompt: string
+  /** The resolved acting model, so promote can stamp exactly what ran. */
+  providerId: string
+  modelId: string
+}
+
+/** Promotes a finished quick exchange into a real conversation. */
+export interface QuickPromoteRequest {
+  userText: string
+  answer: string
+  providerId: string
+  modelId: string
+  title?: string
 }
 
 export interface ChatRegenerateRequest {
@@ -620,6 +778,20 @@ export interface StorePastedImageInput {
   dataBase64: string
 }
 
+export interface ExtractAttachmentTextInput {
+  storageKey: string
+  /** 'text' = PDF text layer (pdf keys only); 'ocr' = OCR a PDF or image. */
+  method: 'text' | 'ocr'
+}
+
+export interface AttachmentExtractionResult {
+  extractedText: string
+  /** 'none' = a text-layer pass found no real text (scanned PDF) — offer OCR. */
+  extraction: 'text' | 'ocr' | 'none'
+  pageCount?: number
+  truncated: boolean
+}
+
 // ---------------------------------------------------------------------------
 // The API preload exposes as window.uld
 // ---------------------------------------------------------------------------
@@ -635,6 +807,13 @@ export interface UldApi {
     storePastedImage(input: StorePastedImageInput): Promise<IpcResult<Attachment>>
     /** Reads a stored image attachment as a data URL (null when missing). */
     readAttachment(storageKey: string): Promise<IpcResult<{ dataUrl: string } | null>>
+    /**
+     * Extracts text from a stored PDF (method 'text') or OCRs a stored
+     * PDF/image (method 'ocr'). Heavy deps load lazily in main.
+     */
+    extractAttachmentText(
+      input: ExtractAttachmentTextInput
+    ): Promise<IpcResult<AttachmentExtractionResult>>
     /** Copies a stored image attachment to a user-picked path (save dialog). */
     saveAttachmentAs(
       storageKey: string,
@@ -676,7 +855,13 @@ export interface UldApi {
     messages(conversationId: string): Promise<IpcResult<Message[]>>
     /** Serializes a conversation to a file via a native save dialog (main). */
     export(req: ConvExportRequest): Promise<IpcResult<ConvExportResult>>
-    fork(id: string, throughSeq?: number): Promise<IpcResult<Conversation>>
+    /**
+     * Copies the conversation and its transcript up to and including
+     * `messageId` (the whole transcript when omitted) into a new conversation.
+     */
+    fork(id: string, messageId?: string): Promise<IpcResult<Conversation>>
+    /** Fork provenance for the backlink chip: parent + sibling forks. */
+    forkLineage(id: string): Promise<IpcResult<ConvForkLineage>>
     /**
      * Fires when main writes messages outside a stream (IM-bridge replies,
      * compaction) — the renderer refreshes the list and the open conversation.
@@ -784,11 +969,22 @@ export interface UldApi {
   usage: {
     /** Local, estimate-only usage summary over the last `days` days (default 30). */
     summary(days?: number): Promise<IpcResult<UsageSummaryEntry[]>>
+    /** Month-to-date estimated cost of one conversation (header HUD). */
+    conversationCost(conversationId: string): Promise<IpcResult<ConversationCostSummary>>
+    /** Headless spend by run kind over the last `days` days (default 30). */
+    headlessSummary(days?: number): Promise<IpcResult<HeadlessUsageSummaryEntry[]>>
   }
   inbox: {
     /** Unified review queue: finished background results, newest first. */
     list(): Promise<IpcResult<InboxItem[]>>
     markReviewed(itemType: InboxItemType, itemId: string): Promise<IpcResult<void>>
+  }
+  brief: {
+    /** Stored morning briefs, newest first (last 7). */
+    list(): Promise<IpcResult<MorningBrief[]>>
+    /** Dismisses one brief's Home card (persisted). Unknown id is a no-op. */
+    dismiss(id: string): Promise<IpcResult<void>>
+    onChanged(cb: (payload: { brief: MorningBrief }) => void): () => void
   }
   arena: {
     /** Race 2–4 models on the same task in isolated worktrees. */
@@ -831,6 +1027,50 @@ export interface UldApi {
     dispose(sessionId: string): Promise<IpcResult<void>>
     onData(cb: (event: TerminalDataEvent) => void): () => void
     onExit(cb: (event: TerminalExitEvent) => void): () => void
+  }
+  voice: {
+    status(): Promise<IpcResult<VoiceStatus>>
+    /** Starts a binary+model download; progress/completion arrive on the push channel. */
+    download(modelId: VoiceModelId): Promise<IpcResult<VoiceStatus>>
+    cancelDownload(): Promise<IpcResult<VoiceStatus>>
+    /** Deletes a downloaded model file (only ever under {userData}/audio). */
+    remove(modelId: VoiceModelId): Promise<IpcResult<VoiceStatus>>
+    /** Opens the native picker for a local whisper-cli binary (clear = unset). */
+    pickBinary(clear: boolean): Promise<IpcResult<VoiceStatus>>
+    /** Push-to-talk: begin a chunked WAV upload session. */
+    sttBegin(): Promise<IpcResult<{ sessionId: string }>>
+    /** One chunk (≤ 8 MB per call, 64 MB per session). */
+    sttChunk(sessionId: string, chunk: Uint8Array): Promise<IpcResult<void>>
+    /** Assembles the WAV and transcribes it with the local whisper binary. */
+    sttEnd(sessionId: string): Promise<IpcResult<{ text: string }>>
+    sttCancel(sessionId: string): Promise<IpcResult<void>>
+    /**
+     * Transcribes a stored audio attachment. With messageId+attachmentId the
+     * transcript is persisted onto that message's attachment (extractedText)
+     * and push:conversationsChanged fires.
+     */
+    transcribeAttachment(req: {
+      storageKey: string
+      messageId?: string
+      attachmentId?: string
+    }): Promise<IpcResult<{ text: string }>>
+    onDownloadProgress(cb: (e: VoiceDownloadProgressEvent) => void): () => void
+  }
+  quick: {
+    /**
+     * Runs one quick action on the captured clipboard text. Events arrive on
+     * the targeted quick push channel; stopping reuses chat.stop(streamId).
+     */
+    run(req: QuickRunRequest): Promise<IpcResult<QuickRunResult>>
+    /** Last clipboard capture from summon (pulled on mount — no push race). */
+    getContext(): Promise<IpcResult<QuickContext>>
+    /** Hides the quick window and aborts the in-flight quick stream. */
+    hide(): Promise<IpcResult<void>>
+    /** Creates a real conversation from the exchange and focuses the main window. */
+    promote(req: QuickPromoteRequest): Promise<IpcResult<{ conversationId: string }>>
+    onContext(cb: (ctx: QuickContext) => void): () => void
+    onStreamEvent(cb: (envelope: QuickStreamEventEnvelope) => void): () => void
+    onPromoted(cb: (payload: { conversationId: string }) => void): () => void
   }
   tools: {
     list(): Promise<IpcResult<ToolDefinition[]>>
@@ -890,6 +1130,23 @@ export interface UldApi {
     /** Manual "Consolidate now": runs a dream regardless of the auto toggle. */
     dream(): Promise<IpcResult<DreamResult>>
   }
+  documents: {
+    /** Notebook summaries (kind 'doc' only), updated_at DESC, no content. */
+    list(): Promise<IpcResult<NotebookDocSummary[]>>
+    get(id: string): Promise<IpcResult<NotebookDoc>>
+    create(input: NotebookDocInput): Promise<IpcResult<NotebookDoc>>
+    /** A content change snapshots the previous content as a version first. */
+    update(id: string, patch: NotebookDocPatch): Promise<IpcResult<NotebookDoc>>
+    delete(id: string): Promise<IpcResult<void>>
+    /** Version summaries, newest first (capped at 20 per document). */
+    listVersions(id: string): Promise<IpcResult<NotebookDocVersionSummary[]>>
+    /** Restores a version; the pre-revert content is snapshotted first. */
+    revert(id: string, versionId: number): Promise<IpcResult<NotebookDoc>>
+    /** Save-dialog export of the notebook's Markdown. */
+    export(id: string): Promise<IpcResult<{ canceled: true } | { canceled: false; path: string }>>
+    /** Fired when a tool call created or edited a notebook. */
+    onChanged(cb: () => void): () => void
+  }
   skills: {
     list(): Promise<IpcResult<Skill[]>>
     create(input: SkillInput): Promise<IpcResult<Skill>>
@@ -899,10 +1156,34 @@ export interface UldApi {
     importFolder(path: string): Promise<IpcResult<Skill[]>>
   }
   backup: {
-    /** Save-dialog export of settings + memories + skills (never secrets). */
-    export(): Promise<IpcResult<{ canceled: true } | { canceled: false; path: string }>>
+    /**
+     * Save-dialog export of settings + memories + skills (never secrets).
+     * Private-space conversations are excluded unless `includePrivateSpaces`
+     * is explicitly set.
+     */
+    export(opts?: {
+      includePrivateSpaces?: boolean
+    }): Promise<IpcResult<{ canceled: true } | { canceled: false; path: string }>>
     /** Open-dialog import of a backup file; upserts, never duplicates. */
     import(): Promise<IpcResult<{ canceled: true } | ({ canceled: false } & BackupSummary)>>
+  }
+  spaces: {
+    list(): Promise<IpcResult<Space[]>>
+    create(name: string): Promise<IpcResult<Space>>
+    update(id: string, patch: SpacePatch): Promise<IpcResult<Space>>
+    /** Refused (invalid_request) while the space still contains conversations. */
+    delete(id: string): Promise<IpcResult<void>>
+  }
+  lock: {
+    /** Exempt from the lock gate (the lock screen needs it while locked). */
+    status(): Promise<IpcResult<AppLockStatus>>
+    /** Exempt from the lock gate; 'auth' error on a wrong passphrase. */
+    unlock(passphrase: string): Promise<IpcResult<AppLockStatus>>
+    lockNow(): Promise<IpcResult<AppLockStatus>>
+    /** Set/change/remove the passphrase (current required once configured). */
+    setPassphrase(input: AppLockSetPassphraseInput): Promise<IpcResult<AppLockStatus>>
+    /** Fires when the lock engages or releases; returns unsubscribe. */
+    onChanged(cb: (evt: { locked: boolean }) => void): () => void
   }
   mcp: {
     list(): Promise<IpcResult<McpServerConfig[]>>
@@ -965,11 +1246,15 @@ export interface UldApi {
     triggerInfo(workflowId?: string): Promise<IpcResult<WorkflowTriggerInfo>>
     /** Mints a fresh endpoint token, invalidating the previous one. */
     triggerRegenerate(): Promise<IpcResult<WorkflowTriggerInfo>>
+    /** Live state of this workflow's folder watch (running, or its last error). */
+    watchInfo(workflowId: string): Promise<IpcResult<WorkflowWatchStatus>>
   }
   scheduledTasks: {
     list(): Promise<IpcResult<ScheduledTask[]>>
     create(input: ScheduledTaskInput): Promise<IpcResult<ScheduledTask>>
     setEnabled(id: string, enabled: boolean): Promise<IpcResult<ScheduledTask>>
+    /** Sets/clears the task's monthly spend cap (USD). */
+    setBudget(id: string, budgetUsd: number | null): Promise<IpcResult<ScheduledTask>>
     delete(id: string): Promise<IpcResult<void>>
       onChanged(cb: (event: ScheduledTasksChangedEvent) => void): () => void
     /** Recorded runs for one task, newest first. */
@@ -984,6 +1269,26 @@ export interface UldApi {
     stopRun(runId: string): Promise<IpcResult<boolean>>
     packExport(): Promise<IpcResult<{ canceled: boolean; path?: string }>>
     packImport(): Promise<IpcResult<{ canceled: boolean; agents?: number; skills?: number; hooks?: number }>>
+  }
+  /** Bot Mode (v46): the Bots pane roster, canonical chats and group rooms. */
+  bots: {
+    roster(): Promise<IpcResult<BotRoster>>
+    /** Get-or-create the bot's canonical chat; returns its conversation id. */
+    openChat(agentId: string): Promise<IpcResult<{ conversationId: string }>>
+    createGroup(input: { name: string; memberIds: string[] }): Promise<IpcResult<BotGroup>>
+    updateGroup(
+      id: string,
+      patch: { name?: string; memberIds?: string[] }
+    ): Promise<IpcResult<BotGroup>>
+    deleteGroup(id: string): Promise<IpcResult<void>>
+    /** Post a user message into a room; rounds run detached (push events). */
+    groupSend(groupId: string, content: string): Promise<IpcResult<void>>
+    groupStop(groupId: string): Promise<IpcResult<void>>
+    /** Clears the room's needs-you badge. */
+    groupMarkSeen(groupId: string): Promise<IpcResult<void>>
+    onChanged(
+      cb: (event: { agentId?: string | null; groupId?: string | null }) => void
+    ): () => void
   }
   knowledge: {
     list(): Promise<IpcResult<KnowledgeBase[]>>

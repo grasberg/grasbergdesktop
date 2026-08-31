@@ -13,10 +13,13 @@ import {
   Notification,
   Tray,
   app,
+  clipboard,
   dialog,
   globalShortcut,
+  powerMonitor,
   session,
   shell,
+  systemPreferences,
 } from 'electron'
 import { CHANNELS } from '@shared/ipc'
 import { toRunSnippet } from '@shared/workflow-status'
@@ -29,8 +32,10 @@ import { QuestionBroker } from './services/question-broker'
 import { seedBundledSkills } from './services/bundled-skills'
 import { registerCompletionHook } from './services/completion-hooks'
 import { createArtifactCompletionHook } from './services/artifact-hooks'
+import { BotService } from './services/bots'
 import { createMemoryCompletionHook } from './services/memory-hook'
 import { DreamingService } from './services/dreaming'
+import { BriefService, briefNotification } from './services/brief'
 import { CodeService } from './code/code-service'
 import { GitService } from './code/git-service'
 import { WorkspaceRootService } from './code/workspace-root'
@@ -41,9 +46,12 @@ import { KnowledgeService } from './services/knowledge'
 import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
 import { WorkflowScheduler } from './workflows/scheduler'
 import { WorkflowTriggerServer } from './workflows/trigger-server'
+import { WorkflowWatcherService } from './workflows/watcher'
 import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSession } from './browser/session'
+import { QuickWindow } from './quick/quick-window'
 import { TerminalService } from './terminal/terminal-service'
+import { VoiceService } from './audio/voice-service'
 import { ArenaService } from './services/arena'
 import { OptimizerService } from './services/optimizer'
 import { OpenAiOAuthManager } from './providers/openai-oauth'
@@ -58,8 +66,11 @@ import {
   DesktopNotifier,
   approvalNotification,
   resultNotification,
+  titleOnlyForPrivateSpace,
 } from './services/notify'
+import { AppLockService, windowPushAllowed } from './services/app-lock'
 import { collectInboxItems, countUnreviewed } from './services/inbox'
+import { installCrashLogging, logMainError } from './services/crash-log'
 
 /** Wall-clock cap on one optimizer eval/test command execution. */
 const OPTIMIZER_EVAL_TIMEOUT_MS = 10 * 60_000
@@ -71,14 +82,17 @@ const PRODUCTION_CSP =
 
 let db: AppDatabase | null = null
 let chatService: ChatService | null = null
+let botService: BotService | null = null
 let approvalBroker: ApprovalBroker | null = null
 let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
 let imBridgeManager: ImBridgeManager | null = null
 let workflowScheduler: WorkflowScheduler | null = null
 let triggerServer: WorkflowTriggerServer | null = null
+let workflowWatcher: WorkflowWatcherService | null = null
 let scheduledTaskScheduler: ScheduledTaskScheduler | null = null
 let dreamingService: DreamingService | null = null
+let briefService: BriefService | null = null
 let workflowRunnerRef: WorkflowRunner | null = null
 /**
  * The app's main window. getAllWindows() must NOT be used to find it — the
@@ -87,12 +101,15 @@ let workflowRunnerRef: WorkflowRunner | null = null
  */
 let mainWindow: BrowserWindow | null = null
 let browserSession: BrowserSession | null = null
+let quickWindow: QuickWindow | null = null
 let terminalService: TerminalService | null = null
+let voiceService: VoiceService | null = null
 let arenaService: ArenaService | null = null
 let optimizerService: OptimizerService | null = null
 let remoteService: RemoteService | null = null
 let oauthManager: OpenAiOAuthManager | null = null
 let notifier: DesktopNotifier | null = null
+let appLockService: AppLockService | null = null
 let cleanedUp = false
 let quitting = false
 
@@ -103,6 +120,9 @@ function broadcast(channel: string, payload: unknown): void {
 // Every renderer window is one subscriber of the main event bus; the remote
 // (phone tunnel) service is another. Both therefore see the exact same pushes.
 subscribeMainEvents((channel, payload) => {
+  // While the app is locked, nothing but the lock-state change itself may
+  // reach a window — a stream delta behind the lock screen is still a leak.
+  if (appLockService && !windowPushAllowed(appLockService.isLocked(), channel)) return
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send(channel, payload)
@@ -155,9 +175,12 @@ async function cleanup(): Promise<void> {
   imBridgeManager?.stopAll()
   workflowScheduler?.stop()
   triggerServer?.stop()
+  workflowWatcher?.stop()
   scheduledTaskScheduler?.stop()
   dreamingService?.stop()
+  briefService?.stop()
   workflowRunnerRef?.stopAll()
+  appLockService?.stop()
   oauthManager?.stopAll()
   try {
     globalShortcut.unregisterAll()
@@ -167,8 +190,12 @@ async function cleanup(): Promise<void> {
     // Teardown conveniences only.
   }
   browserSession?.close()
+  quickWindow?.destroy()
+  quickWindow = null
   // Kill every user terminal shell we spawned.
   terminalService?.disposeAll()
+  // Abort any voice download and kill live whisper children.
+  voiceService?.disposeAll()
   // Abort running arena candidates (their agent_runs settle as stopped).
   arenaService?.stopAll()
   // Abort running optimizer loops (their runs settle as stopped).
@@ -264,6 +291,8 @@ function installQuickAccess(): void {
   } catch {
     // The shortcut may be taken by another app; the tray still works.
   }
+  // Quick-assistant summon shortcut (self-guarded; toasts on failure).
+  quickWindow?.syncShortcut()
 }
 
 function createWindow(): BrowserWindow {
@@ -299,6 +328,8 @@ function createWindow(): BrowserWindow {
     // would keep 'window-all-closed' from ever firing (the app would live on
     // with no UI). It is recreated on demand by the next browser/computer call.
     browserSession?.close()
+    // Same trap for the (possibly hidden) quick-assistant window.
+    quickWindow?.destroy()
   })
 
   // The renderer's push subscriptions exist by the time the page has loaded, so
@@ -348,6 +379,67 @@ function installCsp(): void {
   })
 }
 
+/** The app's own renderer origin (dev server origin, or file: when packaged). */
+function isAppOrigin(url: string): boolean {
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  try {
+    const target = new URL(url)
+    if (devUrl) return target.origin === new URL(devUrl).origin
+    return target.protocol === 'file:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Deny-by-default permission policy for the main window's session. Electron
+ * grants everything by default; the ONLY things this app's renderer needs are
+ * clipboard writes (copy buttons), fullscreen, and — solely while voice input
+ * is enabled — the microphone for push-to-talk. Everything else is denied.
+ * Extend this allowlist deliberately, never wildcard. The hidden browser-tool
+ * window uses its own partition with a deny-all handler (browser/session.ts)
+ * and is untouched here.
+ */
+function installPermissionHandlers(database: AppDatabase): void {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    if (permission === 'media') {
+      const d = details as { requestingUrl?: string; mediaTypes?: string[] }
+      const granted =
+        isAppOrigin(d.requestingUrl ?? '') &&
+        Array.isArray(d.mediaTypes) &&
+        d.mediaTypes.length === 1 &&
+        d.mediaTypes[0] === 'audio' &&
+        database.settings.get().voiceInputEnabled
+      if (granted && process.platform === 'darwin') {
+        try {
+          // Best-effort OS-level mic consent prompt.
+          void systemPreferences.askForMediaAccess('microphone')
+        } catch {
+          // The renderer-level grant still stands; getUserMedia surfaces denial.
+        }
+      }
+      callback(granted)
+      return
+    }
+    if (permission === 'clipboard-sanitized-write' || permission === 'fullscreen') {
+      callback(true)
+      return
+    }
+    callback(false)
+  })
+  session.defaultSession.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
+    if (permission === 'media') {
+      const d = details as { mediaType?: string }
+      return (
+        (d.mediaType === undefined || d.mediaType === 'audio') &&
+        isAppOrigin(requestingOrigin) &&
+        database.settings.get().voiceInputEnabled
+      )
+    }
+    return permission === 'clipboard-sanitized-write' || permission === 'fullscreen'
+  })
+}
+
 function bootstrap(): void {
   if (app.isPackaged) installCsp()
 
@@ -365,6 +457,10 @@ function bootstrap(): void {
   // Same for background agent runs — their control-plane rows would otherwise
   // stay 'running' forever in the Agent Control Center.
   database.agentPlatform.markDanglingRunsAsStopped()
+  // And for optimizer runs — a stuck 'running' row otherwise locks its project
+  // out of new runs permanently (start() refuses while one is 'running', and
+  // stop() can't reach a controller that died with the previous process).
+  database.optimizer.markDanglingRunsAsStopped()
   // Seed the shipped skill library (no-op once seeded at the current version).
   // In dev the folder sits in the repo; packaged builds copy it next to the
   // asar via electron-builder extraResources.
@@ -375,6 +471,23 @@ function bootstrap(): void {
   // Upgrade any keys still stored with the insecure fallback to real
   // safeStorage encryption now that Electron's crypto is available.
   keystore.reencryptInsecureKeys(database)
+
+  // Deny-by-default permissions (mic only while voice input is on).
+  installPermissionHandlers(database)
+
+  // App lock: locks on launch when a passphrase is configured; idle checks
+  // run on the shared 30 s clock pattern (skipped under SMOKE_TEST below).
+  const appLock = new AppLockService({
+    settings: database.settings,
+    broadcast,
+    getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+  })
+  appLockService = appLock
+
+  // Private-space notification hygiene (v45): content from a private-space
+  // conversation never reaches an OS notification body or the Telegram relay.
+  const inPrivateSpace = (conversationId: string): boolean =>
+    database.conversations.getById(conversationId)?.spaceId != null
 
   const projectHooks = new ProjectHookService(database)
   const codeService = new CodeService(
@@ -414,6 +527,14 @@ function bootstrap(): void {
   // User-driven Work-view terminal sessions (pipes-based; killed on quit).
   const terminals = new TerminalService({ broadcast })
   terminalService = terminals
+  // Offline voice: whisper.cpp binary/model downloads + push-to-talk STT.
+  const voice = new VoiceService({
+    db: database,
+    audioDir: join(app.getPath('userData'), 'audio'),
+    attachmentsDir,
+    broadcast,
+  })
+  voiceService = voice
   // Code Arena: N models race the same task in isolated app-owned worktrees.
   const arena = new ArenaService({
     db: database,
@@ -422,7 +543,7 @@ function bootstrap(): void {
       openProject: (path) => codeService.openProject(path),
       proposeChange: (conversationId, relPath, changeType, newContent) =>
         codeService.proposeChange(conversationId, relPath, changeType, newContent),
-      applyChange: (changeId) => codeService.applyChange(changeId),
+      applyChangesAtomically: (changeIds) => codeService.applyChangesAtomically(changeIds),
     },
     worktreesDir,
     broadcast,
@@ -436,15 +557,16 @@ function bootstrap(): void {
   // keys never leave main; the tool executor searches via this service.
   const knowledgeService = new KnowledgeService({
     db: database,
-    embed: (providerId, modelId, texts) =>
+    embed: (providerId, modelId, texts, spaceId) =>
       chatService
-        ? chatService.embedTexts(providerId, modelId, texts)
+        ? chatService.embedTexts(providerId, modelId, texts, spaceId)
         : Promise.reject(new Error('Embeddings unavailable during startup.')),
   })
 
   const toolSystem = createToolSystem(database, codeService, {
     mcp,
-    knowledgeSearch: (kbId, query) => knowledgeService.search(kbId, query),
+    knowledgeSearch: (kbId, query, spaceId) =>
+      knowledgeService.search(kbId, query, undefined, spaceId),
     shellEnabled: () => database.settings.get().shellExecutionEnabled,
     shellAllowlist: () => database.settings.get().shellCommandAllowlist,
     shellBackground: {
@@ -460,6 +582,13 @@ function bootstrap(): void {
       chatService
         ? chatService.runDelegate(task, ctx, undefined, agentName)
         : Promise.resolve('Error: delegation unavailable.'),
+    // Bot Mode: message_agent deliveries (botService is constructed below).
+    botMessenger: {
+      send: (senderConversationId, target, message) =>
+        botService
+          ? botService.messengerSend(senderConversationId, target, message)
+          : Promise.resolve('Error: bot messaging unavailable.'),
+    },
     imageGeneration: {
       generate: (req) =>
         chatService
@@ -506,6 +635,7 @@ function bootstrap(): void {
     // Work tasks without a folder get their own workspace on first write.
     ensureWorkspaceRoot: (conversationId) => workspaceRoots.ensure(conversationId),
     onScheduledTasksChanged: () => broadcast(CHANNELS.scheduledTasksChanged, {}),
+    onDocumentsChanged: () => broadcast(CHANNELS.documentsChanged, {}),
     onToolRulesChanged: () => broadcast(CHANNELS.toolRulesChanged, undefined),
     resolveSecretHeaders: (toolId) => {
       const out: Record<string, string> = {}
@@ -572,11 +702,14 @@ function bootstrap(): void {
     },
     onBackgroundRunFinished: (info) => {
       notifier?.notify(
-        resultNotification(
-          info.label,
-          info.status === 'done' ? 'ok' : 'error',
-          info.result || info.task,
-          () => undefined
+        titleOnlyForPrivateSpace(
+          resultNotification(
+            info.label,
+            info.status === 'done' ? 'ok' : 'error',
+            info.result || info.task,
+            () => undefined
+          ),
+          inPrivateSpace(info.conversationId)
         )
       )
     },
@@ -595,7 +728,9 @@ function bootstrap(): void {
     enabled: () =>
       process.env.SMOKE_TEST !== '1' &&
       Notification.isSupported() &&
-      database.settings.get().desktopNotificationsEnabled,
+      database.settings.get().desktopNotificationsEnabled &&
+      // Muted while locked; the badge still refreshes (a count leaks nothing).
+      !(appLockService?.isLocked() ?? false),
     windowFocused: () =>
       mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.isFocused(),
     show: ({ title, body, onClick }) => {
@@ -621,6 +756,19 @@ function bootstrap(): void {
   })
   notifier = desktopNotifier
 
+  // Bot Mode (v46): the roster/messaging/group-room service. Bot replies and
+  // needs-you escalations surface as desktop notifications like every other
+  // background result.
+  const bots = new BotService({
+    db: database,
+    chat: chatService!,
+    broadcast,
+    notify: ({ title, body }) => {
+      desktopNotifier.notify({ kind: 'result', title, body, onClick: () => undefined })
+    },
+  })
+  botService = bots
+
   // Optimizer: autonomous optimize-evaluate-commit loops per project (AVO
   // style). Eval commands run HERE, never through the agent's shell tool.
   const optimizer = new OptimizerService({
@@ -631,15 +779,24 @@ function bootstrap(): void {
         ? chatService.generateForWorkflow(prompt, providerId, modelId, opts)
         : Promise.reject(new Error('Generation unavailable during startup.')),
     runCommand: async (command, cwd, signal) => {
-      const result = await runShell(command, cwd, OPTIMIZER_EVAL_TIMEOUT_MS, signal)
+      // keepTail: the score is the LAST number the benchmark prints, so a
+      // verbose eval must not lose its final line to the output cap. Score off
+      // stdout only — a stray number in a stderr warning must not become the
+      // score. The aborted flag is surfaced so a stop mid-eval isn't recorded
+      // as a genuine failed round.
+      const result = await runShell(command, cwd, OPTIMIZER_EVAL_TIMEOUT_MS, signal, undefined, {
+        keepTail: true,
+      })
       return {
         ok: result.code === 0 && !result.timedOut && !result.aborted,
         exitCode: result.code,
-        output: `${result.stdout}\n${result.stderr}`,
+        output: result.stdout,
+        aborted: result.aborted,
       }
     },
     broadcast,
     notify: (notification) => desktopNotifier.notify(notification),
+    worktreesDir,
   })
   optimizerService = optimizer
 
@@ -649,9 +806,16 @@ function bootstrap(): void {
   // allow from the dialog or from their phone, whichever they reach first.
   broker.setHooks({
     onRequest: (request) => {
+      const isPrivate = inPrivateSpace(request.conversationId)
       desktopNotifier.notify(
-        approvalNotification(request.toolCall.name, request.note, () => undefined)
+        titleOnlyForPrivateSpace(
+          approvalNotification(request.toolCall.name, request.note, () => undefined),
+          isPrivate
+        )
       )
+      // A private-space approval is never relayed to Telegram — the tool
+      // arguments would otherwise leave the machine. The in-app dialog stands.
+      if (isPrivate) return
       void imBridge
         .requestApproval(request.requestId, {
           title: `${request.toolCall.name} (${request.risk})`,
@@ -673,11 +837,14 @@ function bootstrap(): void {
   // than guessing, and the question follows them out of the app.
   questions.setHooks({
     onRequest: (request) => {
+      const isPrivate = inPrivateSpace(request.conversationId)
       desktopNotifier.notify({
         kind: 'question',
         title: 'A task needs your input',
-        body: request.question,
+        body: isPrivate ? '' : request.question,
       })
+      // Same rule as approvals: a private-space question never leaves the box.
+      if (isPrivate) return
       void imBridge
         .requestChoice(request.requestId, {
           question: request.question,
@@ -742,17 +909,39 @@ function bootstrap(): void {
   workflowScheduler = scheduler
   workflowRunnerRef = workflowRunner
 
+  // Folder-watch triggers. Watched folders always came from the OS folder
+  // picker (the user's grant); runs land in the same run history and notifier
+  // via the runner's hooks, and share the scheduler's per-workflow queue key.
+  const watcher = new WorkflowWatcherService({
+    listWatched: () => database.workflows.listWatchedLite(),
+    run: (id, trigger, payload) => workflowRunner.runById(id, trigger, payload),
+    queue: scheduledRunQueue,
+    onError: (_workflowId, message) => notice(message, 'error'),
+  })
+  workflowWatcher = watcher
+
   const clockScheduler = new ScheduledTaskScheduler({
     db: database,
-    run: (task) =>
-      chatService!.generateForWorkflow(task.prompt, undefined, undefined, {
-        useTools: true,
-        approvedToolIds: task.approvedToolIds,
-        projectId: task.projectId,
-        // The task's owning agent profile: persona, model, toolset and its own
-        // memories, so a recurring job accumulates context between runs.
-        ...(task.agentId ? { agentId: task.agentId } : {}),
-      }),
+    run: async (task) => {
+      try {
+        const output = await chatService!.generateForWorkflow(task.prompt, undefined, undefined, {
+          useTools: true,
+          approvedToolIds: task.approvedToolIds,
+          projectId: task.projectId,
+          usage: { runKind: 'scheduled_task', refId: task.id },
+          // The task's owning agent profile: persona, model, toolset and its own
+          // memories, so a recurring job accumulates context between runs.
+          ...(task.agentId ? { agentId: task.agentId } : {}),
+        })
+        // Bot Mode: a routine owned by a bot reports into its canonical chat
+        // (Hermes: "routines execute runs directly into the bot's chat").
+        botService?.mirrorRoutineResult(task, 'ok', output)
+        return output
+      } catch (e) {
+        botService?.mirrorRoutineResult(task, 'error', e instanceof Error ? e.message : 'Unknown error')
+        throw e
+      }
+    },
     onChanged: (event) => {
       broadcast(CHANNELS.scheduledTasksChanged, event)
       // Only a FINISHED run is worth a notification: the scheduler also emits
@@ -784,9 +973,32 @@ function bootstrap(): void {
   })
   dreamingService = dreaming
 
+  // Morning brief: a once-daily digest of overnight results and today's
+  // schedule (settings-gated inside the service; economy-routed unless an
+  // agent profile is configured — agent profiles win inside generateForWorkflow).
+  const brief = new BriefService({
+    db: database,
+    generate: (prompt, opts) =>
+      chatService!.generateForWorkflow(prompt, undefined, undefined, {
+        economy: true,
+        usage: { runKind: 'brief' },
+        ...(opts.agentId ? { agentId: opts.agentId } : {}),
+      }),
+    onBrief: (b) => broadcast(CHANNELS.briefChanged, { brief: b }),
+    notify: (b) => desktopNotifier.notify(briefNotification(b)),
+    sendTelegram: (text) => imBridge.sendToOwner(text),
+  })
+  briefService = brief
+
   // Mode-independent: persists ```uld-memory directives from every completed
   // assistant message (gated on settings.memoryEnabled inside the hook).
   registerCompletionHook(createMemoryCompletionHook(database))
+
+  // Bot Mode: routes finished bot-to-bot deliveries back to their senders and
+  // drains queued deliveries when a bot's chat frees up.
+  registerCompletionHook((conversation, message) =>
+    botService?.handleCompletion(conversation, message)
+  )
 
   registerCompletionHook((conversation) => projectHooks.run('afterAgent', conversation))
 
@@ -798,6 +1010,24 @@ function bootstrap(): void {
     )
   )
 
+  // Quick assistant: frameless clipboard mini window on its own global
+  // shortcut. The clipboard is read once per summon, held in memory only.
+  const quick = new QuickWindow({
+    readClipboardText: () => clipboard.readText(),
+    getShortcut: () => database.settings.get().quickAssistantShortcut,
+    onHidden: () => chatService?.stopQuickStream(),
+    notice: (message, level) => notice(message, level),
+    isLocked: () => appLock.isLocked(),
+  })
+  quickWindow = quick
+  // The always-on-top quick window must never keep showing content over the
+  // lock screen: hide it (which also aborts its stream) when the lock engages.
+  subscribeMainEvents((channel, payload) => {
+    if (channel === CHANNELS.appLockChanged && (payload as { locked?: boolean }).locked) {
+      quick.hide()
+    }
+  })
+
   const ipcHandlers = registerIpc({
     db: database,
     chatService,
@@ -808,7 +1038,9 @@ function bootstrap(): void {
     approvalBroker: broker,
     notifier: desktopNotifier,
     triggerServer: triggers,
+    workflowWatcher: watcher,
     questionBroker: questions,
+    botService: bots,
     mcpManager: mcp,
     imBridgeManager: imBridge,
     oauthManager: oauth,
@@ -817,14 +1049,20 @@ function bootstrap(): void {
     wakeScheduledTaskScheduler: () => clockScheduler.wake(),
     workspaceRoots,
     dreamingService: dreaming,
+    briefService: brief,
     knowledgeService,
     attachmentsDir,
     worktreesDir,
     terminalService: terminals,
+    voiceService: voice,
     arenaService: arena,
     optimizerService: optimizer,
+    quickWindow: quick,
+    summonMainWindow: () => summonWindow(),
+    syncQuickShortcut: () => quick.syncShortcut(),
     getRemoteService: () => remoteService,
     getWindows: () => BrowserWindow.getAllWindows(),
+    appLock,
   })
 
   // Remote access (phone tunnel): needs the handler map registerIpc built —
@@ -836,7 +1074,6 @@ function bootstrap(): void {
     db: database,
     keystore,
     handlers: ipcHandlers,
-    mobileDir: join(__dirname, '../mobile'),
     appVersion: app.getVersion(),
     socketFactory: wsSocketFactory,
     notice: (message, level) => notice(message, level),
@@ -851,8 +1088,13 @@ function bootstrap(): void {
     scheduler.start()
     clockScheduler.start()
     dreaming.start()
+    brief.start()
+    // Idle auto-lock checks (self-guarded: no-op until a passphrase is set).
+    appLock.start()
     // Binds only when the endpoint is switched on (it re-reads settings).
     triggers.sync()
+    // Watches only workflows with an enabled watch config (self-guarded too).
+    watcher.sync()
     // Dials the relay only when remote access is switched on (same pattern).
     remote.sync()
   }
@@ -894,6 +1136,14 @@ function showStartupFailure(message: string): void {
   }
 }
 
+// Install crash logging before anything else can throw: a redacted main.log
+// under userData is the only breadcrumb a packaged (console-less) build leaves.
+try {
+  installCrashLogging(app.getPath('userData'))
+} catch {
+  // Never let logging setup keep the app from starting.
+}
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -928,6 +1178,7 @@ if (!gotSingleInstanceLock) {
       // Startup failures (e.g. corrupt database) — redacted before it is shown.
       const message = redactSecrets(e instanceof Error ? e.message : String(e))
       console.error('Failed to start:', message)
+      logMainError('startup', e)
       showStartupFailure(message)
       void cleanup().finally(() => app.exit(1))
     })

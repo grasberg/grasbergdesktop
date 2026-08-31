@@ -63,6 +63,16 @@
   grid-row: span 2;
 }
 
+/* Morning brief is the day's headline: full width, above everything.
+ * (No media-query override: the ≤1000px layout is single-column already.) */
+.home-card-brief {
+  grid-column: 1 / -1;
+}
+
+.home-card-brief .chat-md {
+  font-size: 0.85rem;
+}
+
 @media (max-width: 1000px) {
   .home-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -384,4 +394,90 @@ button.home-row-main {
 .home-discover-actions {
   display: flex;
   gap: 8px;
+}
+
+/* ------------------------------------------------------------------- notes */
+
+.notebook-modal {
+  width: min(860px, 92vw);
+  max-width: none;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.notebook-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.notebook-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.05rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notebook-title-input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.notebook-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.notebook-content {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.notebook-textarea {
+  width: 100%;
+  min-height: 40vh;
+  font: inherit;
+}
+
+.notebook-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.notebook-versions {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.notebook-version-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notebook-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notebook-version-meta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
 }

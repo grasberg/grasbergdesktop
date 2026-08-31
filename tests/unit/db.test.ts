@@ -104,6 +104,7 @@ describe('openDatabase + migrations', () => {
       providerId: null,
       modelId: null,
       maxRounds: 6,
+      direction: 'maximize',
     })
     db!.optimizer.appendVersion({
       runId: run.id,
@@ -165,6 +166,50 @@ describe('openDatabase + migrations', () => {
     expect(re2.remoteDevices.list()[0].revokedAt).not.toBeNull()
   })
 
+  it('v39: direction persists and defaults to maximize for old rows', () => {
+    const min = db!.optimizer.create({
+      projectId: 'proj-dir',
+      goal: 'cut runtime',
+      evalCommand: 'bench',
+      testCommand: null,
+      providerId: null,
+      modelId: null,
+      maxRounds: 4,
+      direction: 'minimize',
+    })
+    const re = reopen()
+    expect(re.optimizer.getById(min.id)?.direction).toBe('minimize')
+    // A row written without the column (simulating a pre-v39 run) reads back as
+    // the migration's default rather than undefined.
+    re.driver.run(
+      `INSERT INTO optimizer_runs (id, project_id, goal, eval_command, test_command,
+         provider_id, model_id, max_rounds, status, rounds_done, created_at, updated_at)
+       VALUES ('legacy', 'p', 'g', 'e', NULL, NULL, NULL, 6, 'done', 0, 1, 1)`
+    )
+    expect(re.optimizer.getById('legacy')?.direction).toBe('maximize')
+  })
+
+  it('recovers a dangling running optimizer run at boot', () => {
+    const run = db!.optimizer.create({
+      projectId: 'proj-crash',
+      goal: 'g',
+      evalCommand: 'e',
+      testCommand: null,
+      providerId: null,
+      modelId: null,
+      maxRounds: 6,
+      direction: 'maximize',
+    })
+    expect(db!.optimizer.getById(run.id)?.status).toBe('running')
+    const healed = db!.optimizer.markDanglingRunsAsStopped()
+    expect(healed).toBe(1)
+    const after = db!.optimizer.getById(run.id)!
+    expect(after.status).toBe('stopped')
+    expect(after.lastError).toContain('restart')
+    // Idempotent: a second boot heals nothing.
+    expect(db!.optimizer.markDanglingRunsAsStopped()).toBe(0)
+  })
+
   it('v37: deleting a run cascades its versions', () => {
     const run = db!.optimizer.create({
       projectId: 'proj-y',
@@ -174,6 +219,7 @@ describe('openDatabase + migrations', () => {
       providerId: null,
       modelId: null,
       maxRounds: 2,
+      direction: 'minimize',
     })
     db!.optimizer.appendVersion({
       runId: run.id,
@@ -185,6 +231,22 @@ describe('openDatabase + migrations', () => {
     })
     db!.driver.run('DELETE FROM optimizer_runs WHERE id = ?', [run.id])
     expect(db!.optimizer.listVersions(run.id)).toHaveLength(0)
+  })
+
+  it('a failed statement does not poison the next call on the same SQL', () => {
+    // Regression guard: the compiled-statement cache must evict a statement
+    // whose step() failed, or node-sqlite3-wasm makes the NEXT reset/bind on
+    // that cached handle throw a spurious "Could not reset statement" — turning
+    // one error into a second on an unrelated, valid call sharing the SQL text.
+    db!.driver.exec('CREATE TABLE poison (k TEXT PRIMARY KEY)')
+    const SQL = 'INSERT INTO poison (k) VALUES (?)'
+    db!.driver.run(SQL, ['a'])
+    expect(() => db!.driver.run(SQL, ['a'])).toThrow() // UNIQUE/PK violation
+    // The healthy call on the SAME cached SQL string must still succeed.
+    expect(() => db!.driver.run(SQL, ['b'])).not.toThrow()
+    expect(
+      db!.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM poison')?.c
+    ).toBe(2)
   })
 
   it('reopening the same file keeps data and does not re-apply migrations', () => {
@@ -690,6 +752,45 @@ describe('conversations + messages', () => {
     db!.messages.insert(msg(conv.id, { role: 'user', content: 'q', seq: 1 }))
     db!.messages.insert(msg(conv.id, { role: 'assistant', content: 'a', seq: 2 }))
     expect(db!.messages.lastSeq(conv.id)).toBe(2)
+  })
+
+  it('round-trips fork provenance and defaults it to null (v41)', () => {
+    const plain = db!.conversations.create({ mode: 'chat', title: 'Plain' })
+    expect(db!.conversations.getById(plain.id)).toMatchObject({
+      parentConversationId: null,
+      forkedAtMessageId: null,
+    })
+
+    const forked = db!.conversations.create({
+      mode: 'chat',
+      title: 'Fork',
+      parentConversationId: plain.id,
+      forkedAtMessageId: 'source-msg-1',
+    })
+    expect(db!.conversations.getById(forked.id)).toMatchObject({
+      parentConversationId: plain.id,
+      forkedAtMessageId: 'source-msg-1',
+    })
+  })
+
+  it('listForks returns only the parent forks, oldest first', () => {
+    const parent = db!.conversations.create({ mode: 'chat', title: 'Parent' })
+    db!.conversations.create({ mode: 'chat', title: 'Unrelated' })
+    const forks = ['F1', 'F2', 'F3'].map((title) =>
+      db!.conversations.create({ mode: 'chat', title, parentConversationId: parent.id })
+    )
+    // Distinct created_at so the ordering assertion is deterministic.
+    forks.forEach((fork, i) => {
+      db!.driver.run('UPDATE conversations SET created_at = ? WHERE id = ?', [1000 + i, fork.id])
+    })
+
+    const listed = db!.conversations.listForks(parent.id)
+    expect(listed).toEqual([
+      { id: forks[0].id, title: 'F1', createdAt: 1000 },
+      { id: forks[1].id, title: 'F2', createdAt: 1001 },
+      { id: forks[2].id, title: 'F3', createdAt: 1002 },
+    ])
+    expect(db!.conversations.listForks('no-such-parent')).toEqual([])
   })
 
   it('clearSummary drops the compaction summary', () => {

@@ -452,6 +452,16 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
           })
           return
         }
+        case 'failover': {
+          // Reliability failover: the placeholder was reset and re-runs on a
+          // fallback model — replace it wholesale (clears the pushed partial
+          // text/reasoning/toolCalls). The streaming pointer stays: same
+          // streamId and assistant message id across attempts.
+          set((s) => ({
+            messages: replaceOrAppend(s.messages, event.message.id, event.message),
+          }))
+          return
+        }
         case 'done':
         case 'error': {
           set((s) => ({

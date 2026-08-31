@@ -20,6 +20,15 @@ const MAX_ATTACHMENT_TEXT_BYTES = 512 * 1024
  */
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024
 export const MAX_IMAGE_BASE64_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4
+/** PDFs larger than this keep metadata only (never stored for extraction). */
+export const MAX_PDF_BYTES = 20 * 1024 * 1024
+/** Audio files larger than this keep metadata only (never stored/transcribed). */
+export const MAX_AUDIO_BYTES = 64 * 1024 * 1024
+/**
+ * Raw-attach cap for sending original PDF bytes as a document content part
+ * (base64 inflates ~33%; mirrors the MAX_IMAGE_BYTES discipline).
+ */
+export const MAX_RAW_ATTACH_BYTES = Math.floor(4.5 * 1024 * 1024)
 export const PASTED_IMAGE_MIME_TYPES = [
   'image/png',
   'image/jpeg',
@@ -29,6 +38,13 @@ export const PASTED_IMAGE_MIME_TYPES = [
 
 /** Raster image extensions we send to vision models (svg stays on the text path). */
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif'])
+
+/**
+ * Audio extensions stored for transcription. The storageKey is only ever read
+ * back by VoiceService.transcribeAttachment, behind isValidStorageKey and its
+ * own audio-extension gate; the bytes never ride IPC.
+ */
+const AUDIO_EXTENSIONS = new Set(['wav', 'mp3', 'ogg', 'flac', 'm4a'])
 
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'rst', 'text', 'log', 'csv', 'tsv',
@@ -51,6 +67,12 @@ const TEXT_BASENAMES = new Set([
   'license', 'readme', 'changelog', 'authors', 'notice', 'codeowners',
   '.gitignore', '.gitattributes', '.editorconfig', '.env', '.npmrc', '.nvmrc',
 ])
+
+/** Name looks like a text/code file (by extension or conventional basename). */
+export function isLikelyTextFile(name: string): boolean {
+  const ext = extname(name).slice(1).toLowerCase()
+  return TEXT_EXTENSIONS.has(ext) || TEXT_BASENAMES.has(name.toLowerCase())
+}
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   txt: 'text/plain',
@@ -109,6 +131,9 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   tar: 'application/x-tar',
   mp3: 'audio/mpeg',
   wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  flac: 'audio/flac',
+  m4a: 'audio/mp4',
   mp4: 'video/mp4',
   webm: 'video/webm',
   woff: 'font/woff',
@@ -159,9 +184,34 @@ export async function readAttachment(
       return attachment
     }
 
+    // Audio path: store the bytes like an image; transcription is user-driven
+    // later (voice:transcribeAttachment). Same imageDir gate as PDFs; above
+    // the cap the file falls through to metadata-only.
+    if (imageDir && AUDIO_EXTENSIONS.has(ext) && info.size <= MAX_AUDIO_BYTES) {
+      const buffer = await readFile(filePath)
+      const storageKey = `${attachment.id}.${ext}`
+      await mkdir(imageDir, { recursive: true })
+      await writeFile(join(imageDir, storageKey), buffer)
+      attachment.kind = 'audio'
+      attachment.storageKey = storageKey
+      return attachment
+    }
+
+    // PDF path: store the bytes like an image; text extraction happens later
+    // via app:extractAttachmentText. Gated on imageDir so KB import (which
+    // passes none) stays side-effect-free.
+    if (imageDir && ext === 'pdf' && info.size <= MAX_PDF_BYTES) {
+      const buffer = await readFile(filePath)
+      const storageKey = `${attachment.id}.pdf`
+      await mkdir(imageDir, { recursive: true })
+      await writeFile(join(imageDir, storageKey), buffer)
+      attachment.kind = 'pdf'
+      attachment.storageKey = storageKey
+      return attachment
+    }
+
     if (info.size > MAX_ATTACHMENT_TEXT_BYTES) return attachment
-    const isTextCandidate = TEXT_EXTENSIONS.has(ext) || TEXT_BASENAMES.has(name.toLowerCase())
-    if (!isTextCandidate) return attachment
+    if (!isLikelyTextFile(name)) return attachment
 
     const buffer = await readFile(filePath)
     if (looksBinary(buffer)) return attachment

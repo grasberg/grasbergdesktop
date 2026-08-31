@@ -3,6 +3,7 @@ import type { ConversationSummary } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import type { ConversationsStoreState } from './contracts'
 import { useChatStore } from './chat'
+import { useSpacesStore } from './spaces'
 import { toastError, useUiStore } from './ui'
 
 /**
@@ -56,6 +57,8 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
           search: search.trim() ? search.trim() : undefined,
           mode: modeFilter,
           limit: SIDEBAR_LIMIT,
+          // Scope to the active space; omitted = the default space.
+          spaceId: useSpacesStore.getState().activeSpaceId ?? undefined,
         })
       )
       set({ summaries, loaded: true })
@@ -77,6 +80,8 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
     try {
       const conv = await unwrap(window.uld.conversations.get(id))
       if (conv.mode !== get().modeFilter) return
+      // A push about another space must never inject a row into this list.
+      if ((conv.spaceId ?? null) !== useSpacesStore.getState().activeSpaceId) return
       set((s) => {
         const existing = s.summaries.find((x) => x.id === id)
         const summary: ConversationSummary = {
@@ -107,7 +112,12 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
 
   async create(mode, projectRef) {
     const conversation = await unwrap(
-      window.uld.conversations.create({ mode, projectRef: projectRef ?? null })
+      window.uld.conversations.create({
+        mode,
+        projectRef: projectRef ?? null,
+        // New conversations belong to the active space (v45).
+        spaceId: useSpacesStore.getState().activeSpaceId,
+      })
     )
     const summary: ConversationSummary = {
       id: conversation.id,
@@ -124,6 +134,31 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
     }
     get().select(conversation.id)
     return conversation
+  },
+
+  async fork(id, messageId) {
+    try {
+      const conversation = await unwrap(window.uld.conversations.fork(id, messageId))
+      const summary: ConversationSummary = {
+        id: conversation.id,
+        mode: conversation.mode,
+        title: conversation.title,
+        updatedAt: conversation.updatedAt,
+        projectRef: conversation.projectRef,
+        snippet: null,
+      }
+      // Mirror syncSummary's guard: a fork of a conversation in another space
+      // (opened via an inbox item) must not inject its row into this list.
+      if (
+        conversation.mode === get().modeFilter &&
+        (conversation.spaceId ?? null) === useSpacesStore.getState().activeSpaceId
+      ) {
+        set((s) => ({ summaries: [summary, ...s.summaries.filter((x) => x.id !== summary.id)] }))
+      }
+      get().select(conversation.id)
+    } catch (e) {
+      toastError('Failed to fork conversation', e)
+    }
   },
 
   select(id) {

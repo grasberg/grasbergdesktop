@@ -27,13 +27,33 @@ export interface Keystore {
   reencryptInsecureKeys(db: AppDatabase): number
 }
 
+type StorageBackendProbe = Pick<
+  typeof safeStorage,
+  'isEncryptionAvailable' | 'getSelectedStorageBackend'
+>
+
+/** Availability alone is misleading on Linux: basic_text uses a fixed password. */
+export function hasSecureStorageBackend(
+  storage: StorageBackendProbe = safeStorage,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!storage.isEncryptionAvailable()) return false
+  if (platform !== 'linux') return true
+  try {
+    const backend = storage.getSelectedStorageBackend()
+    return backend !== 'basic_text' && backend !== 'unknown'
+  } catch {
+    return false
+  }
+}
+
 export function encryptionAvailable(): boolean {
-  return safeStorage.isEncryptionAvailable() && !insecureFallbackUsed
+  return hasSecureStorageBackend() && !insecureFallbackUsed
 }
 
 export function encryptKey(plain: string): { encryptedBase64: string; preview: string } {
   const preview = maskKey(plain)
-  if (safeStorage.isEncryptionAvailable()) {
+  if (hasSecureStorageBackend()) {
     try {
       const encryptedBase64 = safeStorage.encryptString(plain).toString('base64')
       return { encryptedBase64, preview }
@@ -84,7 +104,7 @@ interface InsecureSecretRow {
  * THIS session. Key material is never logged.
  */
 export function reencryptInsecureKeys(db: AppDatabase): number {
-  const available = safeStorage.isEncryptionAvailable()
+  const available = hasSecureStorageBackend()
   let upgraded = 0
   let remainingInsecure = 0
 
