@@ -29,7 +29,7 @@ version is stored in the `meta` table under key `schema_version`. Adding a
 schema change means appending a new migration object — never editing an
 existing one.
 
-The schema is currently at **version 46** (`src/main/db/migrations.ts` is the
+The schema is currently at **version 47** (`src/main/db/migrations.ts` is the
 authoritative, append-only list; the table below is a summary and may lag it):
 
 | Version | Name | Adds |
@@ -68,6 +68,7 @@ authoritative, append-only list; the table below is a summary and may lag it):
 | 44 | `budget-guardrails` | new `headless_usage` spend ledger (no FKs — a row outlives its run); nullable `budget_usd` REAL on `conversations`/`workflows`/`scheduled_tasks` (month-to-date estimated-spend caps) |
 | 45 | `app-lock-private-spaces` | new `spaces` table; nullable `conversations.space_id` (NULL = default space; no FK — delete is app-guarded to empty spaces) + `idx_conversations_space` |
 | 46 | `bot-mode` | Bot Mode (Hermes-style): `agents.title`/`avatar_json`/`hidden`/`chat_conversation_id`; `conversations.agent_id` (canonical bot chat, excluded from the sidebar listing) + `idx_conversations_agent`; `messages.agent_id` (author attribution); new `bot_groups` + `bot_group_members` tables (group rooms; one shared transcript conversation per room). All pointers deliberately without FKs — the app cleans up on delete |
+| 47 | `bot-gateway` | OpenClaw-inspired Bot Mode hardening: `agents.heartbeat_json`/`reset_json`/`message_allow_json` (heartbeat, auto-compact policy, bot-to-bot allowlist); `bot_groups.activation` ('always'\|'mention') + `bot_group_members.observer`; `scheduled_tasks.webhook_url` (delivery target); new `bot_bindings` table (per-bot external Telegram presence — the token lives in `tool_secrets`, never here) |
 
 ## Tables
 
@@ -530,3 +531,52 @@ tables: deliveries are in-memory queues in `BotService` (fire-and-forget; the
 reply routes back through the completion-hook, with a single transient-failure
 retry, typed failure reasons and a hop cap of 6). A queued delivery lost to an
 app restart simply never lands — the sender's chat shows no reply.
+
+# Bot gateway (v47)
+
+OpenClaw-inspired hardening on top of Bot Mode. On `agents`:
+`heartbeat_json` (`{everyMinutes, deliver: 'chat'|'notify', prompt?}` — a
+periodic open-ended turn in the canonical chat; a reply of `NO_REPLY` deletes
+the turn, anything else stays and optionally notifies; runs are deferred while
+the chat is busy and floored at 15 min), `reset_json`
+(`{dailyHour?, idleMinutes?}` — auto-compaction of the canonical chat via the
+ordinary compactNow path; never deletion), and `message_allow_json`
+(bot-to-bot allowlist for `message_agent`; NULL = open, `[]` = disabled).
+
+`bot_groups.activation` ('always' = open reply-or-pass rounds, 'mention' =
+only @named bots take one turn) and `bot_group_members.observer` (reads the
+room, speaks only when @mentioned) refine room behavior. A room send while
+rounds run queues in memory and drains as one coalesced round-set.
+
+`scheduled_tasks.webhook_url` is an optional delivery target: each finished
+run POSTs `{taskId, title, status, output, error, finishedAt}` (redacted,
+capped) — https only, plain http on localhost.
+
+### `bot_bindings` (v47)
+
+One external Telegram bot per agent profile. The token is safeStorage
+ciphertext in `tool_secrets` (scope `im_bridge`, owner `bot:<agentId>`) —
+never in this table. DM pairing is trust-on-first-use (six-digit code, 15 min
+TTL, 5 attempts); groups are allowlist-only, managed by owner-only in-group
+commands (`/allowgroup`, `/denygroup`, `/activation mention|always`) —
+verifiable because a Telegram private-chat id equals the user id. Inbound
+messages become canonical-chat turns (queue-if-busy); replies route back via
+the completion hook.
+
+| Column | Type | Notes |
+|---|---|---|
+| `agent_id` | TEXT PK | the bound profile; no FK — app-side cleanup on delete |
+| `channel` | TEXT | 'telegram' (the only channel in v47) |
+| `enabled` | INTEGER | pause/resume without losing pairing |
+| `allowed_chat_id` | INTEGER nullable | the paired DM chat (= owner's user id); NULL while unpaired |
+| `pairing_code`, `pairing_expires_at`, `pairing_attempts` | | one-time pairing state |
+| `groups_json` | TEXT nullable | `[{id, title, activation}]` — approved groups with per-group activation |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+The busy-send **message queue** (v47) keeps no tables: a send into a busy
+conversation persists the user message immediately, counts it in memory, and
+one coalesced follow-up turn (500 ms debounce, cap 20) starts after the
+running stream COMPLETES — never after a Stop or error. Fetched web content
+(`fetch_url`, `web_search`) is wrapped in `<<<EXTERNAL_UNTRUSTED_CONTENT>>>`
+boundary markers with chat-template token literals stripped
+(`src/main/services/untrusted.ts`).

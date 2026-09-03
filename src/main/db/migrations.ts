@@ -1190,4 +1190,41 @@ export const MIGRATIONS: Migration[] = [
        )`,
     ],
   },
+  {
+    version: 47,
+    name: 'bot-gateway',
+    // OpenClaw-inspired Bot Mode hardening. On agents: heartbeat_json (periodic
+    // "anything need attention?" turn with a NO_REPLY quiet contract),
+    // reset_json (daily/idle auto-compact of the canonical chat — compaction,
+    // never deletion), message_allow_json (bot-to-bot allowlist; NULL = may
+    // message every bot). On rooms: activation ('always' = open reply-or-pass
+    // rounds, 'mention' = only @named bots speak) and per-member observer flags
+    // (read the room, speak only when mentioned). scheduled_tasks.webhook_url
+    // is an optional delivery target POSTed the run result. bot_bindings gives
+    // a bot its own external chat presence (one Telegram bot per profile; the
+    // token lives encrypted in tool_secrets, never here; allowed_chat_id is the
+    // paired DM — for Telegram private chats the chat id IS the user id, which
+    // is what makes owner-only group commands verifiable). Plain ADD COLUMNs
+    // and a new leaf table — no rebuild needed.
+    statements: [
+      `ALTER TABLE agents ADD COLUMN heartbeat_json TEXT`,
+      `ALTER TABLE agents ADD COLUMN reset_json TEXT`,
+      `ALTER TABLE agents ADD COLUMN message_allow_json TEXT`,
+      `ALTER TABLE bot_groups ADD COLUMN activation TEXT NOT NULL DEFAULT 'always'`,
+      `ALTER TABLE bot_group_members ADD COLUMN observer INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE scheduled_tasks ADD COLUMN webhook_url TEXT`,
+      `CREATE TABLE bot_bindings (
+         agent_id TEXT PRIMARY KEY,
+         channel TEXT NOT NULL DEFAULT 'telegram',
+         enabled INTEGER NOT NULL DEFAULT 1,
+         allowed_chat_id INTEGER,
+         pairing_code TEXT,
+         pairing_expires_at INTEGER,
+         pairing_attempts INTEGER NOT NULL DEFAULT 0,
+         groups_json TEXT,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+    ],
+  },
 ]

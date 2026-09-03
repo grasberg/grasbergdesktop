@@ -32,6 +32,8 @@ import type {
   ResearchDepth,
   ResearchRunInfo,
   SandboxLevel,
+  ChatSendResult,
+  QueuedSendResult,
   StartStreamResult,
   StreamEvent,
   StreamEventEnvelope,
@@ -181,6 +183,9 @@ export function pickAutoRouteProvider(
  * generation finishes with a note appended to the content.
  */
 const MAX_TOOL_ROUNDS = 40
+/** Busy-send queue (v47): cap per conversation, and the coalescing window. */
+const SEND_QUEUE_CAP = 20
+const SEND_QUEUE_DEBOUNCE_MS = 500
 
 const TOOL_LIMIT_NOTE =
   `[Tool-call limit reached (${MAX_TOOL_ROUNDS} rounds) — the remaining tool calls were not run.]`
@@ -725,6 +730,15 @@ export class ChatService {
   private backgroundTaskSeq = 0
   /** The single in-flight quick-assistant stream, or null. */
   private quickStreamId: string | null = null
+  /**
+   * Message queue (v47, OpenClaw collect semantics): user messages sent while
+   * a conversation is busy are persisted immediately and counted here; after
+   * the running stream COMPLETES, one coalesced follow-up turn covers them
+   * all (they are already in the history buildHistory replays). A stop or
+   * error drains nothing — the messages simply wait for the next turn.
+   */
+  private readonly queuedSends = new Map<string, number>()
+  private readonly queueDrainTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(
     private readonly db: AppDatabase,
@@ -732,7 +746,29 @@ export class ChatService {
     private readonly options: ChatServiceOptions = {}
   ) {}
 
-  async send(req: ChatSendRequest): Promise<StartStreamResult> {
+  // Without queueIfBusy a busy conversation still throws, so plain callers
+  // (tests, BotService deliveries) keep the precise StartStreamResult type.
+  async send(req: ChatSendRequest): Promise<StartStreamResult>
+  async send(req: ChatSendRequest, opts: { queueIfBusy?: boolean }): Promise<ChatSendResult>
+  async send(
+    req: ChatSendRequest,
+    opts?: { queueIfBusy?: boolean }
+  ): Promise<ChatSendResult> {
+    try {
+      return await this.sendNow(req)
+    } catch (e) {
+      if (
+        opts?.queueIfBusy === true &&
+        e instanceof ProviderError &&
+        e.message.includes('already streaming')
+      ) {
+        return this.queueSend(req)
+      }
+      throw e
+    }
+  }
+
+  private async sendNow(req: ChatSendRequest): Promise<StartStreamResult> {
     return this.withReservation(req.conversationId, async (conversation) => {
       const settings = this.db.settings.get()
       // Deep research (the /research command/toggle) wins over MoA and
@@ -1386,6 +1422,81 @@ export class ChatService {
   }
 
   /** Inserts the placeholder, snapshots history, and kicks off the detached loop. */
+  /**
+   * Busy-conversation queueing (v47): persist the user message now so it is
+   * visible immediately and lands in the history the NEXT turn replays, then
+   * count it for the post-completion drain. Attachments ride along untouched.
+   */
+  private queueSend(req: ChatSendRequest): QueuedSendResult {
+    const conversation = this.requireConversation(req.conversationId)
+    const queued = this.queuedSends.get(conversation.id) ?? 0
+    if (queued >= SEND_QUEUE_CAP) {
+      throw new ProviderError(
+        'invalid_request',
+        `The queue for this conversation is full (${SEND_QUEUE_CAP} waiting) — let the current response finish.`
+      )
+    }
+    const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
+    this.queuedSends.set(conversation.id, queued + 1)
+    this.broadcast(CHANNELS.conversationsChanged, { conversationId: conversation.id })
+    return { queued: true, userMessage }
+  }
+
+  /** Any starting turn covers the whole history — queued messages included. */
+  private clearSendQueue(conversationId: string): void {
+    this.queuedSends.delete(conversationId)
+    const timer = this.queueDrainTimers.get(conversationId)
+    if (timer) clearTimeout(timer)
+    this.queueDrainTimers.delete(conversationId)
+  }
+
+  /**
+   * After a COMPLETED stream: if messages queued up meanwhile, start one
+   * coalesced follow-up turn after a short quiet window (OpenClaw's 500 ms
+   * debounce — a burst of fragments becomes a single turn).
+   */
+  private scheduleQueueDrain(conversationId: string): void {
+    if ((this.queuedSends.get(conversationId) ?? 0) === 0) return
+    const existing = this.queueDrainTimers.get(conversationId)
+    if (existing) clearTimeout(existing)
+    this.queueDrainTimers.set(
+      conversationId,
+      setTimeout(() => {
+        this.queueDrainTimers.delete(conversationId)
+        if ((this.queuedSends.get(conversationId) ?? 0) === 0) return
+        // A newer turn already claimed the slot: it covers the history.
+        if (this.isConversationActive(conversationId)) return
+        void this.startQueuedTurn(conversationId).catch((e) => {
+          console.error(
+            '[chat] queued-turn start failed:',
+            e instanceof Error ? e.message : 'Unknown error'
+          )
+        })
+      }, SEND_QUEUE_DEBOUNCE_MS)
+    )
+  }
+
+  /**
+   * The drained turn: no new user message is inserted — the queued ones are
+   * already in the history — so this only resolves the target and streams.
+   */
+  private async startQueuedTurn(conversationId: string): Promise<void> {
+    await this.withReservation(conversationId, async (conversation) => {
+      const settings = this.db.settings.get()
+      const moa = this.resolveMoaPreset(conversation, settings, undefined)
+      const resolved = await this.resolveTarget(
+        conversation,
+        settings,
+        moa ? this.aggregatorOverrides(moa, undefined) : undefined
+      )
+      const result = this.start(conversation, settings, resolved, null, moa)
+      // Nudge open renderers to reload: they pull the streaming placeholder
+      // and adopt this stream from its first delta.
+      this.broadcast(CHANNELS.conversationsChanged, { conversationId: conversation.id })
+      return result
+    })
+  }
+
   private start(
     conversation: Conversation,
     settings: AppSettings,
@@ -1395,6 +1506,8 @@ export class ChatService {
     compare = false,
     research: ResearchRunRequest | null = null
   ): StartStreamResult {
+    // Whatever was queued is covered by this turn's history replay.
+    this.clearSendQueue(conversation.id)
     const assistantMessage: Message = {
       id: randomUUID(),
       conversationId: conversation.id,
@@ -3906,6 +4019,9 @@ export class ChatService {
       // never throw (each is isolated inside runCompletionHooks).
       await runCompletionHooks(conversation, finalMessage)
       emit({ type: 'done', finishReason, message: finalMessage })
+      // Drain messages queued while this stream ran (v47) — completions only:
+      // after a Stop or error the queued messages simply wait for the user.
+      this.scheduleQueueDrain(conversationId)
     } catch (e) {
       const normalized = toNormalizedError(e, target.provider.type, [target.apiKey])
       if (controller.signal.aborted || normalized.code === 'aborted') {

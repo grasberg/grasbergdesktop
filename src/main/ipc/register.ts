@@ -44,8 +44,10 @@ import type { WorkspaceRootService } from '../code/workspace-root'
 import type { TerminalService } from '../terminal/terminal-service'
 import type { VoiceService } from '../audio/voice-service'
 import type { KnowledgeService } from '../services/knowledge'
+import type { BotChannelService } from '../im/bot-channels'
 import type { BotService } from '../services/bots'
 import type { DreamingService } from '../services/dreaming'
+import { isAllowedWebhookUrl } from '../services/task-webhook'
 import type { BriefService } from '../services/brief'
 import {
   CHATGPT_OAUTH_DEFAULT_MODEL,
@@ -166,6 +168,8 @@ export interface RegisterIpcDeps {
   dreamingService: DreamingService
   /** Bot Mode (v46): roster, canonical bot chats, group rooms. */
   botService?: BotService
+  /** Bot gateway (v47): per-bot Telegram bindings. */
+  botChannels?: BotChannelService
   /** Morning brief: stored digests + dismissal (state lives in settings, main-owned). */
   briefService: Pick<BriefService, 'list' | 'dismiss'>
   /** Knowledge-base chunking/embedding/retrieval. */
@@ -1264,7 +1268,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     if (content.length === 0 && !hasAttachments) {
       throw invalid('Type a message or attach a file first.')
     }
-    return chatService.send({ ...parsed, content })
+    // queueIfBusy (v47): a send into a busy conversation persists + queues the
+    // message instead of erroring; one coalesced turn drains after completion.
+    return chatService.send({ ...parsed, content }, { queueIfBusy: true })
   })
 
   register(CHANNELS.chatStop, (streamId) => {
@@ -2361,6 +2367,15 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     approvedToolIds: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
     projectId: z.string().trim().min(1).nullable().optional(),
     agentId: z.string().trim().min(1).nullable().optional(),
+    // Delivery target (v47): https, or plain http on localhost only — the
+    // same posture as provider base URLs.
+    webhookUrl: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine(isAllowedWebhookUrl, 'Webhook URLs must be https:// (http:// only on localhost).')
+      .nullable()
+      .optional(),
   }) satisfies z.ZodType<ScheduledTaskInput>
 
   /**
@@ -2458,6 +2473,23 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       .nullable()
       .optional(),
     hidden: z.boolean().optional(),
+    // Bot gateway (v47): heartbeat, auto-compact policy, messaging allowlist.
+    heartbeat: z
+      .object({
+        everyMinutes: z.number().int().min(15).max(24 * 60),
+        deliver: z.enum(['chat', 'notify']),
+        prompt: z.string().max(2000).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    reset: z
+      .object({
+        dailyHour: z.number().int().min(0).max(23).nullable().optional(),
+        idleMinutes: z.number().int().min(15).max(7 * 24 * 60).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    messageAllow: z.array(z.string().min(1).max(100)).max(50).nullable().optional(),
   })
 
   register(CHANNELS.agentsList, () => db.agents.list())
@@ -2506,6 +2538,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const groupPatchSchema = z.object({
     name: z.string().trim().min(1).max(200).optional(),
     memberIds: z.array(z.string().min(1).max(100)).max(12).optional(),
+    activation: z.enum(['always', 'mention']).optional(),
+    observerIds: z.array(z.string().min(1).max(100)).max(12).optional(),
   })
 
   register(CHANNELS.botsRoster, () => requireBots().roster())
@@ -2518,6 +2552,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       z.object({
         name: z.string().trim().min(1).max(200),
         memberIds: z.array(z.string().min(1).max(100)).max(12),
+        activation: z.enum(['always', 'mention']).optional(),
+        observerIds: z.array(z.string().min(1).max(100)).max(12).optional(),
       }),
       input
     )
@@ -2544,6 +2580,52 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.botGroupMarkSeen, (groupId) => {
     requireBots().markGroupSeen(requireString(groupId, 'Group id'))
     return undefined
+  })
+
+  // -- per-bot Telegram bindings (v47) ------------------------------------------
+
+  const requireChannels = (): BotChannelService => {
+    if (!deps.botChannels) throw invalid('Bot channels are unavailable in this build.')
+    return deps.botChannels
+  }
+
+  register(CHANNELS.botBindingGet, (agentId) =>
+    requireChannels().describe(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botBindingSetToken, (agentId, token) => {
+    const trimmed = requireString(token, 'Bot token').trim()
+    // Telegram bot tokens look like "<digits>:<35 url-safe chars>".
+    if (!/^\d{5,}:[\w-]{20,}$/.test(trimmed)) {
+      throw invalid('That does not look like a Telegram bot token (get one from @BotFather).')
+    }
+    return requireChannels().setToken(requireString(agentId, 'Agent id'), trimmed)
+  })
+  register(CHANNELS.botBindingSetEnabled, (agentId, enabled) =>
+    requireChannels().setEnabled(
+      requireString(agentId, 'Agent id'),
+      requireBoolean(enabled, 'Enabled')
+    )
+  )
+  register(CHANNELS.botBindingRepair, (agentId) =>
+    requireChannels().repair(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botBindingClearToken, (agentId) => {
+    requireChannels().clearToken(requireString(agentId, 'Agent id'))
+    return undefined
+  })
+  register(CHANNELS.botBindingUpdateGroup, (agentId, groupId, patch) => {
+    const parsed = parseInput(
+      z.object({
+        activation: z.enum(['mention', 'always']).optional(),
+        remove: z.boolean().optional(),
+      }),
+      patch
+    )
+    return requireChannels().updateGroup(
+      requireString(agentId, 'Agent id'),
+      requireString(groupId, 'Group id'),
+      parsed
+    )
   })
 
   const packHookSchema = z.object({

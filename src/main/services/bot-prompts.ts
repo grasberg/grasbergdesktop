@@ -183,6 +183,38 @@ function capTranscript(text: string): string {
   return `[earlier discussion truncated]\n\n…${text.slice(-GROUP_TRANSCRIPT_MAX_CHARS)}`
 }
 
+// -- heartbeat (v47, OpenClaw contract) ---------------------------------------
+
+/** The quiet answer: a heartbeat turn that surfaces nothing is deleted. */
+export const HEARTBEAT_NO_REPLY = 'NO_REPLY'
+
+/**
+ * Lenient NO_REPLY detection (OpenClaw accepts the token at the start or end
+ * with up to ~300 chars of trailing filler around it): exact token, or a reply
+ * that STARTS with the token and stays short.
+ */
+export function isHeartbeatQuiet(reply: string): boolean {
+  const trimmed = reply.trim()
+  if (trimmed === HEARTBEAT_NO_REPLY) return true
+  return trimmed.startsWith(HEARTBEAT_NO_REPLY) && trimmed.length <= HEARTBEAT_NO_REPLY.length + 300
+}
+
+/**
+ * The user-message side of a heartbeat turn in the bot's canonical chat. The
+ * persona/system prompt rides along as in any turn; this carries the contract.
+ */
+export function buildHeartbeatPrompt(extra?: string | null): string {
+  const custom = (extra ?? '').trim()
+  return (
+    '[Heartbeat] Periodic check-in — no one asked a question. Review this chat, your role and ' +
+    'your memory: is there anything that genuinely needs the user’s attention or a next step ' +
+    `you should surface right now? If not — and usually there is not — reply with exactly ` +
+    `${HEARTBEAT_NO_REPLY} and nothing else. Recurring work belongs in scheduled routines, not ` +
+    'here; do not invent tasks to look busy.' +
+    (custom ? `\n\nStanding heartbeat instructions from the user:\n${custom}` : '')
+  )
+}
+
 /** Incoming bot-to-bot message as persisted into the target's canonical chat. */
 export function formatIncomingBotMessage(senderName: string, message: string): string {
   return `Message from 🤖 ${senderName} (@${botSlug(senderName)}): ${message}`

@@ -54,6 +54,7 @@ export default function ScheduledTasks(): React.JSX.Element {
   const [projectId, setProjectId] = useState('')
   const [projects, setProjects] = useState<CodeProject[]>([])
   const [agentId, setAgentId] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState('')
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
@@ -155,6 +156,7 @@ export default function ScheduledTasks(): React.JSX.Element {
     setGrantIds([])
     setProjectId('')
     setAgentId('')
+    setWebhookUrl('')
   }
 
   const openCreateForm = (): void => {
@@ -191,6 +193,7 @@ export default function ScheduledTasks(): React.JSX.Element {
       approvedToolIds: grantIds,
       projectId: grantIds.length > 0 && projectId ? projectId : null,
       agentId: agentId || null,
+      webhookUrl: webhookUrl.trim() || null,
     })
     setSaving(false)
     if (created) {
@@ -290,6 +293,14 @@ export default function ScheduledTasks(): React.JSX.Element {
                   ))}
                 </select>
               ) : null}
+              <input
+                className="input"
+                type="url"
+                value={webhookUrl}
+                onChange={(e) => setWebhookUrl(e.target.value)}
+                placeholder="Webhook URL for results (optional, https)"
+                maxLength={2000}
+              />
               {grantable.length > 0 ? (
                 <div className="sched-grants">
                   <span className="sched-grants-label">

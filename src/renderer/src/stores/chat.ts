@@ -101,12 +101,15 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
 
     async send(content, attachments, opts) {
       const { conversation, streaming } = get()
-      if (!conversation || streaming) return
+      if (!conversation) return
+      // While a response streams, plain messages queue main-side (v47); the
+      // Composer already blocks commands/one-shots in that state.
       const settings = useSettingsStore.getState().settings
 
       // "/compact" summarizes older messages now, without sending anything.
       const bare = content.trim()
       if (bare === '/compact') {
+        if (streaming) return
         try {
           const result = await unwrap(window.uld.chat.compact(conversation.id))
           useUiStore
@@ -215,6 +218,16 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
             ...(overrides ? { overrides } : {}),
           })
         )
+        if ('queued' in result) {
+          // Busy conversation: the message is persisted and runs as the next
+          // turn after the current response completes. Show it immediately.
+          set((s) =>
+            s.conversation?.id === conversation.id
+              ? { messages: [...s.messages, result.userMessage] }
+              : {}
+          )
+          return
+        }
         // main awaits model/token resolution before answering, so another
         // conversation may be open by now — never graft this stream onto it.
         set((s) =>

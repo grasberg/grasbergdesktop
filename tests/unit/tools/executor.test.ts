@@ -295,7 +295,9 @@ describe('fetch_url', () => {
       conversation: conv(false),
       approval: approveAll,
     })
-    expect(result.startsWith('HTTP 200')).toBe(true)
+    // v47: fetched pages come wrapped in untrusted-content boundary markers.
+    expect(result.startsWith('<<<EXTERNAL_UNTRUSTED_CONTENT')).toBe(true)
+    expect(result).toContain('HTTP 200')
     expect(result.length).toBeLessThanOrEqual(8000 + '\n…[truncated]'.length)
     expect(result.endsWith('…[truncated]')).toBe(true)
     // GET only, no credentials attached.

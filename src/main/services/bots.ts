@@ -23,6 +23,7 @@ import { CHANNELS } from '@shared/ipc'
 import type {
   AgentProfile,
   BotGroup,
+  BotGroupActivation,
   BotRoster,
   Conversation,
   Message,
@@ -32,6 +33,7 @@ import type {
 import type { AppDatabase } from '../db/database'
 import {
   buildGroupTurnPrompt,
+  buildHeartbeatPrompt,
   botSlug,
   formatBotReply,
   formatDeliveryFailure,
@@ -40,6 +42,7 @@ import {
   GROUP_MAX_MESSAGES,
   GROUP_MAX_ROUNDS,
   GROUP_MIN_MEMBERS,
+  isHeartbeatQuiet,
   isPassReply,
   matchBotName,
   MAX_BOT_HOPS,
@@ -55,14 +58,26 @@ const DELIVERY_TIMEOUT_MS = 10 * 60_000
 const RETRY_DELAY_MS = 10_000
 /** "Wrote within the last 90 s" half of the active-now strip (Hermes). */
 const ACTIVE_RECENT_MS = 90_000
+/** Heartbeat/auto-compact maintenance tick. */
+const MAINTENANCE_TICK_MS = 60_000
+/** Floor on the heartbeat cadence (cost guard; OpenClaw defaults 30–60 min). */
+export const HEARTBEAT_MIN_MINUTES = 15
+/** A heartbeat turn nobody finished stops being tracked after this window. */
+const HEARTBEAT_TIMEOUT_MS = 10 * 60_000
 
 /** The narrow chat-service surface the bot service needs (test seam). */
 export interface BotChatService {
+  /**
+   * The real signature returns ChatSendResult; without `queueIfBusy` a busy
+   * chat throws, so bot callers only ever see a started stream — but the
+   * result type stays loose (`assistantMessage` optional) for assignability.
+   */
   send(req: {
     conversationId: string
     content: string
-  }): Promise<{ assistantMessage: Message }>
+  }): Promise<{ queued?: boolean; userMessage?: Message | null; assistantMessage?: Message }>
   isConversationActive(conversationId: string): boolean
+  compactNow(conversationId: string): Promise<{ compacted: boolean }>
   generateForWorkflow(
     prompt: string,
     providerId?: string,
@@ -163,6 +178,27 @@ export class BotService {
   private readonly turnHops = new Map<string, number>()
   /** One active round-runner per group room. */
   private readonly activeGroups = new Map<string, AbortController>()
+  /** User sends that arrived while a room was settling (drained afterwards). */
+  private readonly pendingGroupSends = new Map<string, string[]>()
+  /** Heartbeat turns awaiting completion, keyed by conversation id (v47). */
+  private readonly pendingHeartbeats = new Map<
+    string,
+    {
+      agentId: string
+      userMessageId: string | null
+      assistantMessageId: string
+      deliver: 'chat' | 'notify'
+      timer: NodeJS.Timeout
+    }
+  >()
+  /** Last heartbeat start per agent (in-memory; boot counts as a fresh beat). */
+  private readonly lastHeartbeatAt = new Map<string, number>()
+  /** Idle auto-compact: the lastMessageAt already attempted, per agent. */
+  private readonly idleCompactAttempted = new Map<string, number>()
+  /** Daily auto-compact: the local day (YYYY-MM-DD) already compacted, per agent. */
+  private readonly dailyCompactDone = new Map<string, string>()
+  private maintenanceTimer: NodeJS.Timeout | null = null
+  private readonly bootedAt = Date.now()
 
   constructor(private readonly deps: BotServiceDeps) {}
 
@@ -195,10 +231,18 @@ export class BotService {
     if (agent.chatConversationId) {
       this.inFlight.delete(agent.chatConversationId)
       this.turnHops.delete(agent.chatConversationId)
+      const heartbeat = this.pendingHeartbeats.get(agent.chatConversationId)
+      if (heartbeat) clearTimeout(heartbeat.timer)
+      this.pendingHeartbeats.delete(agent.chatConversationId)
       this.deps.db.conversations.remove(agent.chatConversationId)
     }
     this.queues.delete(agent.id)
+    this.lastHeartbeatAt.delete(agent.id)
+    this.idleCompactAttempted.delete(agent.id)
+    this.dailyCompactDone.delete(agent.id)
     this.deps.db.botGroups.removeMemberEverywhere(agent.id)
+    this.deps.db.botBindings.remove(agent.id)
+    this.deps.db.secrets.deleteAllFor('im_bridge', `bot:${agent.id}`)
     this.botsChanged({ agentId: agent.id })
   }
 
@@ -267,6 +311,16 @@ export class BotService {
     if (targetAgent.id === senderAgent.id) {
       return 'Error: you cannot message yourself.'
     }
+    // Bot-to-bot allowlist (v47, OpenClaw governance): null = open (the Hermes
+    // default), a list fences who this bot may address, [] disables messaging.
+    if (senderAgent.messageAllow && !senderAgent.messageAllow.includes(targetAgent.id)) {
+      const allowedNames = senderAgent.messageAllow
+        .map((id) => db.agents.getById(id)?.name)
+        .filter((name): name is string => !!name)
+      return allowedNames.length > 0
+        ? `Error: you are not allowed to message ${targetAgent.name}. You may message: ${allowedNames.join(', ')}.`
+        : 'Error: bot-to-bot messaging is disabled for you.'
+    }
     const hop = (this.turnHops.get(senderConversationId) ?? 0) + 1
     if (hop > MAX_BOT_HOPS) {
       return (
@@ -318,6 +372,14 @@ export class BotService {
     this.turnHops.set(chat.id, delivery.hop)
     try {
       const result = await this.deps.chat.send({ conversationId: chat.id, content })
+      if (!result.assistantMessage) {
+        // Defensive: only a queued result lacks the placeholder, and bot
+        // deliveries never opt into queueing — requeue and let the
+        // completion hook pump again.
+        queue.unshift(delivery)
+        this.turnHops.delete(chat.id)
+        return
+      }
       this.inFlight.set(chat.id, {
         delivery,
         assistantMessageId: result.assistantMessage.id,
@@ -355,6 +417,15 @@ export class BotService {
   handleCompletion(conversation: Conversation, message: Message): void {
     if (message.role !== 'assistant' || !conversation.agentId) return
     this.turnHops.delete(conversation.id)
+    // Heartbeat turns settle first: a quiet NO_REPLY turn is deleted outright
+    // (OpenClaw suppresses quiet acknowledgments), an alerting one stays and
+    // is delivered per the bot's config.
+    const heartbeat = this.pendingHeartbeats.get(conversation.id)
+    if (heartbeat && heartbeat.assistantMessageId === message.id) {
+      clearTimeout(heartbeat.timer)
+      this.pendingHeartbeats.delete(conversation.id)
+      this.settleHeartbeat(conversation, heartbeat, message)
+    }
     const entry = this.inFlight.get(conversation.id)
     if (entry && entry.assistantMessageId === message.id) {
       clearTimeout(entry.timer)
@@ -363,6 +434,29 @@ export class BotService {
     }
     void this.pump(conversation.agentId)
     this.botsChanged({ agentId: conversation.agentId })
+  }
+
+  private settleHeartbeat(
+    conversation: Conversation,
+    heartbeat: { agentId: string; userMessageId: string | null; deliver: 'chat' | 'notify' },
+    message: Message
+  ): void {
+    const agentName = this.deps.db.agents.getById(heartbeat.agentId)?.name ?? 'bot'
+    if (isHeartbeatQuiet(message.content)) {
+      // Nothing needed attention — remove the turn so the chat stays clean.
+      if (heartbeat.userMessageId) this.deps.db.messages.deleteById(heartbeat.userMessageId)
+      this.deps.db.messages.deleteById(message.id)
+      this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: conversation.id })
+      return
+    }
+    if (heartbeat.deliver === 'notify') {
+      this.deps.notify?.({
+        title: `🤖 ${agentName} has something for you`,
+        body: message.content.trim().slice(0, 300),
+        status: 'ok',
+        conversationId: conversation.id,
+      })
+    }
   }
 
   private routeReply(delivery: PendingDelivery, message: Message): void {
@@ -425,20 +519,36 @@ export class BotService {
 
   // -- group rooms --------------------------------------------------------------
 
-  createGroup(input: { name: string; memberIds: string[] }): BotGroup {
+  createGroup(input: {
+    name: string
+    memberIds: string[]
+    activation?: BotGroupActivation
+    observerIds?: string[]
+  }): BotGroup {
     const members = this.resolveMembers(input.memberIds)
     const name = input.name.trim() || 'Group chat'
     const conversation = this.deps.db.conversations.create({ mode: 'chat', title: name })
+    const memberIds = members.map((member) => member.id)
     const group = this.deps.db.botGroups.create({
       name,
-      memberIds: members.map((member) => member.id),
+      memberIds,
       conversationId: conversation.id,
+      activation: input.activation,
+      observerIds: (input.observerIds ?? []).filter((oid) => memberIds.includes(oid)),
     })
     this.botsChanged({ groupId: group.id })
     return group
   }
 
-  updateGroup(id: string, patch: { name?: string; memberIds?: string[] }): BotGroup {
+  updateGroup(
+    id: string,
+    patch: {
+      name?: string
+      memberIds?: string[]
+      activation?: BotGroupActivation
+      observerIds?: string[]
+    }
+  ): BotGroup {
     const db = this.deps.db
     let group = db.botGroups.getById(id)
     if (!group) throw new Error('Unknown group.')
@@ -449,9 +559,18 @@ export class BotService {
       group = db.botGroups.rename(id, name) ?? group
       db.conversations.update(group.conversationId, { title: name })
     }
-    if (patch.memberIds !== undefined) {
-      const members = this.resolveMembers(patch.memberIds)
-      group = db.botGroups.setMembers(id, members.map((member) => member.id)) ?? group
+    if (patch.memberIds !== undefined || patch.observerIds !== undefined) {
+      const memberIds = (
+        patch.memberIds !== undefined ? this.resolveMembers(patch.memberIds) : []
+      ).map((member) => member.id)
+      const effectiveMembers = patch.memberIds !== undefined ? memberIds : group.memberIds
+      const observers = (patch.observerIds ?? group.observerIds).filter((oid) =>
+        effectiveMembers.includes(oid)
+      )
+      group = db.botGroups.setMembers(id, effectiveMembers, observers) ?? group
+    }
+    if (patch.activation !== undefined) {
+      group = db.botGroups.setActivation(id, patch.activation) ?? group
     }
     this.botsChanged({ groupId: id })
     return group
@@ -477,17 +596,16 @@ export class BotService {
   }
 
   /**
-   * User message into a room: persists it and kicks off up to three serial
-   * reply-or-pass rounds. Returns once the message is persisted — turns run
-   * detached and stream into the transcript via push events.
+   * User message into a room: persists it and kicks off member turns. Returns
+   * once the message is persisted — turns run detached and land via push
+   * events. A send while the room is still settling queues (v47, OpenClaw
+   * collect semantics): the message joins the live transcript immediately and
+   * triggers a fresh round-set once the current one finishes.
    */
   groupSend(groupId: string, content: string): void {
     const db = this.deps.db
     const group = db.botGroups.getById(groupId)
     if (!group) throw new Error('Unknown group.')
-    if (this.activeGroups.has(groupId)) {
-      throw new Error('The room is still settling — wait for the current rounds to finish.')
-    }
     const members = group.memberIds
       .map((memberId) => db.agents.getById(memberId))
       .filter((agent): agent is AgentProfile => agent !== null && agent.enabled)
@@ -502,17 +620,46 @@ export class BotService {
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: group.conversationId })
     this.botsChanged({ groupId: group.id })
 
+    if (this.activeGroups.has(groupId)) {
+      // Mid-rounds: the message is already in the transcript (running turns
+      // see it); its mentions get their own round-set after settlement.
+      const pending = this.pendingGroupSends.get(groupId) ?? []
+      pending.push(text)
+      this.pendingGroupSends.set(groupId, pending)
+      return
+    }
+    this.startGroupRounds(group, members, text)
+  }
+
+  private startGroupRounds(group: BotGroup, members: AgentProfile[], text: string): void {
     const mentioned = parseBotMentions(text, members.map((member) => member.name))
     const controller = new AbortController()
-    this.activeGroups.set(groupId, controller)
+    this.activeGroups.set(group.id, controller)
     void this.runGroupRounds(group, members, mentioned, controller)
       .catch((e) => {
         console.error('[bots] group rounds failed:', errorMessageOf(e))
       })
       .finally(() => {
-        this.activeGroups.delete(groupId)
+        this.activeGroups.delete(group.id)
         this.botsChanged({ groupId: group.id })
+        this.drainPendingGroupSends(group.id)
       })
+  }
+
+  private drainPendingGroupSends(groupId: string): void {
+    const pending = this.pendingGroupSends.get(groupId)
+    if (!pending || pending.length === 0) return
+    this.pendingGroupSends.delete(groupId)
+    const db = this.deps.db
+    const group = db.botGroups.getById(groupId)
+    if (!group) return
+    const members = group.memberIds
+      .map((memberId) => db.agents.getById(memberId))
+      .filter((agent): agent is AgentProfile => agent !== null && agent.enabled)
+    if (members.length === 0) return
+    // One coalesced round-set covers the burst (collect mode): the messages
+    // are already in the transcript; mentions merge across all of them.
+    this.startGroupRounds(group, members, pending.join('\n'))
   }
 
   private async runGroupRounds(
@@ -522,12 +669,26 @@ export class BotService {
     controller: AbortController
   ): Promise<void> {
     const db = this.deps.db
-    const memberNames = members.map((member) => member.name)
+    const observers = new Set(group.observerIds)
+    // Open (unmentioned) rounds are for speaking members only; an observer
+    // reads the room and takes a turn ONLY when @mentioned (v47).
+    const speakerNames = members
+      .filter((member) => !observers.has(member.id))
+      .map((member) => member.name)
     const identities = members.map(identity)
     const byId = new Map(members.map((member) => [member.id, member]))
     let messageCount = 0
-    for (let round = 1; round <= GROUP_MAX_ROUNDS; round++) {
-      const participants = planRoundParticipants(memberNames, mentioned, round)
+    // Activation 'mention' (v47, the OpenClaw group default): only @named bots
+    // take one turn each — no open rounds, no settlement loop. Silence when
+    // nobody is mentioned; the message stays as room context.
+    const maxRounds = group.activation === 'mention' ? 1 : GROUP_MAX_ROUNDS
+    if (group.activation === 'mention' && mentioned.length === 0) return
+    for (let round = 1; round <= maxRounds; round++) {
+      const participants = planRoundParticipants(
+        round === 1 && mentioned.length > 0 ? members.map((m) => m.name) : speakerNames,
+        mentioned,
+        round
+      )
       let spoke = false
       for (const name of participants) {
         if (controller.signal.aborted || messageCount >= GROUP_MAX_MESSAGES) return
@@ -626,6 +787,124 @@ export class BotService {
       this.botsChanged({ agentId: agent.id })
     } catch (e) {
       console.error('[bots] routine mirror failed:', errorMessageOf(e))
+    }
+  }
+
+  // -- maintenance: heartbeats + auto-compact (v47) -----------------------------
+
+  /**
+   * Starts the 60 s maintenance tick: due heartbeats and canonical-chat
+   * auto-compaction. unref'd so it never keeps the process alive.
+   */
+  startMaintenance(): void {
+    if (this.maintenanceTimer) return
+    this.maintenanceTimer = setInterval(() => {
+      void this.maintenanceTick()
+    }, MAINTENANCE_TICK_MS)
+    this.maintenanceTimer.unref?.()
+  }
+
+  stopMaintenance(): void {
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
+    this.maintenanceTimer = null
+  }
+
+  /** One pass over every enabled bot. Public for tests. */
+  async maintenanceTick(now = Date.now()): Promise<void> {
+    for (const agent of this.deps.db.agents.listEnabled()) {
+      try {
+        if (agent.heartbeat) await this.maybeHeartbeat(agent, now)
+        if (agent.reset) await this.maybeAutoCompact(agent, now)
+      } catch (e) {
+        console.error(`[bots] maintenance failed for ${agent.name}:`, errorMessageOf(e))
+      }
+    }
+  }
+
+  private async maybeHeartbeat(agent: AgentProfile, now: number): Promise<void> {
+    const config = agent.heartbeat
+    if (!config) return
+    const everyMs = Math.max(config.everyMinutes, HEARTBEAT_MIN_MINUTES) * 60_000
+    // Boot counts as a beat: no stampede right after launch, and a restart
+    // never owes a backlog (OpenClaw heartbeats are cadence, not schedule).
+    const last = this.lastHeartbeatAt.get(agent.id) ?? this.bootedAt
+    if (now - last < everyMs) return
+    const chat = this.ensureBotChat(agent.id)
+    // Defer while anything is running or queued for this chat — a heartbeat
+    // must never contend with real work (OpenClaw defers on queued work too).
+    if (
+      this.deps.chat.isConversationActive(chat.id) ||
+      this.inFlight.has(chat.id) ||
+      this.pendingHeartbeats.has(chat.id) ||
+      (this.queues.get(agent.id)?.length ?? 0) > 0
+    ) {
+      return
+    }
+    this.lastHeartbeatAt.set(agent.id, now)
+    try {
+      const result = await this.deps.chat.send({
+        conversationId: chat.id,
+        content: buildHeartbeatPrompt(config.prompt),
+      })
+      if (!result.assistantMessage) return // queued result can't happen here
+      this.pendingHeartbeats.set(chat.id, {
+        agentId: agent.id,
+        userMessageId: result.userMessage?.id ?? null,
+        assistantMessageId: result.assistantMessage.id,
+        deliver: config.deliver,
+        timer: setTimeout(() => {
+          // Give up tracking a turn that never completed; whatever persisted
+          // stays in the chat.
+          this.pendingHeartbeats.delete(chat.id)
+        }, HEARTBEAT_TIMEOUT_MS),
+      })
+    } catch (e) {
+      // Missed beat (provider down, chat busy race): logged, retried next
+      // cadence — heartbeats never surface errors to the user.
+      console.error(`[bots] heartbeat failed for ${agent.name}:`, errorMessageOf(e))
+    }
+  }
+
+  private async maybeAutoCompact(agent: AgentProfile, now: number): Promise<void> {
+    const policy = agent.reset
+    const chatId = agent.chatConversationId
+    if (!policy || !chatId) return
+    if (this.deps.chat.isConversationActive(chatId) || this.pendingHeartbeats.has(chatId)) return
+    const last = this.deps.db.messages.lastSnippet(chatId)
+    if (!last) return
+
+    // Idle reset: compact once per quiet period — the attempt is keyed to the
+    // latest message so an uncompactable (short) chat isn't retried every tick.
+    const idleMinutes = policy.idleMinutes ?? null
+    if (idleMinutes && now - last.createdAt >= idleMinutes * 60_000) {
+      if (this.idleCompactAttempted.get(agent.id) !== last.createdAt) {
+        this.idleCompactAttempted.set(agent.id, last.createdAt)
+        await this.runAutoCompact(agent, chatId)
+        return
+      }
+    }
+
+    // Daily reset: once per local day at (or after) the configured hour.
+    const dailyHour = policy.dailyHour ?? null
+    if (dailyHour !== null && dailyHour !== undefined) {
+      const date = new Date(now)
+      const day = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+      if (date.getHours() >= dailyHour && this.dailyCompactDone.get(agent.id) !== day) {
+        this.dailyCompactDone.set(agent.id, day)
+        await this.runAutoCompact(agent, chatId)
+      }
+    }
+  }
+
+  private async runAutoCompact(agent: AgentProfile, conversationId: string): Promise<void> {
+    try {
+      const { compacted } = await this.deps.chat.compactNow(conversationId)
+      if (compacted) {
+        this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId })
+        this.botsChanged({ agentId: agent.id })
+      }
+    } catch (e) {
+      console.error(`[bots] auto-compact failed for ${agent.name}:`, errorMessageOf(e))
     }
   }
 

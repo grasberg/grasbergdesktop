@@ -17,6 +17,7 @@ interface ScheduledTaskRow {
   project_id: string | null
   agent_id: string | null
   budget_usd: number | null
+  webhook_url: string | null
   last_run_at: number | null
   last_status: ScheduledTaskStatus
   last_output: string
@@ -46,6 +47,7 @@ function toTask(row: ScheduledTaskRow): ScheduledTask {
     projectId: row.project_id,
     agentId: row.agent_id,
     budgetUsd: row.budget_usd ?? null,
+    webhookUrl: row.webhook_url ?? null,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
     lastOutput: row.last_output,
@@ -113,6 +115,7 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
         // Not in the INSERT below — the column defaults to NULL; caps are set
         // after creation via setBudget.
         budgetUsd: null,
+        webhookUrl: input.webhookUrl ?? null,
         lastRunAt: null,
         lastStatus: 'idle',
         lastOutput: '',
@@ -123,9 +126,9 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
       driver.run(
         `INSERT INTO scheduled_tasks
            (id, title, prompt, recurrence, next_run_at, enabled, approved_tools_json,
-            project_id, agent_id, last_run_at, last_status, last_output, last_error,
+            project_id, agent_id, webhook_url, last_run_at, last_status, last_output, last_error,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, 'idle', '', NULL, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, 'idle', '', NULL, ?, ?)`,
         [
           task.id,
           task.title,
@@ -135,6 +138,7 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
           JSON.stringify(task.approvedToolIds),
           task.projectId,
           task.agentId,
+          task.webhookUrl ?? null,
           now,
           now,
         ]

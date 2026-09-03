@@ -272,7 +272,9 @@ export default function Composer(): ReactElement {
     : false
 
   const isStreaming = streaming !== null
-  const disabled = !conversation || isStreaming || !usable
+  // Typing stays enabled during a stream (v47): a send while busy queues
+  // main-side and runs as one coalesced turn after the response completes.
+  const disabled = !conversation || !usable
 
   // Hidden until the whisper binary + active model are downloaded (charter:
   // voice surfaces appear only once the model exists locally).
@@ -482,6 +484,12 @@ export default function Composer(): ReactElement {
     const content = value.trim()
     if (!content && attachments.length === 0) return
     if (disabled) return
+    // While a response streams, only PLAIN messages may queue: commands and
+    // one-shot overrides (/compact, /research, compare) need an idle turn.
+    if (isStreaming && (content.startsWith('/') || researchOn || (compareOn && comparePreset))) {
+      toast('Wait for the current response before running commands or one-shots.', 'error')
+      return
+    }
     if (content === '/init') {
       runInitCommand()
       return
@@ -742,7 +750,7 @@ export default function Composer(): ReactElement {
   const placeholder = !conversation
     ? 'Select or create a conversation to start'
     : isStreaming
-      ? 'Generating… press Stop to interrupt'
+      ? 'Generating… a message sent now queues and runs next'
       : !usable
         ? 'Configure a provider to start chatting'
         : 'Send a message… (Enter to send, Shift+Enter for a new line)'
@@ -1168,7 +1176,7 @@ export default function Composer(): ReactElement {
             rows={1}
             value={value}
             placeholder={placeholder}
-            disabled={!conversation || isStreaming}
+            disabled={!conversation}
             aria-label="Message"
             onPaste={handlePaste}
             onChange={(e) => {

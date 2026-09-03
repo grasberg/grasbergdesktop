@@ -1,23 +1,30 @@
 /**
- * Bot Mode group rooms (migration v46): 2–6 bots deliberating in one shared
- * conversation. The room's transcript lives in a `conversations` row
- * (conversation_id); membership is the join table. Pointers carry no FKs —
- * disbanding a room is an app-level operation that also removes its
- * conversation, and a member whose profile was deleted simply drops out of
- * the roster render.
+ * Bot Mode group rooms (migration v46, activation + observers in v47): 2–6
+ * bots deliberating in one shared conversation. The room's transcript lives in
+ * a `conversations` row (conversation_id); membership is the join table.
+ * Pointers carry no FKs — disbanding a room is an app-level operation that
+ * also removes its conversation, and a member whose profile was deleted simply
+ * drops out of the roster render.
  */
 
 import { randomUUID } from 'node:crypto'
-import type { BotGroup } from '@shared/types'
+import type { BotGroup, BotGroupActivation } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 
 export interface BotGroupsRepository {
   list(): BotGroup[]
   getById(id: string): BotGroup | null
   getByConversation(conversationId: string): BotGroup | null
-  create(input: { name: string; memberIds: string[]; conversationId: string }): BotGroup
+  create(input: {
+    name: string
+    memberIds: string[]
+    conversationId: string
+    activation?: BotGroupActivation
+    observerIds?: string[]
+  }): BotGroup
   rename(id: string, name: string): BotGroup | null
-  setMembers(id: string, memberIds: string[]): BotGroup | null
+  setMembers(id: string, memberIds: string[], observerIds?: string[]): BotGroup | null
+  setActivation(id: string, activation: BotGroupActivation): BotGroup | null
   setNeedsUser(id: string, needsUser: boolean): void
   touch(id: string, updatedAtMs: number): void
   /** Drops the agent from every room (profile deleted). */
@@ -32,40 +39,48 @@ interface BotGroupRow {
   name: string
   conversation_id: string
   needs_user: number
+  activation: string
   created_at: number
   updated_at: number
 }
 
 export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsRepository {
-  const membersOf = (groupId: string): string[] =>
+  const membersOf = (groupId: string): Array<{ agentId: string; observer: boolean }> =>
     driver
-      .all<{ agent_id: string }>(
-        'SELECT agent_id FROM bot_group_members WHERE group_id = ? ORDER BY added_at',
+      .all<{ agent_id: string; observer: number }>(
+        'SELECT agent_id, observer FROM bot_group_members WHERE group_id = ? ORDER BY added_at',
         [groupId]
       )
-      .map((row) => row.agent_id)
+      .map((row) => ({ agentId: row.agent_id, observer: row.observer === 1 }))
 
-  const toGroup = (row: BotGroupRow): BotGroup => ({
-    id: row.id,
-    name: row.name,
-    conversationId: row.conversation_id,
-    needsUser: row.needs_user === 1,
-    memberIds: membersOf(row.id),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  })
+  const toGroup = (row: BotGroupRow): BotGroup => {
+    const members = membersOf(row.id)
+    return {
+      id: row.id,
+      name: row.name,
+      conversationId: row.conversation_id,
+      needsUser: row.needs_user === 1,
+      memberIds: members.map((member) => member.agentId),
+      activation: row.activation === 'mention' ? 'mention' : 'always',
+      observerIds: members.filter((member) => member.observer).map((member) => member.agentId),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+  }
 
   const getById = (id: string): BotGroup | null => {
     const row = driver.get<BotGroupRow>('SELECT * FROM bot_groups WHERE id = ?', [id])
     return row ? toGroup(row) : null
   }
 
-  const insertMembers = (groupId: string, memberIds: string[]): void => {
+  const insertMembers = (groupId: string, memberIds: string[], observerIds: string[]): void => {
     const now = Date.now()
+    const observers = new Set(observerIds)
     for (const [index, agentId] of memberIds.entries()) {
       driver.run(
-        'INSERT OR IGNORE INTO bot_group_members (group_id, agent_id, added_at) VALUES (?, ?, ?)',
-        [groupId, agentId, now + index]
+        `INSERT OR IGNORE INTO bot_group_members (group_id, agent_id, added_at, observer)
+         VALUES (?, ?, ?, ?)`,
+        [groupId, agentId, now + index, observers.has(agentId) ? 1 : 0]
       )
     }
   }
@@ -90,11 +105,11 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       const now = Date.now()
       const id = randomUUID()
       driver.run(
-        `INSERT INTO bot_groups (id, name, conversation_id, needs_user, created_at, updated_at)
-         VALUES (?, ?, ?, 0, ?, ?)`,
-        [id, input.name, input.conversationId, now, now]
+        `INSERT INTO bot_groups (id, name, conversation_id, needs_user, activation, created_at, updated_at)
+         VALUES (?, ?, ?, 0, ?, ?, ?)`,
+        [id, input.name, input.conversationId, input.activation ?? 'always', now, now]
       )
-      insertMembers(id, input.memberIds)
+      insertMembers(id, input.memberIds, input.observerIds ?? [])
       return getById(id) as BotGroup
     },
 
@@ -107,10 +122,21 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       return getById(id)
     },
 
-    setMembers(id, memberIds) {
+    setMembers(id, memberIds, observerIds) {
+      const keepObservers =
+        observerIds ?? (getById(id)?.observerIds.filter((oid) => memberIds.includes(oid)) ?? [])
       driver.run('DELETE FROM bot_group_members WHERE group_id = ?', [id])
-      insertMembers(id, memberIds)
+      insertMembers(id, memberIds, keepObservers)
       driver.run('UPDATE bot_groups SET updated_at = ? WHERE id = ?', [Date.now(), id])
+      return getById(id)
+    },
+
+    setActivation(id, activation) {
+      driver.run('UPDATE bot_groups SET activation = ?, updated_at = ? WHERE id = ?', [
+        activation,
+        Date.now(),
+        id,
+      ])
       return getById(id)
     },
 

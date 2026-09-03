@@ -57,6 +57,7 @@ import type {
 import type { CodeReadFileResult } from '@shared/ipc'
 import { encodeTaskList, type TaskListItem } from '@shared/tasklist'
 import { redactKnownSecrets, redactSecrets } from '../providers/redact'
+import { wrapUntrusted } from '../services/untrusted'
 import { looksBinary } from '../utils/binary'
 import { capToolResult } from './definitions'
 import { customToolHeaders } from './custom-tools'
@@ -1881,9 +1882,13 @@ export class ToolExecutor {
           const { text } = await readBodyCapped(res, FETCH_MAX_BYTES)
           const results = parseDuckDuckGoHtml(text, maxResults)
           if (results.length === 0) return 'No results found for "' + query + '".'
-          return results
-            .map((r, i) => i + 1 + '. ' + r.title + ' — ' + r.url + (r.snippet ? '\n   ' + r.snippet : ''))
-            .join('\n')
+          // Result titles/snippets are third-party web content (v47).
+          return wrapUntrusted(
+            results
+              .map((r, i) => i + 1 + '. ' + r.title + ' — ' + r.url + (r.snippet ? '\n   ' + r.snippet : ''))
+              .join('\n'),
+            'web search results'
+          )
         }
       )
     } catch (e) {
@@ -2624,7 +2629,13 @@ export class ToolExecutor {
             return `Error: refused non-textual response (content-type '${contentType || 'unknown'}'). Only text/*, JSON and XML responses are returned.`
           }
           const { text, truncated } = await readBodyCapped(res, FETCH_MAX_BYTES)
-          return formatHttpResponse(res, text, truncated)
+          // Fetched pages are external, untrusted input (v47): boundary-marked
+          // and stripped of chat-template token literals before the model
+          // reads them, so a page can never fake a turn or smuggle "orders".
+          return wrapUntrusted(
+            formatHttpResponse(res, text, truncated),
+            `fetch_url ${parsed.origin}`
+          )
         },
         { blockInternal: true }
       )

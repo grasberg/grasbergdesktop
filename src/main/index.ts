@@ -34,6 +34,7 @@ import { registerCompletionHook } from './services/completion-hooks'
 import { createArtifactCompletionHook } from './services/artifact-hooks'
 import { BotService } from './services/bots'
 import { createMemoryCompletionHook } from './services/memory-hook'
+import { postRunWebhook } from './services/task-webhook'
 import { DreamingService } from './services/dreaming'
 import { BriefService, briefNotification } from './services/brief'
 import { CodeService } from './code/code-service'
@@ -42,6 +43,7 @@ import { WorkspaceRootService } from './code/workspace-root'
 import { createToolSystem, customToolDbId } from './tools'
 import { McpManager } from './tools/mcp/manager'
 import { ImBridgeManager } from './im/manager'
+import { BotChannelService } from './im/bot-channels'
 import { KnowledgeService } from './services/knowledge'
 import { createWorkflowRunner, type WorkflowRunner } from './workflows/runner'
 import { WorkflowScheduler } from './workflows/scheduler'
@@ -83,6 +85,7 @@ const PRODUCTION_CSP =
 let db: AppDatabase | null = null
 let chatService: ChatService | null = null
 let botService: BotService | null = null
+let botChannels: BotChannelService | null = null
 let approvalBroker: ApprovalBroker | null = null
 let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
@@ -173,6 +176,8 @@ async function cleanup(): Promise<void> {
   approvalBroker?.stopAll()
   questionBroker?.stopAll()
   imBridgeManager?.stopAll()
+  botService?.stopMaintenance()
+  botChannels?.stopAll()
   workflowScheduler?.stop()
   triggerServer?.stop()
   workflowWatcher?.stop()
@@ -768,6 +773,22 @@ function bootstrap(): void {
     },
   })
   botService = bots
+  // Heartbeats + canonical-chat auto-compaction (v47), 60 s cadence.
+  if (process.env.SMOKE_TEST !== '1') bots.startMaintenance()
+
+  // Per-bot Telegram bindings (v47): each bound bot runs its own bridge;
+  // inbound messages become canonical-chat turns (queue-if-busy) and replies
+  // route back via the completion hook below.
+  const botChannelService = new BotChannelService({
+    db: database,
+    keystore,
+    ensureBotChat: (agentId) => bots.ensureBotChat(agentId),
+    sendToBot: (conversationId, content) =>
+      chatService!.send({ conversationId, content }, { queueIfBusy: true }),
+    broadcast,
+  })
+  botChannels = botChannelService
+  if (process.env.SMOKE_TEST !== '1') botChannelService.syncAll()
 
   // Optimizer: autonomous optimize-evaluate-commit loops per project (AVO
   // style). Eval commands run HERE, never through the agent's shell tool.
@@ -936,9 +957,31 @@ function bootstrap(): void {
         // Bot Mode: a routine owned by a bot reports into its canonical chat
         // (Hermes: "routines execute runs directly into the bot's chat").
         botService?.mirrorRoutineResult(task, 'ok', output)
+        // Delivery target (v47): best-effort POST of the result, detached.
+        if (task.webhookUrl) {
+          void postRunWebhook(task.webhookUrl, {
+            taskId: task.id,
+            title: task.title,
+            status: 'ok',
+            output,
+            error: null,
+            finishedAt: Date.now(),
+          })
+        }
         return output
       } catch (e) {
-        botService?.mirrorRoutineResult(task, 'error', e instanceof Error ? e.message : 'Unknown error')
+        const message = e instanceof Error ? e.message : 'Unknown error'
+        botService?.mirrorRoutineResult(task, 'error', message)
+        if (task.webhookUrl) {
+          void postRunWebhook(task.webhookUrl, {
+            taskId: task.id,
+            title: task.title,
+            status: 'error',
+            output: '',
+            error: message,
+            finishedAt: Date.now(),
+          })
+        }
         throw e
       }
     },
@@ -1000,6 +1043,11 @@ function bootstrap(): void {
     botService?.handleCompletion(conversation, message)
   )
 
+  // Bot bindings (v47): flushes finished turns back to their Telegram chats.
+  registerCompletionHook((conversation, message) =>
+    botChannels?.handleCompletion(conversation, message)
+  )
+
   registerCompletionHook((conversation) => projectHooks.run('afterAgent', conversation))
 
   // Work-mode artifact side effects (proposed code changes, workspace items)
@@ -1041,6 +1089,7 @@ function bootstrap(): void {
     workflowWatcher: watcher,
     questionBroker: questions,
     botService: bots,
+    botChannels: botChannelService,
     mcpManager: mcp,
     imBridgeManager: imBridge,
     oauthManager: oauth,

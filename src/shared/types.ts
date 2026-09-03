@@ -782,6 +782,19 @@ export interface StartStreamResult {
   assistantMessage: Message
 }
 
+/**
+ * Message queue (v47, OpenClaw collect semantics): the conversation was busy,
+ * so the user message was persisted and queued instead of starting a stream.
+ * Queued messages coalesce into ONE follow-up turn (all of them are already
+ * in the history) that starts ~500 ms after the current stream completes.
+ */
+export interface QueuedSendResult {
+  queued: true
+  userMessage: Message
+}
+
+export type ChatSendResult = StartStreamResult | QueuedSendResult
+
 // ---------------------------------------------------------------------------
 // Quick assistant (global-shortcut clipboard mini window)
 // ---------------------------------------------------------------------------
@@ -1952,6 +1965,23 @@ export interface AgentProfile {
    * agent_id = this profile), created lazily on first open. Null until then.
    */
   chatConversationId: string | null
+  /**
+   * Bot gateway (v47): periodic "anything need attention?" turn in the
+   * canonical chat with a NO_REPLY quiet contract (OpenClaw heartbeat).
+   * Null = no heartbeat.
+   */
+  heartbeat: BotHeartbeat | null
+  /**
+   * Bot gateway (v47): auto-compact policy for the canonical chat — daily at
+   * an hour and/or after idle minutes; whichever expires first wins. Always
+   * compaction, never deletion. Null = no automatic reset.
+   */
+  reset: BotResetPolicy | null
+  /**
+   * Bot gateway (v47): agent ids this bot may message via message_agent.
+   * Null = every enabled bot (the open default); [] = messaging disabled.
+   */
+  messageAllow: string[] | null
   createdAt: number
   updatedAt: number
 }
@@ -1960,6 +1990,24 @@ export interface AgentProfile {
 export interface BotAvatar {
   emoji?: string | null
   color?: string | null
+}
+
+/** Bot heartbeat config (v47). */
+export interface BotHeartbeat {
+  /** Cadence in minutes (min 15 enforced at the boundary). */
+  everyMinutes: number
+  /** 'chat' = surfaced turn stays in the chat; 'notify' additionally raises an OS notification. */
+  deliver: 'chat' | 'notify'
+  /** Extra standing instruction appended to the heartbeat prompt. */
+  prompt?: string | null
+}
+
+/** Bot canonical-chat auto-compact policy (v47). */
+export interface BotResetPolicy {
+  /** Compact once daily at this local hour (0–23). */
+  dailyHour?: number | null
+  /** Compact after this many minutes without a new message. */
+  idleMinutes?: number | null
 }
 
 export interface AgentProfileInput {
@@ -1974,6 +2022,9 @@ export interface AgentProfileInput {
   title?: string
   avatar?: BotAvatar | null
   hidden?: boolean
+  heartbeat?: BotHeartbeat | null
+  reset?: BotResetPolicy | null
+  messageAllow?: string[] | null
 }
 
 export type AgentProfilePatch = Partial<AgentProfileInput>
@@ -1995,8 +2046,49 @@ export interface BotGroup {
   /** A member escalated with @user and the user hasn't opened the room since. */
   needsUser: boolean
   memberIds: string[]
+  /**
+   * Room activation (v47, OpenClaw grammar): 'always' = every user message
+   * triggers open reply-or-pass rounds; 'mention' = only @named bots take one
+   * turn, no open rounds.
+   */
+  activation: BotGroupActivation
+  /**
+   * Observer members (v47): read the room but speak only when @mentioned —
+   * a note-taker or auditor bot. Subset of memberIds.
+   */
+  observerIds: string[]
   createdAt: number
   updatedAt: number
+}
+
+export type BotGroupActivation = 'always' | 'mention'
+
+/**
+ * External chat presence for one bot (v47): its own Telegram bot, paired to
+ * the owner's DM (trust-on-first-use) and optionally admitted to groups via
+ * owner-only in-chat commands. The bot token lives encrypted in tool_secrets
+ * and never crosses IPC outward — `hasToken` is all the renderer sees.
+ */
+export interface BotBinding {
+  agentId: string
+  channel: 'telegram'
+  enabled: boolean
+  hasToken: boolean
+  /** The paired DM chat id, or null while unpaired. */
+  paired: boolean
+  /** One-time pairing code to send the bot on Telegram (while unpaired). */
+  pairingCode: string | null
+  groups: BotBindingGroup[]
+  /** Live bridge state, from the channel pool. */
+  status: 'stopped' | 'running' | 'error'
+  statusDetail: string | null
+}
+
+export interface BotBindingGroup {
+  id: string
+  title: string
+  /** 'mention' (default) = speak only when @mentioned or replied to; 'always' = every message. */
+  activation: BotGroupActivation
 }
 
 /** One roster row of the Bots pane: a bot plus its canonical-chat activity. */
@@ -2244,6 +2336,11 @@ export interface ScheduledTask {
   agentId: string | null
   /** Monthly spend cap in USD (v44): runs are skipped past it. Null = no cap. */
   budgetUsd?: number | null
+  /**
+   * Delivery target (v47, OpenClaw-style): when set, each run result is also
+   * POSTed as JSON to this URL (https, or plain http on localhost only).
+   */
+  webhookUrl?: string | null
   lastRunAt: number | null
   lastStatus: ScheduledTaskStatus
   lastOutput: string
@@ -2260,6 +2357,7 @@ export interface ScheduledTaskInput {
   approvedToolIds?: string[]
   projectId?: string | null
   agentId?: string | null
+  webhookUrl?: string | null
 }
 
 /**

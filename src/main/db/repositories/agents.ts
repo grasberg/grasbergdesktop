@@ -6,7 +6,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentProfile, AgentProfileInput, AgentProfilePatch, BotAvatar } from '@shared/types'
+import type {
+  AgentProfile,
+  AgentProfileInput,
+  AgentProfilePatch,
+  BotAvatar,
+  BotHeartbeat,
+  BotResetPolicy,
+} from '@shared/types'
 import type { SqliteDriver } from '../driver'
 import { parseStringArray, updateById } from './util'
 
@@ -37,8 +44,21 @@ interface AgentRow {
   avatar_json: string | null
   hidden: number
   chat_conversation_id: string | null
+  heartbeat_json: string | null
+  reset_json: string | null
+  message_allow_json: string | null
   created_at: number
   updated_at: number
+}
+
+function parseObject<T>(json: string | null): T | null {
+  if (!json) return null
+  try {
+    const parsed = JSON.parse(json) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : null
+  } catch {
+    return null
+  }
 }
 
 function parseAvatar(json: string | null): BotAvatar | null {
@@ -71,6 +91,10 @@ function toAgent(row: AgentRow): AgentProfile {
     avatar: parseAvatar(row.avatar_json),
     hidden: row.hidden === 1,
     chatConversationId: row.chat_conversation_id,
+    heartbeat: parseObject<BotHeartbeat>(row.heartbeat_json),
+    reset: parseObject<BotResetPolicy>(row.reset_json),
+    messageAllow:
+      row.message_allow_json === null ? null : parseStringArray(row.message_allow_json, []),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -118,6 +142,9 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         avatar: input.avatar ?? null,
         hidden: input.hidden === true,
         chatConversationId: null,
+        heartbeat: input.heartbeat ?? null,
+        reset: input.reset ?? null,
+        messageAllow: input.messageAllow ?? null,
         createdAt: now,
         updatedAt: now,
       }
@@ -125,8 +152,9 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         `INSERT INTO agents
            (id, name, description, system_prompt, provider_id, model_id,
             tool_ids_json, max_rounds, enabled, title, avatar_json, hidden,
-            chat_conversation_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            chat_conversation_id, heartbeat_json, reset_json, message_allow_json,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           agent.id,
           agent.name,
@@ -141,6 +169,9 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
           agent.avatar ? JSON.stringify(agent.avatar) : null,
           agent.hidden ? 1 : 0,
           null,
+          agent.heartbeat ? JSON.stringify(agent.heartbeat) : null,
+          agent.reset ? JSON.stringify(agent.reset) : null,
+          agent.messageAllow ? JSON.stringify(agent.messageAllow) : null,
           now,
           now,
         ]
@@ -175,6 +206,24 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
                 ? null
                 : JSON.stringify(patch.avatar),
           hidden: patch.hidden === undefined ? undefined : patch.hidden ? 1 : 0,
+          heartbeat_json:
+            patch.heartbeat === undefined
+              ? undefined
+              : patch.heartbeat === null
+                ? null
+                : JSON.stringify(patch.heartbeat),
+          reset_json:
+            patch.reset === undefined
+              ? undefined
+              : patch.reset === null
+                ? null
+                : JSON.stringify(patch.reset),
+          message_allow_json:
+            patch.messageAllow === undefined
+              ? undefined
+              : patch.messageAllow === null
+                ? null
+                : JSON.stringify(patch.messageAllow),
         },
         { touchUpdatedAt: true }
       )

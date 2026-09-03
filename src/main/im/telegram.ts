@@ -26,9 +26,31 @@ export interface TelegramCallbackResult {
   replaceText?: string
 }
 
+/**
+ * Enriched inbound message for gateway-style bot bindings (v47): chat type,
+ * sender identity, and the two mention facts group gating needs (an explicit
+ * @botusername mention, and a reply to one of the bot's own messages).
+ */
+export interface TelegramInbound {
+  chatId: number
+  chatType: 'private' | 'group' | 'supergroup' | 'channel'
+  chatTitle: string
+  text: string
+  senderId: number | null
+  senderName: string
+  mentionsBot: boolean
+  isReplyToBot: boolean
+}
+
 export interface TelegramBridgeDeps {
   token: string
   onMessage: (chatId: number, text: string) => Promise<string>
+  /**
+   * Richer handler (v47): when set it REPLACES onMessage. Returning null
+   * sends nothing — group-gated silence, or a reply that will be delivered
+   * later via send() once the agent turn completes.
+   */
+  onInbound?: (message: TelegramInbound) => Promise<string | null>
   /** Inline-button tap from any chat; the handler authorizes the sender. */
   onCallback?: (chatId: number, data: string) => Promise<TelegramCallbackResult>
   onError?: (message: string) => void
@@ -69,11 +91,32 @@ export class TelegramBridge {
   private offset = 0
   private running = false
   private aborter: AbortController | null = null
+  /** Cached getMe identity, fetched lazily for mention/reply detection. */
+  private self: { id: number; username: string } | null = null
 
   constructor(private readonly deps: TelegramBridgeDeps) {}
 
   private api(method: string): string {
     return `https://api.telegram.org/bot${this.deps.token}/${method}`
+  }
+
+  /** The bot's own id + username (cached; null while unreachable). */
+  private async getSelf(): Promise<{ id: number; username: string } | null> {
+    if (this.self) return this.self
+    const fetchImpl = this.deps.fetchImpl ?? fetch
+    try {
+      const res = await fetchImpl(this.api('getMe'))
+      const body = (await res.json()) as {
+        ok?: boolean
+        result?: { id?: number; username?: string }
+      }
+      if (body.ok && typeof body.result?.id === 'number') {
+        this.self = { id: body.result.id, username: body.result.username ?? '' }
+      }
+    } catch {
+      // transient; retried on the next inbound message
+    }
+    return this.self
   }
 
   start(): void {
@@ -121,7 +164,12 @@ export class TelegramBridge {
       error_code?: number
       result?: Array<{
         update_id: number
-        message?: { text?: string; chat?: { id?: number } }
+        message?: {
+          text?: string
+          chat?: { id?: number; type?: string; title?: string }
+          from?: { id?: number; first_name?: string; username?: string }
+          reply_to_message?: { from?: { id?: number } }
+        }
         callback_query?: {
           id?: string
           data?: string
@@ -136,7 +184,26 @@ export class TelegramBridge {
       const msg = update.message
       const chatId = msg?.chat?.id
       if (msg && typeof msg.text === 'string' && typeof chatId === 'number') {
-        await this.handle(chatId, msg.text)
+        if (this.deps.onInbound) {
+          const self = await this.getSelf()
+          const chatType = (msg.chat?.type ?? 'private') as TelegramInbound['chatType']
+          const inbound: TelegramInbound = {
+            chatId,
+            chatType,
+            chatTitle: msg.chat?.title ?? '',
+            text: msg.text,
+            senderId: typeof msg.from?.id === 'number' ? msg.from.id : null,
+            senderName: msg.from?.first_name ?? msg.from?.username ?? 'someone',
+            mentionsBot:
+              !!self?.username &&
+              msg.text.toLowerCase().includes(`@${self.username.toLowerCase()}`),
+            isReplyToBot:
+              self !== null && msg.reply_to_message?.from?.id === self.id,
+          }
+          await this.handleInboundEx(inbound)
+        } else {
+          await this.handle(chatId, msg.text)
+        }
       }
       const callback = update.callback_query
       const callbackChatId = callback?.message?.chat?.id
@@ -165,6 +232,32 @@ export class TelegramBridge {
       this.deps.onError?.(reply)
     }
     await this.send(chatId, reply)
+  }
+
+  /** The onInbound path: null means silence (or a reply delivered later). */
+  private async handleInboundEx(inbound: TelegramInbound): Promise<void> {
+    let reply: string | null
+    try {
+      reply = (await this.deps.onInbound?.(inbound)) ?? null
+    } catch (e) {
+      reply = `Sorry — ${e instanceof Error ? e.message : 'something went wrong'}.`
+      this.deps.onError?.(reply)
+    }
+    if (reply !== null) await this.send(inbound.chatId, reply)
+  }
+
+  /** Best-effort "typing…" indicator while an agent turn runs. Never throws. */
+  async sendTyping(chatId: number): Promise<void> {
+    const fetchImpl = this.deps.fetchImpl ?? fetch
+    try {
+      await fetchImpl(this.api('sendChatAction'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+      })
+    } catch {
+      // cosmetic only
+    }
   }
 
   /**

@@ -360,6 +360,15 @@ const api: UldApi = {
     groupSend: (groupId, content) => ipcRenderer.invoke(CHANNELS.botGroupSend, groupId, content),
     groupStop: (groupId) => ipcRenderer.invoke(CHANNELS.botGroupStop, groupId),
     groupMarkSeen: (groupId) => ipcRenderer.invoke(CHANNELS.botGroupMarkSeen, groupId),
+    binding: (agentId) => ipcRenderer.invoke(CHANNELS.botBindingGet, agentId),
+    bindingSetToken: (agentId, token) =>
+      ipcRenderer.invoke(CHANNELS.botBindingSetToken, agentId, token),
+    bindingSetEnabled: (agentId, enabled) =>
+      ipcRenderer.invoke(CHANNELS.botBindingSetEnabled, agentId, enabled),
+    bindingRepair: (agentId) => ipcRenderer.invoke(CHANNELS.botBindingRepair, agentId),
+    bindingClearToken: (agentId) => ipcRenderer.invoke(CHANNELS.botBindingClearToken, agentId),
+    bindingUpdateGroup: (agentId, groupId, patch) =>
+      ipcRenderer.invoke(CHANNELS.botBindingUpdateGroup, agentId, groupId, patch),
     onChanged: subscribe(CHANNELS.botsChanged),
   },
   knowledge: {

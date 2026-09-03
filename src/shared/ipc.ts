@@ -22,7 +22,9 @@ import type {
   AppSettings,
   Attachment,
   AuthMode,
+  BotBinding,
   BotGroup,
+  BotGroupActivation,
   BotRoster,
   ChatParams,
   CodeChange,
@@ -98,6 +100,7 @@ import type {
   PromptTemplate,
   PromptTemplateInput,
   PromptTemplatePatch,
+  ChatSendResult,
   StartStreamResult,
   StreamEventEnvelope,
   ArenaStartRequest,
@@ -380,6 +383,13 @@ export const CHANNELS = {
   botGroupSend: 'bots:groups:send',
   botGroupStop: 'bots:groups:stop',
   botGroupMarkSeen: 'bots:groups:markSeen',
+  // Bot gateway (v47): per-bot external Telegram presence
+  botBindingGet: 'bots:binding:get',
+  botBindingSetToken: 'bots:binding:setToken',
+  botBindingSetEnabled: 'bots:binding:setEnabled',
+  botBindingRepair: 'bots:binding:repair',
+  botBindingClearToken: 'bots:binding:clearToken',
+  botBindingUpdateGroup: 'bots:binding:updateGroup',
 
   // knowledge bases (RAG)
   kbList: 'kb:list',
@@ -885,7 +895,7 @@ export interface UldApi {
     deleteAllContent(): Promise<IpcResult<void>>
   }
   chat: {
-    send(req: ChatSendRequest): Promise<IpcResult<StartStreamResult>>
+    send(req: ChatSendRequest): Promise<IpcResult<ChatSendResult>>
     stop(streamId: string): Promise<IpcResult<void>>
     regenerate(req: ChatRegenerateRequest): Promise<IpcResult<StartStreamResult>>
     editAndRerun(req: ChatEditAndRerunRequest): Promise<IpcResult<StartStreamResult>>
@@ -1275,10 +1285,20 @@ export interface UldApi {
     roster(): Promise<IpcResult<BotRoster>>
     /** Get-or-create the bot's canonical chat; returns its conversation id. */
     openChat(agentId: string): Promise<IpcResult<{ conversationId: string }>>
-    createGroup(input: { name: string; memberIds: string[] }): Promise<IpcResult<BotGroup>>
+    createGroup(input: {
+      name: string
+      memberIds: string[]
+      activation?: BotGroupActivation
+      observerIds?: string[]
+    }): Promise<IpcResult<BotGroup>>
     updateGroup(
       id: string,
-      patch: { name?: string; memberIds?: string[] }
+      patch: {
+        name?: string
+        memberIds?: string[]
+        activation?: BotGroupActivation
+        observerIds?: string[]
+      }
     ): Promise<IpcResult<BotGroup>>
     deleteGroup(id: string): Promise<IpcResult<void>>
     /** Post a user message into a room; rounds run detached (push events). */
@@ -1286,6 +1306,20 @@ export interface UldApi {
     groupStop(groupId: string): Promise<IpcResult<void>>
     /** Clears the room's needs-you badge. */
     groupMarkSeen(groupId: string): Promise<IpcResult<void>>
+    /** External Telegram presence (v47). Null = the bot has no binding yet. */
+    binding(agentId: string): Promise<IpcResult<BotBinding | null>>
+    /** Stores the bot token (encrypted main-side) and arms a pairing code. */
+    bindingSetToken(agentId: string, token: string): Promise<IpcResult<BotBinding>>
+    bindingSetEnabled(agentId: string, enabled: boolean): Promise<IpcResult<BotBinding>>
+    /** Unpairs and arms a fresh one-time pairing code. */
+    bindingRepair(agentId: string): Promise<IpcResult<BotBinding>>
+    /** Removes the binding and its stored token. */
+    bindingClearToken(agentId: string): Promise<IpcResult<void>>
+    bindingUpdateGroup(
+      agentId: string,
+      groupId: string,
+      patch: { activation?: BotGroupActivation; remove?: boolean }
+    ): Promise<IpcResult<BotBinding>>
     onChanged(
       cb: (event: { agentId?: string | null; groupId?: string | null }) => void
     ): () => void

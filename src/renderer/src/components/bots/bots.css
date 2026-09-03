@@ -340,6 +340,87 @@
   font-size: 13px !important;
 }
 
+.bot-member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bot-observer-check {
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}
+
+.bot-member-indent {
+  margin-left: 22px;
+}
+
+/* -- Telegram binding card ------------------------------------------------- */
+
+.bot-binding {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.bot-binding h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-binding-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bot-binding-row input {
+  flex: 1;
+}
+
+.bot-binding-status,
+.bot-binding-code {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.bot-binding-code code {
+  font-size: 15px;
+  letter-spacing: 0.2em;
+  padding: 2px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+}
+
+.bot-binding-groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-binding-groups li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.bot-binding-groups li span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* -- group room ----------------------------------------------------------- */
 
 .bot-room {

@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand'
-import type { BotGroup, BotRoster, Message } from '@shared/types'
+import type { BotGroup, BotGroupActivation, BotRoster, Message } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useConversationsStore } from './conversations'
 import { toastError } from './ui'
@@ -25,8 +25,21 @@ export interface BotsStoreState {
   /** Opens the bot's canonical chat in the conversation surface. */
   openBotChat(agentId: string): Promise<void>
   selectGroup(groupId: string | null): void
-  createGroup(name: string, memberIds: string[]): Promise<BotGroup | null>
-  updateGroup(id: string, patch: { name?: string; memberIds?: string[] }): Promise<void>
+  createGroup(
+    name: string,
+    memberIds: string[],
+    activation?: BotGroupActivation,
+    observerIds?: string[]
+  ): Promise<BotGroup | null>
+  updateGroup(
+    id: string,
+    patch: {
+      name?: string
+      memberIds?: string[]
+      activation?: BotGroupActivation
+      observerIds?: string[]
+    }
+  ): Promise<void>
   deleteGroup(id: string): Promise<void>
   sendToGroup(groupId: string, content: string): Promise<void>
   stopGroup(groupId: string): Promise<void>
@@ -100,9 +113,11 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
     }
   },
 
-  async createGroup(name, memberIds) {
+  async createGroup(name, memberIds, activation, observerIds) {
     try {
-      const group = await unwrap(window.uld.bots.createGroup({ name, memberIds }))
+      const group = await unwrap(
+        window.uld.bots.createGroup({ name, memberIds, activation, observerIds })
+      )
       await get().load()
       set({ activeGroupId: group.id, groupMessages: [] })
       return group

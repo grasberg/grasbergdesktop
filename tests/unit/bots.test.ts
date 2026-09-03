@@ -163,18 +163,31 @@ function makeFakeChat(overrides?: Partial<BotChatService>): BotChatService & {
     turns,
     async send({ conversationId, content }) {
       sends.push({ conversationId, content })
+      const now = Date.now()
+      const userMessage: Message = {
+        id: randomUUID(),
+        conversationId,
+        role: 'user',
+        content,
+        status: 'complete',
+        seq: 1,
+        createdAt: now,
+      }
       const assistantMessage: Message = {
         id: randomUUID(),
         conversationId,
         role: 'assistant',
         content: `reply to: ${content}`,
         status: 'complete',
-        seq: 1,
-        createdAt: Date.now(),
+        seq: 2,
+        createdAt: now,
       }
-      return { assistantMessage }
+      return { userMessage, assistantMessage }
     },
     isConversationActive: () => false,
+    async compactNow() {
+      return { compacted: true }
+    },
     async generateForWorkflow(prompt) {
       turns.push(prompt)
       return 'PASS'

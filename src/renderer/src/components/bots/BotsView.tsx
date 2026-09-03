@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { AgentProfile, BotGroup, Message } from '@shared/types'
+import type { AgentProfile, BotBinding, BotGroup, Message } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import Markdown from '@/components/chat/Markdown'
 import { ConfirmButton } from '@/components/common/controls'
@@ -74,6 +74,15 @@ interface BotFormState {
   modelId: string
   emoji: string
   color: string
+  /** '' = heartbeat off; otherwise the cadence in minutes. */
+  heartbeatEvery: string
+  heartbeatDeliver: 'chat' | 'notify'
+  /** '' = no daily compact; otherwise the local hour 0–23. */
+  resetDailyHour: string
+  /** '' = no idle compact; otherwise minutes. */
+  resetIdleMinutes: string
+  restrictMessaging: boolean
+  messageAllow: string[]
 }
 
 function emptyForm(): BotFormState {
@@ -86,6 +95,12 @@ function emptyForm(): BotFormState {
     modelId: '',
     emoji: '',
     color: '',
+    heartbeatEvery: '',
+    heartbeatDeliver: 'notify',
+    resetDailyHour: '',
+    resetIdleMinutes: '',
+    restrictMessaging: false,
+    messageAllow: [],
   }
 }
 
@@ -99,14 +114,29 @@ function formFrom(agent: AgentProfile): BotFormState {
     modelId: agent.modelId ?? '',
     emoji: agent.avatar?.emoji ?? '',
     color: agent.avatar?.color ?? '',
+    heartbeatEvery: agent.heartbeat ? String(agent.heartbeat.everyMinutes) : '',
+    heartbeatDeliver: agent.heartbeat?.deliver ?? 'notify',
+    resetDailyHour:
+      agent.reset?.dailyHour !== null && agent.reset?.dailyHour !== undefined
+        ? String(agent.reset.dailyHour)
+        : '',
+    resetIdleMinutes:
+      agent.reset?.idleMinutes !== null && agent.reset?.idleMinutes !== undefined
+        ? String(agent.reset.idleMinutes)
+        : '',
+    restrictMessaging: agent.messageAllow !== null,
+    messageAllow: agent.messageAllow ?? [],
   }
 }
 
 function BotForm({
   editing,
+  teammates,
   onDone,
 }: {
   editing: AgentProfile | null
+  /** Other bots, for the messaging allowlist. */
+  teammates: AgentProfile[]
   onDone: () => void
 }): ReactElement {
   const [form, setForm] = useState<BotFormState>(editing ? formFrom(editing) : emptyForm())
@@ -120,6 +150,8 @@ function BotForm({
   const submit = async (): Promise<void> => {
     if (!form.name.trim() || !form.systemPrompt.trim() || saving) return
     setSaving(true)
+    const idleMinutes = form.resetIdleMinutes ? Number.parseInt(form.resetIdleMinutes, 10) : null
+    const dailyHour = form.resetDailyHour ? Number.parseInt(form.resetDailyHour, 10) : null
     const payload = {
       name: form.name.trim(),
       title: form.title.trim(),
@@ -131,6 +163,17 @@ function BotForm({
         form.emoji.trim() || form.color
           ? { emoji: form.emoji.trim() || null, color: form.color || null }
           : null,
+      heartbeat: form.heartbeatEvery
+        ? {
+            everyMinutes: Number.parseInt(form.heartbeatEvery, 10),
+            deliver: form.heartbeatDeliver,
+          }
+        : null,
+      reset:
+        dailyHour !== null || idleMinutes !== null
+          ? { dailyHour, idleMinutes }
+          : null,
+      messageAllow: form.restrictMessaging ? form.messageAllow : null,
     }
     try {
       if (editing) await unwrap(window.uld.agents.update(editing.id, payload))
@@ -231,6 +274,92 @@ function BotForm({
           />
         </label>
       </div>
+      <div className="bot-form-grid">
+        <label>
+          Heartbeat (periodic check-in; quiet turns are discarded)
+          <select
+            value={form.heartbeatEvery}
+            onChange={(e) => set({ heartbeatEvery: e.target.value })}
+          >
+            <option value="">Off</option>
+            <option value="30">Every 30 minutes</option>
+            <option value="60">Every hour</option>
+            <option value="180">Every 3 hours</option>
+            <option value="360">Every 6 hours</option>
+            <option value="720">Twice a day</option>
+          </select>
+        </label>
+        <label>
+          When a heartbeat surfaces something
+          <select
+            value={form.heartbeatDeliver}
+            onChange={(e) => set({ heartbeatDeliver: e.target.value as 'chat' | 'notify' })}
+            disabled={!form.heartbeatEvery}
+          >
+            <option value="notify">Keep in chat + notify me</option>
+            <option value="chat">Keep in chat only</option>
+          </select>
+        </label>
+        <label>
+          Auto-compact daily at (hour)
+          <select
+            value={form.resetDailyHour}
+            onChange={(e) => set({ resetDailyHour: e.target.value })}
+          >
+            <option value="">Off</option>
+            {Array.from({ length: 24 }, (_, hour) => (
+              <option key={hour} value={String(hour)}>
+                {String(hour).padStart(2, '0')}:00
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Auto-compact after idle
+          <select
+            value={form.resetIdleMinutes}
+            onChange={(e) => set({ resetIdleMinutes: e.target.value })}
+          >
+            <option value="">Off</option>
+            <option value="60">1 hour quiet</option>
+            <option value="240">4 hours quiet</option>
+            <option value="720">12 hours quiet</option>
+            <option value="1440">A day quiet</option>
+          </select>
+        </label>
+      </div>
+      <div className="bot-member-pick">
+        <label className="bot-member-check">
+          <input
+            type="checkbox"
+            checked={form.restrictMessaging}
+            onChange={(e) => set({ restrictMessaging: e.target.checked })}
+          />
+          <span>Restrict who this bot can message (message_agent allowlist)</span>
+        </label>
+        {form.restrictMessaging
+          ? teammates
+              .filter((mate) => mate.id !== editing?.id)
+              .map((mate) => (
+                <label key={mate.id} className="bot-member-check bot-member-indent">
+                  <input
+                    type="checkbox"
+                    checked={form.messageAllow.includes(mate.id)}
+                    onChange={() =>
+                      set({
+                        messageAllow: form.messageAllow.includes(mate.id)
+                          ? form.messageAllow.filter((id) => id !== mate.id)
+                          : [...form.messageAllow, mate.id],
+                      })
+                    }
+                  />
+                  <BotAvatarBadge agent={mate} size={20} />
+                  <span>{mate.name}</span>
+                </label>
+              ))
+          : null}
+      </div>
+      {editing ? <BindingCard agent={editing} /> : null}
       <div className="bot-form-actions">
         <button
           type="button"
@@ -253,6 +382,183 @@ function BotForm({
 }
 
 // ---------------------------------------------------------------------------
+// Telegram binding (v47): the bot's own external presence
+// ---------------------------------------------------------------------------
+
+function BindingCard({ agent }: { agent: AgentProfile }): ReactElement {
+  const [binding, setBinding] = useState<BotBinding | null>(null)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const roster = useBotsStore((s) => s.roster)
+
+  useEffect(() => {
+    let alive = true
+    void window.uld.bots.binding(agent.id).then((res) => {
+      if (alive && res.ok) setBinding(res.data)
+    })
+    return () => {
+      alive = false
+    }
+    // roster refreshes on push:botsChanged — re-pull the binding with it so
+    // pairing completed from the phone shows up live.
+  }, [agent.id, roster])
+
+  const run = async (fn: () => Promise<void>): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await fn()
+    } catch (e) {
+      toastError('Telegram binding action failed', e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const connect = (): Promise<void> =>
+    run(async () => {
+      const updated = await unwrap(window.uld.bots.bindingSetToken(agent.id, token.trim()))
+      setBinding(updated)
+      setToken('')
+    })
+
+  return (
+    <div className="bot-binding">
+      <h4>Telegram presence</h4>
+      {!binding || !binding.hasToken ? (
+        <>
+          <p className="bot-form-hint">
+            Give this bot its own Telegram bot: create one with @BotFather, paste its token here,
+            then DM the bot the pairing code. In groups it stays silent until you send
+            /allowgroup, and replies only when @mentioned (switch with /activation always).
+          </p>
+          <div className="bot-binding-row">
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="123456789:AA…  (bot token)"
+              maxLength={200}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={!token.trim() || busy}
+              onClick={() => void connect()}
+            >
+              Connect
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="bot-binding-status">
+            Status:{' '}
+            <strong>
+              {binding.status === 'running'
+                ? binding.paired
+                  ? 'running · paired'
+                  : 'running · waiting for pairing'
+                : binding.status}
+            </strong>
+            {binding.statusDetail ? ` — ${binding.statusDetail}` : ''}
+          </p>
+          {!binding.paired && binding.pairingCode ? (
+            <p className="bot-binding-code">
+              DM the bot this code: <code>{binding.pairingCode}</code>
+            </p>
+          ) : null}
+          {!binding.paired && !binding.pairingCode ? (
+            <p className="bot-form-hint">The pairing code expired — generate a new one below.</p>
+          ) : null}
+          {binding.groups.length > 0 ? (
+            <ul className="bot-binding-groups">
+              {binding.groups.map((group) => (
+                <li key={group.id}>
+                  <span>{group.title}</span>
+                  <select
+                    value={group.activation}
+                    onChange={(e) =>
+                      void run(async () => {
+                        const updated = await unwrap(
+                          window.uld.bots.bindingUpdateGroup(agent.id, group.id, {
+                            activation: e.target.value as 'mention' | 'always',
+                          })
+                        )
+                        setBinding(updated)
+                      })
+                    }
+                  >
+                    <option value="mention">On @mention</option>
+                    <option value="always">Every message</option>
+                  </select>
+                  <button
+                    type="button"
+                    title="Remove this group"
+                    onClick={() =>
+                      void run(async () => {
+                        const updated = await unwrap(
+                          window.uld.bots.bindingUpdateGroup(agent.id, group.id, { remove: true })
+                        )
+                        setBinding(updated)
+                      })
+                    }
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="bot-form-hint">
+              No groups yet — add the bot to a Telegram group and send /allowgroup there.
+            </p>
+          )}
+          <div className="bot-binding-row">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const updated = await unwrap(
+                    window.uld.bots.bindingSetEnabled(agent.id, !binding.enabled)
+                  )
+                  setBinding(updated)
+                })
+              }
+            >
+              {binding.enabled ? 'Pause' : 'Resume'}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const updated = await unwrap(window.uld.bots.bindingRepair(agent.id))
+                  setBinding(updated)
+                })
+              }
+            >
+              New pairing code
+            </button>
+            <ConfirmButton
+              label="Disconnect"
+              prompt="Remove the Telegram bot token and all group approvals?"
+              onConfirm={() =>
+                void run(async () => {
+                  await unwrap(window.uld.bots.bindingClearToken(agent.id))
+                  setBinding(null)
+                })
+              }
+            />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Group editor
 // ---------------------------------------------------------------------------
 
@@ -267,18 +573,33 @@ function GroupForm({
 }): ReactElement {
   const [name, setName] = useState(editing?.name ?? '')
   const [memberIds, setMemberIds] = useState<string[]>(editing?.memberIds ?? [])
+  const [observerIds, setObserverIds] = useState<string[]>(editing?.observerIds ?? [])
+  const [activation, setActivation] = useState<'always' | 'mention'>(
+    editing?.activation ?? 'always'
+  )
   const createGroup = useBotsStore((s) => s.createGroup)
   const updateGroup = useBotsStore((s) => s.updateGroup)
 
   const toggle = (id: string): void =>
     setMemberIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
+  const toggleObserver = (id: string): void =>
+    setObserverIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
 
   const valid = name.trim().length > 0 && memberIds.length >= 2 && memberIds.length <= 6
 
   const submit = async (): Promise<void> => {
     if (!valid) return
-    if (editing) await updateGroup(editing.id, { name: name.trim(), memberIds })
-    else await createGroup(name.trim(), memberIds)
+    const observers = observerIds.filter((id) => memberIds.includes(id))
+    if (editing) {
+      await updateGroup(editing.id, {
+        name: name.trim(),
+        memberIds,
+        activation,
+        observerIds: observers,
+      })
+    } else {
+      await createGroup(name.trim(), memberIds, activation, observers)
+    }
     onDone()
   }
 
@@ -294,18 +615,42 @@ function GroupForm({
           maxLength={200}
         />
       </label>
+      <label>
+        Activation
+        <select
+          value={activation}
+          onChange={(e) => setActivation(e.target.value as 'always' | 'mention')}
+        >
+          <option value="always">Open rounds — everyone may reply or pass</option>
+          <option value="mention">Mention only — a bot speaks when @named</option>
+        </select>
+      </label>
       <div className="bot-member-pick">
-        <span className="bot-form-hint">Members (2–6 bots):</span>
+        <span className="bot-form-hint">
+          Members (2–6 bots). Observers read the room but speak only when @mentioned.
+        </span>
         {bots.map((bot) => (
-          <label key={bot.id} className="bot-member-check">
-            <input
-              type="checkbox"
-              checked={memberIds.includes(bot.id)}
-              onChange={() => toggle(bot.id)}
-            />
-            <BotAvatarBadge agent={bot} size={20} />
-            <span>{bot.name}</span>
-          </label>
+          <div key={bot.id} className="bot-member-row">
+            <label className="bot-member-check">
+              <input
+                type="checkbox"
+                checked={memberIds.includes(bot.id)}
+                onChange={() => toggle(bot.id)}
+              />
+              <BotAvatarBadge agent={bot} size={20} />
+              <span>{bot.name}</span>
+            </label>
+            {memberIds.includes(bot.id) ? (
+              <label className="bot-member-check bot-observer-check">
+                <input
+                  type="checkbox"
+                  checked={observerIds.includes(bot.id)}
+                  onChange={() => toggleObserver(bot.id)}
+                />
+                <span>observer</span>
+              </label>
+            ) : null}
+          </div>
         ))}
         {bots.length < 2 ? (
           <span className="bot-form-hint">Create at least two bots first.</span>
@@ -356,7 +701,7 @@ function RoomView({
 
   const send = async (): Promise<void> => {
     const text = draft.trim()
-    if (!text || active) return
+    if (!text) return
     setDraft('')
     await sendToGroup(group.id, text)
   }
@@ -413,11 +758,14 @@ function RoomView({
               void send()
             }
           }}
-          placeholder={active ? 'The room is settling…' : `Message ${group.name}`}
+          placeholder={
+            active
+              ? 'Deliberating — a message sent now joins the discussion'
+              : `Message ${group.name}`
+          }
           rows={2}
-          disabled={active}
         />
-        <button type="button" className="primary" disabled={active || !draft.trim()} onClick={() => void send()}>
+        <button type="button" className="primary" disabled={!draft.trim()} onClick={() => void send()}>
           Send
         </button>
       </div>
@@ -672,6 +1020,7 @@ export default function BotsView(): ReactElement {
         {panel.kind === 'new-bot' || panel.kind === 'edit-bot' ? (
           <BotForm
             editing={panel.kind === 'edit-bot' ? panel.agent : null}
+            teammates={allAgents}
             onDone={() => setPanel({ kind: 'none' })}
           />
         ) : panel.kind === 'new-group' || panel.kind === 'edit-group' ? (

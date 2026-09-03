@@ -34,6 +34,7 @@ import { createMemoriesRepository, type MemoriesRepository } from './repositorie
 import { createDocumentsRepository, type DocumentsRepository } from './repositories/documents'
 import { createSkillsRepository, type SkillsRepository } from './repositories/skills'
 import { createAgentsRepository, type AgentsRepository } from './repositories/agents'
+import { createBotBindingsRepository, type BotBindingsRepository } from './repositories/bot-bindings'
 import { createBotGroupsRepository, type BotGroupsRepository } from './repositories/bot-groups'
 import { createToolRulesRepository, type ToolRulesRepository } from './repositories/tool-rules'
 import { createActivityRepository, type ActivityRepository } from './repositories/activity'
@@ -86,6 +87,7 @@ export interface AppDatabase {
   skills: SkillsRepository
   agents: AgentsRepository
   botGroups: BotGroupsRepository
+  botBindings: BotBindingsRepository
   /** Standing approval rules ("always allow" / "always ask"). */
   toolRules: ToolRulesRepository
   /** Every tool call, with why it was allowed (the Activity view). */
@@ -250,6 +252,7 @@ export function openDatabase(filePath: string): AppDatabase {
     skills: createSkillsRepository(driver),
     agents: createAgentsRepository(driver),
     botGroups: createBotGroupsRepository(driver),
+    botBindings: createBotBindingsRepository(driver),
     toolRules: createToolRulesRepository(driver),
     activity: createActivityRepository(driver),
     scheduledTaskRuns: createScheduledTaskRunsRepository(driver),
