@@ -10,7 +10,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-end--to--end-3178c6.svg)](tsconfig.json)
-[![Electron](https://img.shields.io/badge/Electron-37-47848f.svg)](package.json)
+[![Electron](https://img.shields.io/badge/Electron-44-47848f.svg)](package.json)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](package.json)
 [![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-0a1a14.svg)](#building-installers)
 
@@ -27,7 +27,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - 🔐 **Local-first & private** — history in a local SQLite database, API keys encrypted with your OS key store (DPAPI / Keychain / libsecret). No account, no cloud sync, no telemetry.
 - 🧩 **Every provider, one app** — native adapters for OpenAI, Anthropic, Gemini and Bedrock; battle-tested OpenAI-compatible base for DeepSeek, GLM/Zhipu, MiniMax, Z.ai — plus **120+ one-click presets** (OpenRouter, Groq, xAI, Mistral, Together, Ollama, LM Studio, …) generated from the [models.dev](https://models.dev) catalog.
 - 🛠️ **A real agent loop** — streaming tool calls with per-tool permissions: built-in tools, custom HTTP tools, **MCP servers** (stdio + HTTP), sub-agents, an opt-in sandboxed browser, and an opt-in approval-gated shell.
-- 🖥️ **Two modes, one window** — fast **Chat** and an agentic **Work** mode with a file tree, reviewable diffs, sandboxed preview, terminal, Code Arena and an autonomous Optimizer.
+- 🖥️ **Two modes, one window** — fast **Chat** and an agentic **Work** mode with a file tree, reviewable diffs, sandboxed preview, terminal, Code Arena and an autonomous Optimizer — plus a **Bots** pane where named bots with their own chats, memory and routines work for you and with each other.
 - 📱 **Your assistant in your pocket** — pair a phone over an end-to-end-encrypted relay tunnel (self-hosted; the relay only ever routes ciphertext) for full remote access including tool approvals.
 
 ## Features
@@ -53,7 +53,16 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - **Mixture of Agents** — define presets where several *advisor* models answer in parallel and an *aggregator* model synthesizes the final reply (with the full tool loop intact). Trigger per conversation or one-shot with `/moa`.
 - **Code Arena** — race the same coding task on 2–4 models, each in its own isolated Git worktree; compare the diffs and apply the winner through the audited change pipeline. Optional **evolutionary rounds**: an LLM judge picks each round's winner and the next round's candidates build on it.
 - **Optimizer** — point an autonomous optimize-evaluate-commit loop at a project: the untouched baseline is scored first, agents work on an isolated branch, and accepted commits are published only by a safe fast-forward — with a per-project experiment log the assistant learns from.
-- **Agent profiles** — named personas with their own system prompt, model and restricted toolset, usable by the `delegate` sub-agent and workflow nodes.
+- **Agent profiles** — named personas with their own system prompt, model and restricted toolset, usable by the `delegate` sub-agent and workflow nodes — and they *are* your bots (see below).
+
+### Bots
+
+- **A roster of named bots** — each with a role, avatar, its own chat, its own memory, model pin and toolset; hide the ones you rarely talk to. One editor serves the Bots pane and Settings → Agents.
+- **Bot-to-bot messaging** — a bot hands work to a teammate with `message_agent`; deliveries are durable (queued rows survive restarts, an interrupted reply is retried once), and both chats show the handoff as a card with a live status.
+- **Group rooms** — 2–6 bots deliberate in short reply-or-pass rounds with @mentions, observer members and mention-only activation; a bot that needs a human decision says `@user` and the room lights up "needs you".
+- **Attention at a glance** — working / unread / needs-you states in the roster, on the sidebar's Bots button, in the chat header and in the dock/tray badge; notification clicks open the right chat or room.
+- **Routines, heartbeats, auto-compaction** — a scheduled task can run *as* a bot and reports into its chat; a bot can check in periodically (quiet turns are discarded) and compact its own chat daily or after idle.
+- **A Telegram presence per bot** — give a bot its own Telegram bot: trust-on-first-use pairing, allowlisted groups with mention gating, owner-only in-chat commands.
 - **Automatic model routing** — an optional provider-neutral Auto policy can prefer lowest cost, highest quality, or localhost-only models when a task has no explicit target.
 
 ### Tools, MCP & agents
@@ -78,7 +87,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 - **Scheduler** — run any saved workflow on an interval or a calendar schedule ("08:00 on weekdays"), plus standalone **scheduled prompt tasks** the assistant can create from chat (`schedule_task`), each with its own pre-approved tools and working folder.
 - **Webhook trigger** — an opt-in, loopback-only, token-gated endpoint that lets a git hook or CI job start a workflow.
 - **Remote access (phone)** — deploy the mobile client to a trusted static origin, then pair a phone by QR code through a separately hosted relay: full conversations, live streaming and tool approvals on mobile, end-to-end encrypted so the relay only routes ciphertext. Off by default; devices are revocable.
-- **Telegram bridge** — bind a bot to a conversation and chat with your assistant from your phone (trust-on-first-use pairing, single authorized chat). Pending tool approvals can also be answered from Telegram.
+- **Telegram bridge** — bind a bot to a conversation and chat with your assistant from your phone (trust-on-first-use pairing, single authorized chat). Pending tool approvals can also be answered from Telegram. Each bot in the Bots pane can additionally run its own Telegram bot.
 - **Agent inbox & activity log** — finished background results land in one review queue on Home, and every tool call is recorded with the reason it was allowed.
 - **Outbound webhook** — POST every completed reply to your own endpoint (opt-in).
 - **Agent control plane** — background delegates have persistent run history and can be stopped from Settings; Work tasks can be forked into isolated Git worktrees.

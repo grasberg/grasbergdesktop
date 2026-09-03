@@ -42,9 +42,9 @@ Three build targets (electron-vite): **main** (Node), **preload** (contextBridge
 All code targets these files; extend them deliberately, don't re-derive or restructure them:
 
 - `src/shared/types.ts`, `ipc.ts`, `schemas.ts`, `catalog.ts` — the shared contract (no runtime deps)
-- `src/main/db/migrations.ts` — single source of truth for the schema (currently v38, append-only)
+- `src/main/db/migrations.ts` — single source of truth for the schema (currently v49, append-only)
 - `src/main/providers/adapter.ts` — the `ProviderAdapter` interface
-- `src/renderer/src/stores/contracts.ts` — renderer store contracts
+- `src/renderer/src/stores/contracts.ts` — renderer store contracts (every store's state interface, `BotsStoreState` included)
 
 All IPC returns `IpcResult<T>`; every handler in `src/main/ipc/` validates its input with zod before calling a service. The renderer talks to main only via `window.uld` (implemented in `src/preload/`); stream events arrive via `webContents.send` push channels.
 
@@ -78,6 +78,10 @@ To add a provider, follow `docs/ADDING_A_PROVIDER.md` — including its PR check
 ### Tool system (`src/main/tools/`)
 
 One registry for built-in tools, user-defined custom HTTP tools, and real MCP servers (`@modelcontextprotocol/sdk`, stdio + HTTP transports). Everything goes through the same per-tool permission model and approval broker; sensitive/dangerous tools (`run_shell_command`, `browser`, `computer`) are opt-in via settings and filtered out of the tool list unless enabled. Browser/computer use drives a hidden sandboxed BrowserWindow (`src/main/browser/session.ts`), never the OS desktop.
+
+### Bot Mode (`src/main/services/bots.ts`, `bot-prompts.ts`, `im/bot-channels.ts`)
+
+A bot **is** an `agents` row (v46 added `title`/`avatar_json`/`hidden`/`chat_conversation_id`); there is no second roster table — Settings → Agents and the Bots pane edit the same profiles through one shared editor (`renderer/components/agents/AgentProfileForm.tsx`). A bot's canonical chat is a real conversation (`conversations.agent_id`, hidden from the sidebar listing) riding the ordinary `send()` pipeline; group rooms are `bot_groups` + one shared transcript conversation with `messages.agent_id` attribution. Bot-to-bot messaging (`message_agent`, canonical chats only) is durable since v48: `a2a_outbox` rows pumped per target strictly FIFO by `BotService` (queued → delivered → replied | failed | cancelled, hop + attempts persisted), settled through the completion hook and recovered at boot (`BotService.recover()` after `markDanglingStreamingAsStopped`); the sender-side handoff marker is a `system` row with `messages.handoff_json` that history building skips. Roster attention (v49: needs_you > unread > working > idle) is computed main-side in `BotService.roster()` from `agents.chat_seen_at`/`bot_groups.seen_at`, pending approvals/questions (`PendingBroker.hasPendingFor`), the outbox, running `agent_runs.agent_id` and routines; it feeds the sidebar badge, the dock badge and `push:navigate` deep links. Deliveries, rounds and routines run main-side and reach the renderer only via the coarse `push:botsChanged` refetch (subscribed once in `App.tsx`). v47 added heartbeats, auto-compact, the message allowlist, room activation/observers, the busy-send queue and per-bot Telegram bindings (`bot_bindings`; tokens in `tool_secrets`). Full column docs: `docs/DB_SCHEMA.md` (v46–v49).
 
 ### Remote access / phone tunnel (`src/main/remote/`, `src/mobile/`, `relay/`)
 

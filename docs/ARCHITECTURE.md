@@ -36,8 +36,11 @@ is a one-file change if ever needed.
 │  providers/  adapter registry: DeepSeek | Zhipu | MiniMax | OpenAI-compat    │
 │  keys/       safeStorage encrypt/decrypt; keys never cross IPC outward       │
 │  db/         node-sqlite3-wasm + migrations + repositories                   │
-│  tools/      MCP-style registry + permission gate (post-MVP)                 │
-│  code/       project folder access, file tree, diff apply gate (post-MVP)    │
+│  tools/      one registry: built-in, custom HTTP, real MCP; approval gate   │
+│  code/       project folder access, file tree, diff apply gate, git         │
+│  services/bots.ts  Bot Mode: roster, durable outbox, rooms, attention        │
+│  im/         Telegram (owner bridge + per-bot bindings)                      │
+│  workflows/ scheduled-tasks/  background execution + one shared run queue    │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -63,15 +66,20 @@ src/
                              openai-compatible.ts deepseek.ts zhipu.ts minimax.ts registry.ts
     keys/                    keystore.ts
     services/                chat-service.ts (stream lifecycle, persistence)
-    ipc/                     register.ts + per-domain handler modules
+                             bots.ts bot-prompts.ts (Bot Mode) notify.ts inbox.ts …
+    im/                      telegram.ts bot-channels.ts (per-bot bindings)
+    workflows/ scheduled-tasks/ scheduling/   background execution
+    ipc/                     register.ts (zod-validated handlers)
   preload/      index.ts     contextBridge implementation of UldApi
   renderer/
     index.html
     src/        main.tsx App.tsx
       api/      typed access to window.uld
-      stores/   zustand: settings, providers, conversations, chat, ui
-      components/  Sidebar, ChatView, Composer, Markdown, ModelSelector,
-                   SettingsPanel, Onboarding, CommandPalette, ...
+      stores/   zustand: settings, providers, conversations, chat, ui, bots, …
+                (state interfaces in stores/contracts.ts)
+      components/  Sidebar, chat/ (ChatView, Composer, HandoffCard, …),
+                   bots/ (BotsView, cards), agents/ (AgentProfileForm — the one
+                   editor for agents = bots), settings/, work/, workflows/, home/
       styles/   theme.css (CSS variables, light+dark), app.css
 tests/          unit/ (providers, db, redaction)  integration/
 docs/           ARCHITECTURE.md DB_SCHEMA.md ADDING_A_PROVIDER.md
@@ -113,16 +121,20 @@ messages after the edited user message, re-run. History is linear by design
 ## Data (SQLite, WAL)
 
 See `docs/DB_SCHEMA.md` and `src/main/db/migrations.ts` (single source of
-truth). Tables: `meta, providers, provider_keys, conversations, messages,
-settings, workspaces, workspace_items, code_projects, code_changes,
-tool_permissions, tool_settings, custom_tools`. DB file lives in Electron
-`userData`. Schema version 3 (see DB_SCHEMA.md for the migration list).
+truth, currently **v49**, append-only). Table families: conversations /
+messages / spaces; providers + encrypted keys + tool secrets; tools,
+permissions, standing rules, activity log; workflows, scheduled tasks and
+their run history; agents (= bots), `bot_groups`, `bot_bindings`,
+`a2a_outbox`; memories, skills, documents, knowledge; optimizer +
+experiments; remote devices; inbox state; headless usage ledger. DB file
+lives in Electron `userData`.
 
 ## Implementation status
 
-All planned phases are implemented and covered by the test suite (148 tests;
-both tsconfig projects typecheck clean; `electron-vite build` and a headless
-smoke launch succeed).
+All planned phases are implemented and covered by the test suite (1,300+
+tests; both tsconfig projects typecheck clean; `electron-vite build` and a
+headless smoke launch succeed). Conversation modes collapsed to Chat | Work in
+v24; the surfaces above conversations are Home, Workflows and Bots.
 
 1. **Chat (MVP)** ✅ — provider layer (4 adapters), secure keys, SQLite storage,
    settings, onboarding, dark/light/system theme, streaming UI, model selector
@@ -140,3 +152,9 @@ smoke launch succeed).
    diff and change-block parsers, path-traversal/symlink guards, and the tool
    registry/executor/approval broker; integration tests for the chat flow and
    the multi-round tool loop. `npm run build` typechecks both tsconfig projects.
+5. **Automation & bots** ✅ — workflows (graphs, schedules, watch folders, a
+   loopback trigger endpoint), scheduled prompt tasks, background agent runs
+   and the agent inbox; Bot Mode (v46–v49): a roster of named bots built on
+   agent profiles, canonical chats, durable bot-to-bot deliveries with visible
+   handoffs, group rooms, heartbeats, per-bot Telegram bindings, attention
+   states and deep-linked notifications.
