@@ -20,53 +20,10 @@ import Markdown from '@/components/chat/Markdown'
 import { ConfirmButton } from '@/components/common/controls'
 import { relativeTime } from '@/lib/format'
 import { useBotsStore } from '@/stores/bots'
+import { AVATAR_COLORS, BotAvatarBadge } from './BotAvatarBadge'
 import { useProvidersStore } from '@/stores/providers'
 import { toastError } from '@/stores/ui'
 import './bots.css'
-
-// A small stable palette — the default avatar color is hashed from the name.
-const AVATAR_COLORS = [
-  '#4169d8',
-  '#b85c18',
-  '#2e8b57',
-  '#8b3a9e',
-  '#c0392b',
-  '#0e7490',
-  '#a16207',
-  '#5b21b6',
-  '#be185d',
-  '#166534',
-]
-
-function colorForName(name: string): string {
-  let hash = 0
-  for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)!) | 0
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).slice(0, 2)
-  return parts.map((part) => part.charAt(0).toUpperCase()).join('') || '?'
-}
-
-export function BotAvatarBadge({
-  agent,
-  size = 36,
-}: {
-  agent: Pick<AgentProfile, 'name' | 'avatar'>
-  size?: number
-}): ReactElement {
-  const color = agent.avatar?.color || colorForName(agent.name)
-  return (
-    <span
-      className="bot-avatar"
-      style={{ width: size, height: size, fontSize: size * 0.44, background: color }}
-      aria-hidden="true"
-    >
-      {agent.avatar?.emoji || initials(agent.name)}
-    </span>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Bot editor (compact — the full editor stays in Settings → Agents)

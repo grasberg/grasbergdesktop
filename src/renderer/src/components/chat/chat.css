@@ -2155,3 +2155,129 @@
 .msg-action-active {
   color: var(--accent);
 }
+
+/* -- Bot-to-bot handoff cards (v48) ------------------------------------------- */
+
+.msg-row-handoff {
+  justify-content: center;
+}
+
+.handoff-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-hover);
+  padding: 8px 12px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.handoff-card-out {
+  max-width: 70%;
+  color: var(--text-muted);
+}
+
+.handoff-card-in {
+  max-width: 92%;
+  background: var(--bg-panel);
+  color: inherit;
+}
+
+.handoff-card-in.is-failed {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-panel));
+}
+
+.handoff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.handoff-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-arrow {
+  color: var(--text-muted);
+}
+
+.handoff-status {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.handoff-status.is-queued {
+  animation: handoff-pulse 1.6s ease-in-out infinite;
+}
+
+.handoff-status.is-delivered {
+  color: var(--accent);
+}
+
+.handoff-status.is-replied {
+  color: var(--success);
+}
+
+.handoff-status.is-failed {
+  color: var(--danger);
+}
+
+.handoff-status.is-cancelled {
+  color: var(--text-muted);
+}
+
+@keyframes handoff-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.handoff-body {
+  overflow-wrap: anywhere;
+}
+
+.handoff-body > .markdown > :first-child {
+  margin-top: 0;
+}
+
+.handoff-body > .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.handoff-expand,
+.handoff-copy {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.handoff-copy {
+  margin-left: 4px;
+}
+
+.handoff-expand:hover,
+.handoff-copy:hover {
+  color: var(--text);
+  text-decoration: underline;
+}

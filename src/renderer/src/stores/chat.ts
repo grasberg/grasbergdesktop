@@ -490,6 +490,10 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
             .getState()
             .syncSummary(envelope.conversationId, event.message.content)
           refreshOpenConversation(envelope.conversationId)
+          // Rows written main-side DURING the stream (a bot handoff marker
+          // inserted by a tool call, a queued send) were skipped by
+          // handleConversationsChanged while streaming — pull them now.
+          if (event.type === 'done') get().handleConversationsChanged(envelope.conversationId)
           return
         }
       }

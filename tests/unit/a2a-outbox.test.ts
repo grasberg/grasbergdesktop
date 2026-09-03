@@ -360,6 +360,88 @@ describe('BotService durable deliveries', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Visible handoff rows — both transcripts carry the delivery's status
+// ---------------------------------------------------------------------------
+
+describe('BotService visible handoffs', () => {
+  it('writes a sender-side marker the model never sees, and moves it queued → delivered → replied', async () => {
+    const { scout, editor } = seedPair()
+    const chat = makeChat({ active: true })
+    const { service } = makeService(chat)
+    const scoutChat = service.ensureBotChat(scout)
+    await service.messengerSend(scoutChat.id, 'Editor', 'please review')
+
+    const marker = db.messages.listByConversation(scoutChat.id)[0]
+    expect(marker.role).toBe('system')
+    expect(marker.content).toContain('Sent to 🤖 Editor')
+    expect(marker.handoff).toMatchObject({
+      direction: 'out',
+      fromAgentId: scout,
+      toAgentId: editor,
+      fromName: 'Scout',
+      toName: 'Editor',
+      status: 'queued',
+    })
+    const row = db.a2aOutbox.listForAgent(editor)[0]
+    expect(row.handoffMessageId).toBe(marker.id)
+    expect(marker.handoff!.outboxId).toBe(row.id)
+
+    chat.opts.active = false
+    completeUserTurn(service, editorChatId(editor))
+    await vi.waitFor(() => expect(chat.sends).toHaveLength(1))
+    expect(db.messages.getById(marker.id)!.handoff!.status).toBe('delivered')
+    // The target's incoming turn is tagged too (rendered as a card, still a user row for the model).
+    const incoming = db.messages
+      .listByConversation(editorChatId(editor))
+      .find((m) => m.role === 'user')!
+    expect(incoming.handoff).toMatchObject({ direction: 'in', status: 'delivered', fromName: 'Scout' })
+
+    completeTurn(service, editorChatId(editor))
+    expect(db.messages.getById(marker.id)!.handoff!.status).toBe('replied')
+    const reply = db.messages.listByConversation(scoutChat.id).find((m) => m.role === 'user')!
+    expect(reply.handoff).toMatchObject({ direction: 'reply', status: 'replied', toName: 'Editor' })
+  })
+
+  it('marks the marker and the failure row failed with the typed reason', async () => {
+    const { scout, editor } = seedPair()
+    const chat = makeChat({ throwOnce: Object.assign(new Error('401'), { code: 'auth' }) })
+    const { service } = makeService(chat)
+    const scoutChat = service.ensureBotChat(scout)
+    await service.messengerSend(scoutChat.id, 'Editor', 'hello')
+    await vi.waitFor(() => expect(db.a2aOutbox.listForAgent(editor)[0].status).toBe('failed'))
+    const rows = db.messages.listByConversation(scoutChat.id)
+    const marker = rows.find((m) => m.role === 'system')!
+    expect(marker.handoff).toMatchObject({ status: 'failed', reason: 'provider_auth_or_access' })
+    const failure = rows.find((m) => m.role === 'user')!
+    expect(failure.handoff).toMatchObject({ direction: 'reply', status: 'failed', reason: 'provider_auth_or_access' })
+  })
+
+  it('moves the marker back to queued on restart recovery and tolerates a deleted marker', async () => {
+    const { scout, editor } = seedPair()
+    const a = makeService(makeChat({ assistantStatus: 'streaming' }))
+    const scoutChat = a.service.ensureBotChat(scout)
+    await a.service.messengerSend(scoutChat.id, 'Editor', 'ping')
+    await vi.waitFor(() => expect(inFlightOf(a.service).size).toBe(1))
+    const marker = db.messages.listByConversation(scoutChat.id).find((m) => m.role === 'system')!
+    expect(marker.handoff!.status).toBe('delivered')
+
+    db.messages.markDanglingStreamingAsStopped()
+    const b = makeService(makeChat({ active: true }))
+    expect(b.service.recover().requeued).toBe(1)
+    expect(db.messages.getById(marker.id)!.handoff!.status).toBe('queued')
+
+    // Edit-and-rerun truncation removed the marker: the row still settles.
+    db.messages.deleteById(marker.id)
+    const row = db.a2aOutbox.listForAgent(editor)[0]
+    const profile = db.agents.getById(editor)!
+    db.agents.remove(editor)
+    b.service.cleanupDeletedAgent(profile)
+    expect(db.a2aOutbox.getById(row.id)!.status).toBe('failed')
+    expect(db.messages.listByConversation(scoutChat.id).some((m) => m.role === 'system')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Restart recovery — the reason the outbox exists
 // ---------------------------------------------------------------------------
 

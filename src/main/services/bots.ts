@@ -40,6 +40,7 @@ import {
   botSlug,
   formatBotReply,
   formatDeliveryFailure,
+  formatHandoffMarker,
   formatIncomingBotMessage,
   formatIncomingEvent,
   GROUP_MAX_MEMBERS,
@@ -359,16 +360,40 @@ export class BotService {
         'instead of messaging further.'
       )
     }
-    db.a2aOutbox.insert({
-      id: randomUUID(),
-      fromAgentId: senderAgent.id,
-      toAgentId: targetAgent.id,
-      conversationId: senderConversationId,
-      // Data, never instructions: stored verbatim except for chat-template
-      // token literals (the same posture as fetched web content, v47).
-      body: sanitizeUntrusted(message),
-      hop,
+    const outboxId = randomUUID()
+    // Data, never instructions: stored verbatim except for chat-template
+    // token literals (the same posture as fetched web content, v47).
+    const body = sanitizeUntrusted(message)
+    db.driver.transaction(() => {
+      // The sender-side marker: a system row (invisible to the model — the
+      // tool result already told it) whose card follows the row's status.
+      const marker = this.insertMessage(
+        senderConversationId,
+        'system',
+        formatHandoffMarker(targetAgent.name, body),
+        senderAgent.id,
+        {
+          outboxId,
+          direction: 'out',
+          fromAgentId: senderAgent.id,
+          toAgentId: targetAgent.id,
+          fromName: senderAgent.name,
+          toName: targetAgent.name,
+          status: 'queued',
+          updatedAt: Date.now(),
+        }
+      )
+      db.a2aOutbox.insert({
+        id: outboxId,
+        fromAgentId: senderAgent.id,
+        toAgentId: targetAgent.id,
+        conversationId: senderConversationId,
+        body,
+        hop,
+        handoffMessageId: marker.id,
+      })
     })
+    this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: senderConversationId })
     this.botsChanged({ agentId: targetAgent.id })
     // Fire and forget: the sender's turn continues; delivery pumps async.
     void this.pump(targetAgent.id)
@@ -472,9 +497,14 @@ export class BotService {
     }
   }
 
-  /** Hook for the delivered turn's persisted user message (handoff chrome, PR 2). */
-  private onDelivered(_entry: A2aOutboxEntry, _userMessage: Message | null): void {
-    // Intentionally empty in v48 core; the visible-handoff layer fills it in.
+  /** The delivered turn: tag the target's incoming row, move the sender's marker. */
+  private onDelivered(entry: A2aOutboxEntry, userMessage: Message | null): void {
+    if (userMessage) {
+      this.deps.db.messages.update(userMessage.id, {
+        handoff: this.handoffFor(entry, 'in', 'delivered'),
+      })
+    }
+    this.updateMarker(entry, 'delivered')
   }
 
   /**
@@ -550,7 +580,13 @@ export class BotService {
     db.driver.transaction(() => {
       db.a2aOutbox.markReplied(entry.id)
       if (senderChat) {
-        this.insertMessage(senderChat.id, 'user', formatBotReply(targetName, reply), entry.toAgentId)
+        this.insertMessage(
+          senderChat.id,
+          'user',
+          formatBotReply(targetName, reply),
+          entry.toAgentId,
+          this.handoffFor(entry, 'reply', 'replied')
+        )
       }
       this.onSettled({ ...entry, status: 'replied' }, null)
     })
@@ -597,7 +633,8 @@ export class BotService {
           senderChat.id,
           'user',
           formatDeliveryFailure(targetName, reason, detail),
-          entry.toAgentId
+          entry.toAgentId,
+          this.handoffFor(entry, 'reply', 'failed', reason)
         )
       }
       this.onSettled({ ...entry, status: 'failed' }, reason)
@@ -613,9 +650,44 @@ export class BotService {
     })
   }
 
-  /** Hook for a settled row (handoff status chrome, PR 2). */
-  private onSettled(_entry: A2aOutboxEntry, _reason: string | null): void {
-    // Intentionally empty in v48 core; the visible-handoff layer fills it in.
+  /** A row changed status: the sender-side marker follows it. */
+  private onSettled(entry: A2aOutboxEntry, reason: string | null): void {
+    this.updateMarker(entry, entry.status, reason)
+  }
+
+  private handoffFor(
+    entry: A2aOutboxEntry,
+    direction: MessageHandoff['direction'],
+    status: MessageHandoff['status'],
+    reason?: string | null
+  ): MessageHandoff {
+    const db = this.deps.db
+    return {
+      outboxId: entry.id,
+      direction,
+      fromAgentId: entry.fromAgentId,
+      toAgentId: entry.toAgentId,
+      fromName: entry.fromAgentId ? (db.agents.getById(entry.fromAgentId)?.name ?? 'unknown bot') : '',
+      toName: db.agents.getById(entry.toAgentId)?.name ?? 'unknown bot',
+      status,
+      reason: reason ?? null,
+      updatedAt: Date.now(),
+    }
+  }
+
+  /**
+   * Moves the sender-side marker to the row's current status. Tolerates a
+   * missing marker (edit-and-rerun truncation deletes rows after the edited
+   * turn) — the outbox row itself keeps working.
+   */
+  private updateMarker(entry: A2aOutboxEntry, status: MessageHandoff['status'], reason?: string | null): void {
+    if (!entry.handoffMessageId || !entry.conversationId) return
+    const marker = this.deps.db.messages.getById(entry.handoffMessageId)
+    if (!marker?.handoff) return
+    this.deps.db.messages.update(marker.id, {
+      handoff: { ...marker.handoff, status, reason: reason ?? null, updatedAt: Date.now() },
+    })
+    this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: entry.conversationId })
   }
 
   /**

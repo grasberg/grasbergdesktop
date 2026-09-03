@@ -404,7 +404,9 @@ export default function ChatView(): ReactElement {
     if (atBottom) scrollToBottom(false)
   }, [messages, atBottom, scrollToBottom])
 
-  const visibleMessages = messages.filter((m) => m.role !== 'system')
+  // System rows are transcript plumbing (compaction notes) — except a bot
+  // handoff marker (v48), which renders as a card.
+  const visibleMessages = messages.filter((m) => m.role !== 'system' || m.handoff)
 
   return (
     <div className="chat-view">

@@ -228,6 +228,14 @@ export function formatIncomingEvent(body: string): string {
   return `Event: ${body}`
 }
 
+/**
+ * The sender-side handoff marker (a system row the model never sees; the
+ * visible card follows the outbox row's status).
+ */
+export function formatHandoffMarker(targetName: string, message: string): string {
+  return `Sent to 🤖 ${targetName} (@${botSlug(targetName)}): ${message}`
+}
+
 /** A teammate's reply as persisted back into the sender's canonical chat. */
 export function formatBotReply(targetName: string, reply: string): string {
   return `Reply from 🤖 ${targetName} (@${botSlug(targetName)}): ${reply}`

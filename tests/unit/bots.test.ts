@@ -282,11 +282,13 @@ describe('BotService messaging', () => {
     const inFlightId = await getInFlightAssistantId(service, targetChatId)
     service.handleCompletion(targetConv, { ...assistant, id: inFlightId })
 
+    // The sender's chat: the handoff marker (system, invisible to the model)
+    // plus the routed reply as a user-role row.
     const senderMessages = db.messages.listByConversation(senderChat.id)
-    expect(senderMessages).toHaveLength(1)
-    expect(senderMessages[0].role).toBe('user')
-    expect(senderMessages[0].content).toContain('Reply from 🤖 Editor (@editor):')
-    expect(senderMessages[0].content).toContain('Looks good, ship it.')
+    expect(senderMessages.map((m) => m.role)).toEqual(['system', 'user'])
+    expect(senderMessages[0].handoff?.status).toBe('replied')
+    expect(senderMessages[1].content).toContain('Reply from 🤖 Editor (@editor):')
+    expect(senderMessages[1].content).toContain('Looks good, ship it.')
     expect(notifications.some((n) => n.title.includes('Editor replied'))).toBe(true)
   })
 

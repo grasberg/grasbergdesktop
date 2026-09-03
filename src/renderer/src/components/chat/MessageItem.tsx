@@ -23,6 +23,7 @@ import { sttReady, useVoiceStore } from '@/stores/voice'
 import GeneratedImage from './GeneratedImage'
 import Markdown from './Markdown'
 import ModelPickList from './ModelPickList'
+import HandoffCard from './HandoffCard'
 import ResearchProgress from './ResearchProgress'
 import ToolCallCard from './ToolCallCard'
 import './chat.css'
@@ -800,6 +801,8 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
 }
 
 function MessageItem({ message, isLast }: MessageItemProps): ReactElement {
+  // Bot-to-bot handoff rows (v48) render as cards whatever their role.
+  if (message.handoff) return <HandoffCard message={message} />
   if (message.role === 'user') return <UserMessage message={message} />
   if (message.role === 'assistant') return <AssistantMessage message={message} isLast={isLast} />
   return (
