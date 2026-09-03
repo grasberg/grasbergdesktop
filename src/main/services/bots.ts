@@ -29,6 +29,8 @@ import type {
   BotGroupActivation,
   BotRoster,
   Conversation,
+  DelegateFinishedInfo,
+  DelegateHandoffInfo,
   Message,
   MessageHandoff,
   ProviderErrorCode,
@@ -40,6 +42,8 @@ import {
   buildHeartbeatPrompt,
   botSlug,
   formatBotReply,
+  formatDelegationMarker,
+  formatDelegationRequest,
   formatDeliveryFailure,
   formatHandoffMarker,
   formatIncomingBotMessage,
@@ -71,6 +75,8 @@ const RETRY_DELAY_MS = 10_000
 const MAX_DELIVERY_ATTEMPTS = 2
 /** Settled outbox rows older than this are pruned at boot. */
 const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60_000
+/** A mirrored delegation result is capped so it cannot swamp the bot's context. */
+const DELEGATE_MIRROR_MAX_CHARS = 40_000
 /** "Wrote within the last 90 s" half of the active-now strip (Hermes). */
 const ACTIVE_RECENT_MS = 90_000
 /** Heartbeat/auto-compact maintenance tick. */
@@ -1068,6 +1074,103 @@ export class BotService {
       this.botsChanged({ agentId: agent.id })
     } catch (e) {
       console.error('[bots] routine mirror failed:', errorMessageOf(e))
+    }
+  }
+
+  // -- delegate handoffs (v49) ----------------------------------------------------
+
+  /** In-flight delegations by key: the caller marker + the bot chat to mirror into. */
+  private readonly pendingDelegates = new Map<
+    string,
+    { markerId: string | null; targetChatId: string }
+  >()
+
+  /**
+   * delegate(agent=…) reached a bot: the request shows up in the bot's own
+   * chat and the caller's transcript gets a handoff marker — a delegation is
+   * a handoff like any other, not an invisible sub-process. Never throws.
+   */
+  delegateStarted(info: DelegateHandoffInfo): void {
+    try {
+      // A bot delegating to itself is already in that transcript.
+      if (info.callerAgentId === info.agentId) return
+      const db = this.deps.db
+      const chat = this.ensureBotChat(info.agentId)
+      const caller = info.callerAgentId ? db.agents.getById(info.callerAgentId) : null
+      const callerLabel = caller
+        ? `🤖 ${caller.name} (@${botSlug(caller.name)})`
+        : `the user from "${info.callerTitle}"`
+      const handoff: MessageHandoff = {
+        outboxId: info.delegateKey,
+        direction: 'delegate',
+        fromAgentId: info.callerAgentId,
+        toAgentId: info.agentId,
+        fromName: caller?.name ?? '',
+        toName: info.agentName,
+        status: 'delivered',
+        reason: null,
+        updatedAt: Date.now(),
+      }
+      this.insertMessage(
+        chat.id,
+        'user',
+        formatDelegationRequest(callerLabel, info.task),
+        undefined,
+        handoff
+      )
+      let markerId: string | null = null
+      if (db.conversations.getById(info.callerConversationId)) {
+        markerId = this.insertMessage(
+          info.callerConversationId,
+          'system',
+          formatDelegationMarker(info.agentName, info.task),
+          info.callerAgentId ?? undefined,
+          handoff
+        ).id
+        this.deps.broadcast(CHANNELS.conversationsChanged, {
+          conversationId: info.callerConversationId,
+        })
+      }
+      this.pendingDelegates.set(info.delegateKey, { markerId, targetChatId: chat.id })
+      this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: chat.id })
+      this.botsChanged({ agentId: info.agentId })
+    } catch (e) {
+      console.error('[bots] delegate mirror failed:', errorMessageOf(e))
+    }
+  }
+
+  /** The delegation ended: the result lands in the bot's chat, the caller marker settles. */
+  delegateFinished(info: DelegateFinishedInfo): void {
+    try {
+      if (info.callerAgentId === info.agentId) return
+      const db = this.deps.db
+      const pending = this.pendingDelegates.get(info.delegateKey)
+      this.pendingDelegates.delete(info.delegateKey)
+      const known = pending ? db.conversations.getById(pending.targetChatId) : null
+      const chat = known ?? this.ensureBotChat(info.agentId)
+      const status: MessageHandoff['status'] =
+        info.status === 'done' ? 'replied' : info.status === 'error' ? 'failed' : 'cancelled'
+      const body = info.result.slice(0, DELEGATE_MIRROR_MAX_CHARS)
+      const text =
+        info.status === 'done'
+          ? body
+          : `The delegation ${info.status === 'error' ? 'failed' : 'was stopped'}: ${body}`
+      this.insertMessage(chat.id, 'assistant', text, info.agentId)
+      if (pending?.markerId) {
+        const marker = db.messages.getById(pending.markerId)
+        if (marker?.handoff) {
+          db.messages.update(marker.id, {
+            handoff: { ...marker.handoff, status, updatedAt: Date.now() },
+          })
+          this.deps.broadcast(CHANNELS.conversationsChanged, {
+            conversationId: info.callerConversationId,
+          })
+        }
+      }
+      this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: chat.id })
+      this.botsChanged({ agentId: info.agentId })
+    } catch (e) {
+      console.error('[bots] delegate mirror failed:', errorMessageOf(e))
     }
   }
 

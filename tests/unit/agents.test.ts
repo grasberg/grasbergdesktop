@@ -181,7 +181,9 @@ it('runDelegate(agent=…) uses the profile persona, model and restricted toolse
   // profile's list (read_file is offered nowhere and refused when called).
   const first = adapter.chatRequests[0]
   expect(first.modelId).toBe('cheap-model')
-  expect(first.messages[0]).toMatchObject({ role: 'system', content: 'PERSONA: careful researcher.' })
+  // The persona leads the system message; the bot's memory section (v49) follows it.
+  expect(first.messages[0].role).toBe('system')
+  expect(String(first.messages[0].content)).toContain('PERSONA: careful researcher.')
   expect(first.tools?.map((t) => t.name)).toEqual(['web_search'])
   expect(execute).toHaveBeenCalledTimes(1)
   const second = adapter.chatRequests[1]

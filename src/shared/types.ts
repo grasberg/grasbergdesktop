@@ -396,9 +396,12 @@ export interface MessageHandoff {
   /**
    * 'out' = the sender-side marker (system row, status follows the outbox row);
    * 'in' = the incoming turn in the target's chat; 'reply' = the reply or
-   * failure row in the sender's chat.
+   * failure row in the sender's chat; 'delegate' = a delegate(agent=…) run
+   * mirrored into the bot's chat (v49) — the caller's marker is the system
+   * row, the bot's incoming request the user row; `outboxId` then holds the
+   * delegate key.
    */
-  direction: 'out' | 'in' | 'reply'
+  direction: 'out' | 'in' | 'reply' | 'delegate'
   /** Null = the app itself woke the bot (event/routine), not another bot. */
   fromAgentId: string | null
   toAgentId: string
@@ -2205,6 +2208,46 @@ export type BotAttention = 'idle' | 'working' | 'needs_you' | 'unread'
 export interface BotsChangedEvent {
   agentId?: string | null
   groupId?: string | null
+}
+
+/**
+ * A delegate(agent=…) run targeting a bot profile (v49): mirrored into the
+ * bot's canonical chat and marked in the caller's transcript.
+ */
+export interface DelegateHandoffInfo {
+  /** Correlates started/finished; the mirrored rows carry it as their handoff id. */
+  delegateKey: string
+  agentId: string
+  agentName: string
+  callerConversationId: string
+  /** The calling bot when the delegation came from a bot chat; null = the user's conversation. */
+  callerAgentId: string | null
+  callerTitle: string
+  task: string
+  background: boolean
+  /** The agent_runs row for a background delegation, else null. */
+  runId: string | null
+}
+
+export interface DelegateFinishedInfo extends DelegateHandoffInfo {
+  status: 'done' | 'error' | 'stopped'
+  result: string
+}
+
+/** Estimated spend attributable to one bot over a window (v49). */
+export interface BotSpendWindow {
+  sinceMs: number
+  /** Priced spend only: the bot's canonical-chat messages + headless runs stamped with its id. */
+  costUsd: number
+  /** Usage rows that could not be priced (excluded from the estimate). */
+  unpricedCount: number
+}
+
+export interface BotUsageSummary {
+  agentId: string
+  today: BotSpendWindow
+  week: BotSpendWindow
+  month: BotSpendWindow
 }
 
 // ---------------------------------------------------------------------------

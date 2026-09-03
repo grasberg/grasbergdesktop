@@ -44,6 +44,11 @@ export interface HeadlessUsageRepository {
   globalCost(sinceMs: number): { costUsd: number; unpricedCount: number }
   /** Per-run-kind totals for the Settings → Usage background-spend section. */
   summarySince(sinceMs: number): HeadlessUsageSummaryEntry[]
+  /**
+   * One agent profile's headless spend since `sinceMs` (rows stamped with
+   * its agent_id, v49), with the same live-conversation dedupe as globalCost.
+   */
+  agentCost(agentId: string, sinceMs: number): { costUsd: number; unpricedCount: number }
 }
 
 interface CostRow {
@@ -114,6 +119,20 @@ export function createHeadlessUsageRepository(driver: SqliteDriver): HeadlessUsa
                     AND ref_id IS NOT NULL
                     AND ref_id IN (SELECT id FROM conversations))`,
         [sinceMs]
+      )
+      return { costUsd: row?.cost_usd ?? 0, unpricedCount: row?.unpriced ?? 0 }
+    },
+
+    agentCost(agentId, sinceMs) {
+      const row = driver.get<CostRow>(
+        `SELECT SUM(est_cost_usd) AS cost_usd,
+                SUM(CASE WHEN est_cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced
+         FROM headless_usage
+         WHERE agent_id = ? AND created_at >= ?
+           AND NOT (run_kind = 'other'
+                    AND ref_id IS NOT NULL
+                    AND ref_id IN (SELECT id FROM conversations))`,
+        [agentId, sinceMs]
       )
       return { costUsd: row?.cost_usd ?? 0, unpricedCount: row?.unpriced ?? 0 }
     },

@@ -619,3 +619,98 @@ describe('BotService roster attention (v49)', () => {
     expect(isUnread(11, 10)).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Delegate handoffs (v49): delegate(agent=…) mirrored into the bot's chat
+// ---------------------------------------------------------------------------
+
+describe('BotService delegate handoffs (v49)', () => {
+  function delegateInfo(
+    agentId: string,
+    callerConversationId: string,
+    callerAgentId: string | null,
+    key = randomUUID()
+  ): {
+    delegateKey: string
+    agentId: string
+    agentName: string
+    callerConversationId: string
+    callerAgentId: string | null
+    callerTitle: string
+    task: string
+    background: boolean
+    runId: string | null
+  } {
+    return {
+      delegateKey: key,
+      agentId,
+      agentName: db.agents.getById(agentId)!.name,
+      callerConversationId,
+      callerAgentId,
+      callerTitle: 'Plain chat',
+      task: 'proofread the intro',
+      background: false,
+      runId: null,
+    }
+  }
+
+  it('mirrors a delegation into the bot chat and marks the caller transcript; the result settles both', () => {
+    const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
+    const caller = db.conversations.create({ mode: 'chat', title: 'Plain chat' })
+    const { service } = makeService(makeFakeChat())
+    const info = delegateInfo(editor.id, caller.id, null)
+
+    service.delegateStarted(info)
+    const chatId = db.agents.getById(editor.id)!.chatConversationId!
+    const request = db.messages.listByConversation(chatId)[0]
+    expect(request.role).toBe('user')
+    expect(request.content).toContain('Delegated by the user from "Plain chat": proofread the intro')
+    expect(request.handoff).toMatchObject({ direction: 'delegate', status: 'delivered', toName: 'Editor' })
+    const marker = db.messages.listByConversation(caller.id)[0]
+    expect(marker.role).toBe('system')
+    expect(marker.content).toContain('Delegated to 🤖 Editor')
+    expect(marker.handoff?.status).toBe('delivered')
+
+    service.delegateFinished({ ...info, status: 'done', result: 'Fixed the intro.' })
+    const rows = db.messages.listByConversation(chatId)
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toMatchObject({ role: 'assistant', agentId: editor.id, content: 'Fixed the intro.' })
+    expect(db.messages.getById(marker.id)!.handoff!.status).toBe('replied')
+  })
+
+  it('names a bot caller, mirrors a failure as an error row, and skips self-delegation', () => {
+    const scout = db.agents.create({ name: 'Scout', systemPrompt: 'p' })
+    const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
+    const { service } = makeService(makeFakeChat())
+    const scoutChat = service.ensureBotChat(scout.id)
+
+    const info = delegateInfo(editor.id, scoutChat.id, scout.id)
+    service.delegateStarted(info)
+    const chatId = db.agents.getById(editor.id)!.chatConversationId!
+    expect(db.messages.listByConversation(chatId)[0].content).toContain('Delegated by 🤖 Scout (@scout)')
+    service.delegateFinished({ ...info, status: 'error', result: 'boom' })
+    const last = db.messages.listByConversation(chatId).at(-1)!
+    expect(last.content).toContain('The delegation failed: boom')
+    expect(
+      db.messages.listByConversation(scoutChat.id).find((m) => m.role === 'system')!.handoff!.status
+    ).toBe('failed')
+
+    // Self-delegation: nothing to mirror — the transcript already belongs to that bot.
+    const before = db.messages.listByConversation(scoutChat.id).length
+    service.delegateStarted(delegateInfo(scout.id, scoutChat.id, scout.id))
+    expect(db.messages.listByConversation(scoutChat.id)).toHaveLength(before)
+  })
+
+  it('finishing an unknown key still mirrors the result', () => {
+    const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
+    const caller = db.conversations.create({ mode: 'chat', title: 'Plain chat' })
+    const { service } = makeService(makeFakeChat())
+    service.delegateFinished({
+      ...delegateInfo(editor.id, caller.id, null),
+      status: 'stopped',
+      result: 'halfway',
+    })
+    const chatId = db.agents.getById(editor.id)!.chatConversationId!
+    expect(db.messages.listByConversation(chatId).at(-1)!.content).toContain('was stopped: halfway')
+  })
+})

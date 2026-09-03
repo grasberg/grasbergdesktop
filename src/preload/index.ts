@@ -357,6 +357,7 @@ const api: UldApi = {
     openChat: (agentId) => ipcRenderer.invoke(CHANNELS.botsOpenChat, agentId),
     outbox: (agentId) => ipcRenderer.invoke(CHANNELS.botsOutbox, agentId),
     markSeen: (agentId) => ipcRenderer.invoke(CHANNELS.botsMarkSeen, agentId),
+    usage: (agentId) => ipcRenderer.invoke(CHANNELS.botsUsage, agentId),
     createGroup: (input) => ipcRenderer.invoke(CHANNELS.botGroupCreate, input),
     updateGroup: (id, patch) => ipcRenderer.invoke(CHANNELS.botGroupUpdate, id, patch),
     deleteGroup: (id) => ipcRenderer.invoke(CHANNELS.botGroupDelete, id),

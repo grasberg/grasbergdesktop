@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   Conversation,
+  DelegateFinishedInfo,
+  DelegateHandoffInfo,
   ModelInfo,
   TestConnectionResult,
   ToolCallRecord,
@@ -184,5 +186,110 @@ describe('ChatService background delegate runs', () => {
     const stopped = db.agentPlatform.runsList(conversation.id)[0]
     expect(stopped.status).toBe('stopped')
     expect(stopped.finishedAt).not.toBeNull()
+  })
+})
+
+describe('delegate → bot handoffs (v49)', () => {
+  it('fires started/finished for a named agent, runs with its memories, and records spend under it', async () => {
+    const conversation = seed()
+    const bot = db.agents.create({ name: 'Editor', systemPrompt: 'You edit.' })
+    db.memories.create({ title: 'style', content: 'Oxford comma', agentId: bot.id })
+    db.memories.create({ title: 'user-language', content: 'Swedish' })
+    const adapter = new DelegateAdapter([
+      {
+        text: 'Edited.',
+        toolCalls: [],
+        finishReason: 'stop',
+        usage: { promptTokens: 10, completionTokens: 5 },
+      },
+    ])
+    const started: DelegateHandoffInfo[] = []
+    const finished: DelegateFinishedInfo[] = []
+    const service = new ChatService(db, () => undefined, {
+      resolveAdapter: () => adapter,
+      onDelegateStarted: (info) => started.push(info),
+      onDelegateFinished: (info) => finished.push(info),
+    })
+
+    const result = await service.runDelegate('polish this', ctx(conversation), undefined, 'Editor')
+    expect(result).toContain('Edited.')
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({
+      agentId: bot.id,
+      agentName: 'Editor',
+      callerConversationId: conversation.id,
+      callerAgentId: null,
+      task: 'polish this',
+      background: false,
+      runId: null,
+    })
+    expect(finished).toHaveLength(1)
+    expect(finished[0]).toMatchObject({ delegateKey: started[0].delegateKey, status: 'done' })
+    expect(finished[0].result).toContain('Edited.')
+    // Runs AS the bot: its own memories plus the shared pool.
+    const systemContent = adapter.chatRequests[0].messages[0].content
+    const system = typeof systemContent === 'string' ? systemContent : ''
+    expect(system).toContain('You edit.')
+    expect(system).toContain('Oxford comma')
+    expect(system).toContain('Swedish')
+    // Spend is attributed to the bot in the ledger.
+    const rows = db.driver.all<{ agent_id: string | null; run_kind: string }>(
+      'SELECT agent_id, run_kind FROM headless_usage'
+    )
+    expect(rows).toEqual([{ agent_id: bot.id, run_kind: 'agent_run' }])
+  })
+
+  it('reports stopped on an aborted signal and error when the provider fails; no hooks without a profile', async () => {
+    const conversation = seed()
+    db.agents.create({ name: 'Editor', systemPrompt: 'You edit.' })
+    const finished: DelegateFinishedInfo[] = []
+    const adapter = new DelegateAdapter([{ text: 'never', toolCalls: [], finishReason: 'stop' }])
+    const service = new ChatService(db, () => undefined, {
+      resolveAdapter: () => adapter,
+      onDelegateFinished: (info) => finished.push(info),
+    })
+
+    const aborted = new AbortController()
+    aborted.abort()
+    expect(await service.runDelegate('x', ctx(conversation), aborted.signal, 'Editor')).toContain(
+      'stopped'
+    )
+    expect(finished.at(-1)?.status).toBe('stopped')
+
+    const failing = new DelegateAdapter([])
+    failing.chat = async () => {
+      throw new Error('boom')
+    }
+    const failingService = new ChatService(db, () => undefined, {
+      resolveAdapter: () => failing,
+      onDelegateFinished: (info) => finished.push(info),
+    })
+    expect(await failingService.runDelegate('x', ctx(conversation), undefined, 'Editor')).toContain(
+      'Delegation failed'
+    )
+    expect(finished.at(-1)?.status).toBe('error')
+
+    // The anonymous sub-agent (no agent name) is not a handoff.
+    await service.runDelegate('plain', ctx(conversation))
+    expect(finished).toHaveLength(2)
+  })
+
+  it('a background delegation carries the agent_runs id and the background flag', async () => {
+    const conversation = seed()
+    const bot = db.agents.create({ name: 'Editor', systemPrompt: 'You edit.' })
+    const adapter = new DelegateAdapter([{ text: 'Done.', toolCalls: [], finishReason: 'stop' }])
+    const started: DelegateHandoffInfo[] = []
+    const finished: DelegateFinishedInfo[] = []
+    const service = new ChatService(db, () => undefined, {
+      resolveAdapter: () => adapter,
+      onDelegateStarted: (info) => started.push(info),
+      onDelegateFinished: (info) => finished.push(info),
+    })
+    service.startDelegateBackground('proofread', ctx(conversation), 'Editor')
+    await vi.waitFor(() => expect(finished).toHaveLength(1))
+    const run = db.agentPlatform.runsList()[0]
+    expect(run.agentId).toBe(bot.id)
+    expect(started[0]).toMatchObject({ background: true, runId: run.id })
+    expect(finished[0].status).toBe('done')
   })
 })

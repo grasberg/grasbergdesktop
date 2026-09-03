@@ -22,8 +22,18 @@ const STATUS_LABEL: Record<A2aOutboxStatus, string> = {
   cancelled: 'Cancelled',
 }
 
+/** A delegation is a run, not a message: its states read as work. */
+const DELEGATE_STATUS_LABEL: Record<A2aOutboxStatus, string> = {
+  queued: 'Queued',
+  delivered: 'Working…',
+  replied: 'Done',
+  failed: 'Failed',
+  cancelled: 'Stopped',
+}
+
 /** The persisted rows keep a model-facing prefix; the card shows the body only. */
-const PREFIX = /^(?:Message from|Reply from|Sent to|Message to) 🤖 [^:]+?(?: failed \([^)]*\))?: /u
+const PREFIX =
+  /^(?:Message from|Reply from|Sent to|Message to|Delegated to|Delegated by) (?:🤖 )?[^:]+?(?: failed \([^)]*\))?: /u
 
 export function stripHandoffPrefix(content: string): string {
   return content.replace(PREFIX, '')
@@ -51,9 +61,10 @@ function useIdentities(handoff: MessageHandoff): { from: Identity; to: Identity 
 
 function StatusPill({ handoff }: { handoff: MessageHandoff }): ReactElement {
   const reason = handoff.status === 'failed' && handoff.reason ? ` · ${handoff.reason}` : ''
+  const labels = handoff.direction === 'delegate' ? DELEGATE_STATUS_LABEL : STATUS_LABEL
   return (
     <span className={`handoff-status is-${handoff.status}`}>
-      {STATUS_LABEL[handoff.status]}
+      {labels[handoff.status]}
       {reason}
     </span>
   )
@@ -81,17 +92,25 @@ export default function HandoffCard({ message }: { message: Message }): ReactEle
   const body = stripHandoffPrefix(message.content)
   const [copied, copy] = useCopied()
 
-  if (handoff.direction === 'out') {
+  const delegate = handoff.direction === 'delegate'
+  // The caller-side marker: a system row for outbox deliveries and delegations alike.
+  if (handoff.direction === 'out' || (delegate && message.role === 'system')) {
     return (
       <div className="msg-row msg-row-meta msg-row-handoff">
         <div className="handoff-card handoff-card-out">
           <div className="handoff-head">
-            <BotAvatarBadge agent={from} size={20} />
-            <span className="handoff-arrow" aria-hidden="true">
-              →
-            </span>
+            {handoff.fromAgentId ? (
+              <>
+                <BotAvatarBadge agent={from} size={20} />
+                <span className="handoff-arrow" aria-hidden="true">
+                  →
+                </span>
+              </>
+            ) : null}
             <BotAvatarBadge agent={to} size={20} />
-            <span className="handoff-title">Sent to {to.name}</span>
+            <span className="handoff-title">
+              {delegate ? 'Delegated to' : 'Sent to'} {to.name}
+            </span>
             <StatusPill handoff={handoff} />
           </div>
           <Body content={body} />
@@ -100,13 +119,19 @@ export default function HandoffCard({ message }: { message: Message }): ReactEle
     )
   }
 
-  const incoming = handoff.direction === 'in'
-  const speaker = incoming ? from : to
-  const title = incoming
-    ? `${from.name} sent a message`
-    : handoff.status === 'failed'
-      ? `Message to ${to.name} failed`
-      : `${to.name} replied`
+  const incoming = handoff.direction === 'in' || delegate
+  const speaker = incoming
+    ? handoff.fromAgentId
+      ? from
+      : { name: 'You', avatar: null }
+    : to
+  const title = delegate
+    ? `Delegated by ${handoff.fromAgentId ? from.name : 'the user'}`
+    : incoming
+      ? `${from.name} sent a message`
+      : handoff.status === 'failed'
+        ? `Message to ${to.name} failed`
+        : `${to.name} replied`
   return (
     <div className="msg-row msg-row-assistant msg-row-handoff-in">
       <div className={`handoff-card handoff-card-in${handoff.status === 'failed' ? ' is-failed' : ''}`}>

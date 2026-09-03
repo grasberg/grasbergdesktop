@@ -236,6 +236,16 @@ export function formatHandoffMarker(targetName: string, message: string): string
   return `Sent to 🤖 ${targetName} (@${botSlug(targetName)}): ${message}`
 }
 
+/** A delegate(agent=…) request as persisted into the bot's canonical chat (v49). */
+export function formatDelegationRequest(callerLabel: string, task: string): string {
+  return `Delegated by ${callerLabel}: ${task}`
+}
+
+/** The caller-side marker of a delegation (system row; its card follows the run). */
+export function formatDelegationMarker(targetName: string, task: string): string {
+  return `Delegated to 🤖 ${targetName} (@${botSlug(targetName)}): ${task}`
+}
+
 /** A teammate's reply as persisted back into the sender's canonical chat. */
 export function formatBotReply(targetName: string, reply: string): string {
   return `Reply from 🤖 ${targetName} (@${botSlug(targetName)}): ${reply}`

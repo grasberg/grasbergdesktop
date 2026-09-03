@@ -7,7 +7,8 @@
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { AgentProfile, AgentProfileInput } from '@shared/types'
+import type { AgentProfile, AgentProfileInput, BotUsageSummary } from '@shared/types'
+import { formatCost } from '@shared/pricing'
 import { unwrap } from '@/api/uld'
 import BindingCard from '@/components/bots/BindingCard'
 import { AVATAR_COLORS, BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
@@ -129,6 +130,47 @@ function toInput(form: FormState): AgentProfileInput {
     reset: dailyHour !== null || idleMinutes !== null ? { dailyHour, idleMinutes } : null,
     messageAllow: form.restrictMessaging ? form.messageAllow : null,
   }
+}
+
+/** Estimated spend attributable to the bot (its chat + runs stamped with its id). */
+function BotSpendCard({ agent }: { agent: AgentProfile }): ReactElement | null {
+  const [usage, setUsage] = useState<BotUsageSummary | null>(null)
+  useEffect(() => {
+    let alive = true
+    const load = (): void => {
+      void window.uld.bots.usage(agent.id).then((res) => {
+        if (alive && res.ok) setUsage(res.data)
+      })
+    }
+    load()
+    const unsubscribe = window.uld.bots.onChanged(() => load())
+    return () => {
+      alive = false
+      unsubscribe()
+    }
+  }, [agent.id])
+  if (!usage) return null
+  const unpriced = usage.month.unpricedCount
+  return (
+    <div className="bot-spend">
+      <h4>Estimated spend</h4>
+      <div className="bot-spend-row">
+        <span>
+          <strong>{formatCost(usage.today.costUsd)}</strong> today
+        </span>
+        <span>
+          <strong>{formatCost(usage.week.costUsd)}</strong> / 7 d
+        </span>
+        <span>
+          <strong>{formatCost(usage.month.costUsd)}</strong> / 30 d
+        </span>
+      </div>
+      <p className="bot-form-hint">
+        Its chat plus routines, room turns and delegations run as this bot; estimates only
+        {unpriced > 0 ? ` — ${unpriced} unpriced run${unpriced === 1 ? '' : 's'} excluded` : ''}.
+      </p>
+    </div>
+  )
 }
 
 export default function AgentProfileForm({
@@ -434,6 +476,7 @@ export default function AgentProfileForm({
 
       {editing ? <BindingCard agent={editing} /> : null}
       {editing ? <DeliveriesCard agent={editing} /> : null}
+      {editing ? <BotSpendCard agent={editing} /> : null}
 
       <div className="bot-form-actions">
         <button

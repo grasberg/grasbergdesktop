@@ -289,3 +289,31 @@
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* -- Estimated spend card (v49) ----------------------------------------------- */
+
+.bot-spend {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-panel);
+}
+
+.bot-spend h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-spend-row {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.bot-spend-row strong {
+  color: var(--text);
+}

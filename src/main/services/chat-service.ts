@@ -43,6 +43,8 @@ import type {
   ToolCallRecord,
   ToolDefinition,
   UserQuestionRequest,
+  DelegateFinishedInfo,
+  DelegateHandoffInfo,
 } from '@shared/types'
 import {
   CHANNELS,
@@ -380,6 +382,13 @@ export interface ChatServiceOptions {
     result: string
     conversationId: string
   }) => void
+  /**
+   * A delegate(agent=…) run targeting a bot profile started / reached a
+   * terminal state (v49). Wired to BotService so the handoff shows in the
+   * bot's own chat and the caller's transcript.
+   */
+  onDelegateStarted?: (info: DelegateHandoffInfo) => void
+  onDelegateFinished?: (info: DelegateFinishedInfo) => void
 }
 
 interface ResolvedTarget {
@@ -2834,7 +2843,10 @@ export class ChatService {
       runId: persisted.id,
     }
     this.backgroundTasks.set(taskId, record)
-    void this.runDelegate(task, ctx, controller.signal, agentName)
+    void this.runDelegate(task, ctx, controller.signal, agentName, {
+      runId: persisted.id,
+      background: true,
+    })
       .then((result) => {
         record.result = result
         if (record.status === 'running') {
@@ -2993,8 +3005,13 @@ export class ChatService {
     task: string,
     ctx: ToolExecuteContext,
     signal?: AbortSignal,
-    agentName?: string
+    agentName?: string,
+    meta?: { runId?: string | null; background?: boolean }
   ): Promise<string> {
+    let profile: AgentProfile | null = null
+    let handoff: DelegateHandoffInfo | null = null
+    let status: DelegateFinishedInfo['status'] = 'done'
+    let outcome = ''
     try {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
@@ -3004,14 +3021,18 @@ export class ChatService {
       let maxRounds = DELEGATE_MAX_ROUNDS
       let overrides: ChatSendRequest['overrides']
       if (agentName) {
-        const profile = this.db.agents.getByName(agentName)
-        if (!profile || !profile.enabled) {
+        const found = this.db.agents.getByName(agentName)
+        if (!found || !found.enabled) {
           const names = this.db.agents.listEnabled().map((a) => a.name)
           return names.length > 0
             ? `Error: no enabled agent named '${agentName}'. Available agents: ${names.join(', ')}.`
             : `Error: no agent profiles are defined. Omit the 'agent' parameter to use the general sub-agent.`
         }
-        persona = profile.systemPrompt
+        profile = found
+        // A delegated run is one of the BOT's runs, not an anonymous sub-agent
+        // wearing its prompt: persona plus its own memories and the shared
+        // pool (v49), and its memory directives land under the bot.
+        persona = this.agentSystemPrompt(profile, settings)
         if (profile.providerId || profile.modelId) {
           overrides = {
             ...(profile.providerId ? { providerId: profile.providerId } : {}),
@@ -3028,11 +3049,40 @@ export class ChatService {
         if (profile.maxRounds && profile.maxRounds >= 1) {
           maxRounds = Math.min(profile.maxRounds, MAX_TOOL_ROUNDS)
         }
+        handoff = {
+          delegateKey: randomUUID(),
+          agentId: profile.id,
+          agentName: profile.name,
+          callerConversationId: parent.id,
+          callerAgentId: parent.agentId ?? null,
+          callerTitle: parent.title,
+          task,
+          background: meta?.background === true,
+          runId: meta?.runId ?? null,
+        }
+        try {
+          this.options.onDelegateStarted?.(handoff)
+        } catch {
+          // Mirroring is a courtesy, never a failure path.
+        }
       }
 
       const resolved = await this.resolveTarget(parent, settings, overrides)
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
+      let usageTotal: TokenUsage | undefined
+      // Spend attributed to the bot (v49) — before, delegate runs were the
+      // one generation path with no ledger row at all.
+      const record = (): void => {
+        if (!usageTotal) return
+        recordHeadlessUsage(
+          this.db,
+          { runKind: 'agent_run', refId: meta?.runId ?? null, agentId: profile?.id ?? null },
+          resolved.provider,
+          resolved.modelId,
+          usageTotal
+        )
+      }
 
       // The profile's allow-list holds definition ids (e.g. 'custom:<uuid>'),
       // but the model calls a tool by its WIRE name (== id for builtins, but
@@ -3049,7 +3099,12 @@ export class ChatService {
       ]
       let final = ''
       for (let round = 0; round < maxRounds; round++) {
-        if (signal?.aborted) return 'The task was stopped.'
+        if (signal?.aborted) {
+          status = 'stopped'
+          outcome = 'The task was stopped.'
+          record()
+          return outcome
+        }
         const result = await adapter.chat(
           {
             modelId: resolved.modelId,
@@ -3060,6 +3115,7 @@ export class ChatService {
           },
           this.adapterCtx(resolved, signal)
         )
+        if (result.usage) usageTotal = addUsage(usageTotal, result.usage)
         if (result.text.trim()) final = result.text
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
         messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
@@ -3090,11 +3146,25 @@ export class ChatService {
           messages.push({ role: 'tool', content: out, toolCallId: call.id })
         }
       }
-      return final.trim().length > 0
-        ? `Sub-agent result:\n${final.trim()}`
-        : 'The sub-agent produced no result.'
+      record()
+      if (profile && final.trim()) this.persistAgentMemories(profile.id, final)
+      outcome =
+        final.trim().length > 0
+          ? `Sub-agent result:\n${final.trim()}`
+          : 'The sub-agent produced no result.'
+      return outcome
     } catch (e) {
-      return `Delegation failed: ${toNormalizedError(e).message}`
+      status = 'error'
+      outcome = `Delegation failed: ${toNormalizedError(e).message}`
+      return outcome
+    } finally {
+      if (handoff) {
+        try {
+          this.options.onDelegateFinished?.({ ...handoff, status, result: outcome })
+        } catch {
+          // Mirroring is a courtesy, never a failure path.
+        }
+      }
     }
   }
 

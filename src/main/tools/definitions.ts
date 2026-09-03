@@ -633,7 +633,8 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       'glob, git queries, fetch URL, and approval-gated file edits) and returns a concise answer. ' +
       'Use it to decompose work, investigate a specific question, or carry out a well-scoped ' +
       'change independently. Give it a self-contained task and any context it needs — it does ' +
-      'not see this conversation.',
+      'not see this conversation. When `agent` names a bot, the delegation and its result also ' +
+      "appear in that bot's own chat.",
     parameters: {
       type: 'object',
       properties: {

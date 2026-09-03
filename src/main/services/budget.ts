@@ -6,6 +6,9 @@
  */
 
 import type {
+  AgentProfile,
+  BotSpendWindow,
+  BotUsageSummary,
   Conversation,
   ConversationCostSummary,
   ProviderConfig,
@@ -91,6 +94,36 @@ export function conversationMonthSpend(
   return {
     costUsd: messages.costUsd + headless.costUsd,
     unpricedCount: messages.unpricedCount + headless.unpricedCount,
+  }
+}
+
+/** One bot's spend since `sinceMs`: its canonical-chat messages + headless runs stamped with its id. */
+function botSpend(db: AppDatabase, agent: AgentProfile, sinceMs: number): BotSpendWindow {
+  const messages = agent.chatConversationId
+    ? priceMessageRows(db, db.messages.usageForConversationSince(agent.chatConversationId, sinceMs))
+    : { costUsd: 0, unpricedCount: 0 }
+  const headless = db.headlessUsage.agentCost(agent.id, sinceMs)
+  return {
+    sinceMs,
+    costUsd: messages.costUsd + headless.costUsd,
+    unpricedCount: messages.unpricedCount + headless.unpricedCount,
+  }
+}
+
+/** Today (local midnight) / 7 days / 30 days of estimated spend for one bot (v49). */
+export function botUsageSummary(
+  db: AppDatabase,
+  agent: AgentProfile,
+  now = Date.now()
+): BotUsageSummary {
+  const midnight = new Date(now)
+  midnight.setHours(0, 0, 0, 0)
+  const day = 24 * 60 * 60_000
+  return {
+    agentId: agent.id,
+    today: botSpend(db, agent, midnight.getTime()),
+    week: botSpend(db, agent, now - 7 * day),
+    month: botSpend(db, agent, now - 30 * day),
   }
 }
 

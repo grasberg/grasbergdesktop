@@ -686,6 +686,11 @@ function bootstrap(): void {
   oauthManager = oauth
   chatService = new ChatService(database, broadcast, {
     tools: { registry: toolSystem.registry, executor: toolSystem.executor, broker, questions },
+    // Bot Mode (v49): a delegation to a bot is a visible handoff — mirrored
+    // into the bot's chat and marked in the caller's (botService is
+    // constructed below; late-bound on purpose).
+    onDelegateStarted: (info) => botService?.delegateStarted(info),
+    onDelegateFinished: (info) => botService?.delegateFinished(info),
     imageDir: attachmentsDir,
     browser,
     getAccessToken: (providerId, signal) => oauth.getAccessToken(providerId, signal),

@@ -26,6 +26,7 @@ import type {
   BotGroup,
   BotGroupActivation,
   BotRoster,
+  BotUsageSummary,
   A2aOutboxEntry,
   ChatParams,
   CodeChange,
@@ -388,6 +389,8 @@ export const CHANNELS = {
   botsOutbox: 'bots:outbox',
   // Attention (v49): the user opened the bot's chat (clears unread)
   botsMarkSeen: 'bots:markSeen',
+  // Per-bot estimated spend (v49)
+  botsUsage: 'bots:usage',
   // Bot gateway (v47): per-bot external Telegram presence
   botBindingGet: 'bots:binding:get',
   botBindingSetToken: 'bots:binding:setToken',
@@ -1312,6 +1315,8 @@ export interface UldApi {
     outbox(agentId: string): Promise<IpcResult<A2aOutboxEntry[]>>
     /** The user is looking at the bot's chat: clears its unread state (v49). */
     markSeen(agentId: string): Promise<IpcResult<void>>
+    /** Estimated spend attributable to the bot: today / 7 d / 30 d (v49). */
+    usage(agentId: string): Promise<IpcResult<BotUsageSummary>>
     createGroup(input: {
       name: string
       memberIds: string[]

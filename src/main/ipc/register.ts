@@ -59,7 +59,7 @@ import {
 import { presetMeta } from '@shared/presets'
 import { buildUsageSummary } from '@shared/usage-summary'
 import { collectInboxItems } from '../services/inbox'
-import { conversationCostSummary } from '../services/budget'
+import { conversationCostSummary, botUsageSummary } from '../services/budget'
 import type { ArenaService } from '../services/arena'
 import type { OptimizerService } from '../services/optimizer'
 import { modeModelDefault } from '@shared/mode-models'
@@ -2561,6 +2561,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     requireBots().markBotSeen(requireString(agentId, 'Agent id'))
     return undefined
   })
+  register(CHANNELS.botsUsage, (agentId) =>
+    botUsageSummary(db, found(db.agents.getById(requireString(agentId, 'Agent id')), 'Agent'))
+  )
   register(CHANNELS.botGroupCreate, (input) => {
     const parsed = parseInput(
       z.object({
