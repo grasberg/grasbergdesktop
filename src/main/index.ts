@@ -68,8 +68,15 @@ import {
   DesktopNotifier,
   approvalNotification,
   resultNotification,
+  routineNotification,
   titleOnlyForPrivateSpace,
 } from './services/notify'
+import {
+  keepAliveWithoutWindows,
+  loginItemSettings,
+  shouldHideOnClose,
+  shouldStartHidden,
+} from './services/lifecycle'
 import { AppLockService, windowPushAllowed } from './services/app-lock'
 import { collectInboxItems, countUnreviewed } from './services/inbox'
 import { installCrashLogging, logMainError } from './services/crash-log'
@@ -278,9 +285,30 @@ function navigateTo(target: NavigateTarget): void {
   broadcast(CHANNELS.navigate, target)
 }
 
-/** Dev + packaged icon path; absent in packaged builds (exe icon applies). */
+/**
+ * Tray/window icon. In dev it sits in the repo's build dir; packaged builds
+ * ship it via electron-builder extraResources (the tray — and with it the
+ * always-on mode — needs a real file, the exe icon does not do).
+ */
 function appIconPath(): string {
-  return join(__dirname, '../../build/icon.png')
+  return app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(__dirname, '../../build/icon.png')
+}
+
+/**
+ * Registers/clears the OS login item from settings (v50). Windows/macOS only;
+ * skipped under the smoke test so CI never touches the real login items.
+ */
+function applyLoginItem(): void {
+  if (process.platform === 'linux' || process.env.SMOKE_TEST === '1') return
+  const settings = db?.settings.get()
+  if (!settings) return
+  try {
+    app.setLoginItemSettings(loginItemSettings(settings))
+  } catch (e) {
+    console.error('[lifecycle] login item:', e instanceof Error ? e.message : String(e))
+  }
 }
 
 /**
@@ -299,6 +327,16 @@ function installQuickAccess(): void {
       tray.setContextMenu(
         Menu.buildFromTemplate([
           { label: 'Open Grasberg', click: () => summonWindow() },
+          {
+            label: 'Keep running when the window is closed',
+            type: 'checkbox',
+            checked: db?.settings.get().runInBackground ?? false,
+            click: (item) => {
+              db?.settings.update({ runInBackground: item.checked })
+              applyLoginItem()
+              // The renderer re-reads settings on its next load; no dedicated push.
+            },
+          },
           { type: 'separator' },
           { label: 'Quit', click: () => app.quit() },
         ])
@@ -317,7 +355,7 @@ function installQuickAccess(): void {
   quickWindow?.syncShortcut()
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(opts: { startHidden?: boolean } = {}): BrowserWindow {
   // In dev, __dirname is out/main, so ../../build resolves to the repo's build
   // dir. In a packaged app the window inherits the exe icon stamped by
   // electron-builder, so the file is absent here and we simply skip it.
@@ -344,6 +382,24 @@ function createWindow(): BrowserWindow {
     notifier?.clearAttention()
     notifier?.refreshBadge()
   })
+  // Always-on (v50): in background mode the close button HIDES the window —
+  // routines, heartbeats, deliveries and Telegram bindings keep running and
+  // the tray brings it back. A real quit (tray menu, Cmd/Ctrl+Q) sets
+  // `quitting` first, so it is never intercepted.
+  win.on('close', (event) => {
+    if (
+      !shouldHideOnClose({
+        runInBackground: db?.settings.get().runInBackground ?? false,
+        quitting,
+        hasTray: tray !== null,
+        platform: process.platform,
+      })
+    ) {
+      return
+    }
+    event.preventDefault()
+    win.hide()
+  })
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
     // The hidden browser-tool window is a BrowserWindow too, so leaving it open
@@ -366,7 +422,7 @@ function createWindow(): BrowserWindow {
       }, 100)
       return
     }
-    win.show()
+    if (!opts.startHidden) win.show()
   })
 
   // External links open in the system browser (https only); no child windows.
@@ -1034,12 +1090,14 @@ function bootstrap(): void {
         event.type === 'upsert' &&
         (event.task.lastStatus === 'ok' || event.task.lastStatus === 'error')
       ) {
+        // A bot-owned routine notifies in the bot's name and opens its chat.
+        const owner = event.task.agentId ? database.agents.getById(event.task.agentId) : null
+        const ownerChat = owner?.chatConversationId ?? null
         desktopNotifier.notify(
-          resultNotification(
-            event.task.title,
-            event.task.lastStatus,
-            event.task.lastError ?? event.task.lastOutput,
-            () => undefined
+          routineNotification(
+            event.task,
+            owner?.name ?? null,
+            ownerChat ? () => navigateTo({ conversationId: ownerChat }) : undefined
           )
         )
       }
@@ -1151,6 +1209,7 @@ function bootstrap(): void {
     workflowRunner,
     wakeWorkflowScheduler: () => scheduler.wake(),
     wakeScheduledTaskScheduler: () => clockScheduler.wake(),
+    runScheduledTaskNow: (id) => clockScheduler.runNow(id),
     workspaceRoots,
     dreamingService: dreaming,
     briefService: brief,
@@ -1164,6 +1223,7 @@ function bootstrap(): void {
     quickWindow: quick,
     summonMainWindow: () => summonWindow(),
     syncQuickShortcut: () => quick.syncShortcut(),
+    syncLoginItem: () => applyLoginItem(),
     getRemoteService: () => remoteService,
     getWindows: () => BrowserWindow.getAllWindows(),
     appLock,
@@ -1203,8 +1263,19 @@ function bootstrap(): void {
     remote.sync()
   }
 
-  createWindow()
   installQuickAccess()
+  // Always-on (v50): a login-item launch (or --hidden) starts in the tray when
+  // background mode is on — and only when there IS a tray to come back through.
+  createWindow({
+    startHidden: shouldStartHidden({
+      argv: process.argv,
+      // Login items pass --hidden (see loginItemSettings); Electron 44 has no
+      // per-launch 'opened as hidden' flag any more, so the argument is the signal.
+      wasOpenedAsHidden: false,
+      runInBackground: database.settings.get().runInBackground && tray !== null,
+    }),
+  })
+  applyLoginItem()
   // The tray exists now, so the badge/tooltip can show the startup count.
   desktopNotifier.refreshBadge()
 
@@ -1257,7 +1328,15 @@ if (!gotSingleInstanceLock) {
   })
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit()
+    // Background mode (v50): with a tray to come back through, the process
+    // lives on without windows so routines and bindings keep running. The
+    // close handler normally hides instead of closing; this is the backstop.
+    const keep = keepAliveWithoutWindows({
+      runInBackground: db?.settings.get().runInBackground ?? false,
+      hasTray: tray !== null,
+      platform: process.platform,
+    })
+    if (!keep) app.quit()
   })
 
   // Defer the quit until in-flight generations are aborted AND their detached

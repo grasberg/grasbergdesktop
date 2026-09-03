@@ -317,3 +317,40 @@
 .bot-spend-row strong {
   color: var(--text);
 }
+
+/* -- Routines panel (v50) ------------------------------------------------------ */
+
+.bot-routines {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.bot-routines-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bot-routines-head h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-routines-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bot-routines .sched-popover-item {
+  flex-wrap: wrap;
+}
+
+.bot-routines-status {
+  margin: 0;
+}

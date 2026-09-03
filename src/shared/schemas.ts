@@ -483,6 +483,8 @@ export const settingsPatchSchema = z
     dismissedTipIds: z.array(z.string().min(1).max(100)).max(200),
     paletteEverOpened: z.boolean(),
     desktopNotificationsEnabled: z.boolean(),
+    runInBackground: z.boolean(),
+    launchAtLogin: z.boolean(),
     remoteApprovalsEnabled: z.boolean(),
     workflowWebhookEnabled: z.boolean(),
     // Unprivileged ports are refused: the endpoint must never need elevation.

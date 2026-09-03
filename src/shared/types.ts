@@ -1108,6 +1108,18 @@ export interface AppSettings {
    */
   desktopNotificationsEnabled: boolean
   /**
+   * Always-on (v50): closing the window hides Grasberg to the tray and keeps
+   * routines, heartbeats and Telegram bindings running (Windows/Linux; macOS
+   * already stays open). Off by default. Honoured only when a tray icon
+   * exists to come back through.
+   */
+  runInBackground: boolean
+  /**
+   * Register Grasberg as an OS login item (Windows/macOS); starts hidden when
+   * runInBackground is on. Security-sensitive: never imported from a backup.
+   */
+  launchAtLogin: boolean
+  /**
    * Let a pending tool approval also be answered from the paired Telegram
    * chat, so a background/scheduled run can ask instead of failing while the
    * user is away. Off by default and security-sensitive: it moves an approval
@@ -1242,6 +1254,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dismissedTipIds: [],
   paletteEverOpened: false,
   desktopNotificationsEnabled: true,
+  runInBackground: false,
+  launchAtLogin: false,
   remoteApprovalsEnabled: false,
   workflowWebhookEnabled: false,
   workflowWebhookPort: 8787,
@@ -1283,6 +1297,8 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   // Importing this would move approval authority to whatever chat the backup's
   // bridge settings point at.
   'remoteApprovalsEnabled',
+  // An imported file must never register the app as a login item.
+  'launchAtLogin',
   // …and these would open a local port and hand over its key.
   'workflowWebhookEnabled',
   'workflowWebhookPort',

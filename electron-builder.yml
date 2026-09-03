@@ -16,6 +16,10 @@ files:
 extraResources:
   - from: resources/bundled-skills
     to: bundled-skills
+  # Tray icon (the exe icon is not a file the Tray API can load); without it
+  # there is no tray, and without a tray the app never hides to it (v50).
+  - from: build/icon.png
+    to: icon.png
 
 asar: true
 

@@ -11,6 +11,7 @@ import type { AgentProfile, AgentProfileInput, BotUsageSummary } from '@shared/t
 import { formatCost } from '@shared/pricing'
 import { unwrap } from '@/api/uld'
 import BindingCard from '@/components/bots/BindingCard'
+import BotRoutinesPanel from '@/components/bots/BotRoutinesPanel'
 import { AVATAR_COLORS, BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
 import DeliveriesCard from '@/components/bots/DeliveriesCard'
 import { useBotsStore } from '@/stores/bots'
@@ -474,6 +475,7 @@ export default function AgentProfileForm({
         </div>
       </fieldset>
 
+      {editing ? <BotRoutinesPanel agent={editing} /> : null}
       {editing ? <BindingCard agent={editing} /> : null}
       {editing ? <DeliveriesCard agent={editing} /> : null}
       {editing ? <BotSpendCard agent={editing} /> : null}

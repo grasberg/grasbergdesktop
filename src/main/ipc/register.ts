@@ -199,6 +199,10 @@ export interface RegisterIpcDeps {
   summonMainWindow?: () => void
   /** Re-registers the quick-assistant accelerator after a settings change. */
   syncQuickShortcut?: () => void
+  /** Re-applies the OS login item after runInBackground / launchAtLogin change (v50). */
+  syncLoginItem?: () => void
+  /** "Run now" for a scheduled task (v50); resolves when the run has finished. */
+  runScheduledTaskNow?: (id: string) => Promise<void>
   /**
    * Remote access (phone tunnel). Resolved lazily: the service needs this
    * function's RETURN VALUE (the handler map), so it is constructed after
@@ -801,6 +805,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     }
     // Re-register the quick-assistant accelerator the moment it changes.
     if (parsed.quickAssistantShortcut !== undefined) deps.syncQuickShortcut?.()
+    if (parsed.runInBackground !== undefined || parsed.launchAtLogin !== undefined) {
+      deps.syncLoginItem?.()
+    }
     return updated
   })
 
@@ -2451,6 +2458,13 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.scheduledTaskRuns, (taskId) =>
     db.scheduledTaskRuns.list(requireString(taskId, 'Scheduled task id'))
   )
+  register(CHANNELS.scheduledTasksRunNow, (id) => {
+    const taskId = requireString(id, 'Scheduled task id')
+    const task = found(db.scheduledTasks.getById(taskId), 'Scheduled task')
+    // Detached: the 'running' upsert and the result arrive as pushes.
+    void deps.runScheduledTaskNow?.(taskId).catch(() => undefined)
+    return task
+  })
   register(CHANNELS.scheduledTasksDelete, (id) => {
     const taskId = requireString(id, 'Scheduled task id')
     db.scheduledTasks.remove(taskId)

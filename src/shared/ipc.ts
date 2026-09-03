@@ -366,6 +366,8 @@ export const CHANNELS = {
   scheduledTasksSetBudget: 'scheduledTasks:setBudget',
   scheduledTasksDelete: 'scheduledTasks:delete',
   scheduledTaskRuns: 'scheduledTasks:runs',
+  /** Manual run outside the schedule (v50). */
+  scheduledTasksRunNow: 'scheduledTasks:runNow',
 
   // agent profiles
   agentsList: 'agents:list',
@@ -1298,6 +1300,8 @@ export interface UldApi {
       onChanged(cb: (event: ScheduledTasksChangedEvent) => void): () => void
     /** Recorded runs for one task, newest first. */
     runs(taskId: string): Promise<IpcResult<ScheduledTaskRun[]>>
+    /** Runs the task now, outside its schedule (paused tasks too); the result lands as pushes. */
+    runNow(id: string): Promise<IpcResult<ScheduledTask>>
   }
   agents: {
     list(): Promise<IpcResult<AgentProfile[]>>

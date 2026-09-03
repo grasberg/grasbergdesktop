@@ -120,7 +120,10 @@ describe('dreaming and agent memories', () => {
     expect(db.memories.listForAgent(null).map((m) => m.title)).toContain('merged-1')
     expect(db.memories.listForAgent(watcherId).map((m) => m.title)).toContain('merged-2')
     expect(db.memories.listForAgent(scribeId)).toHaveLength(1)
-    expect(result.perOwner?.map((run) => run.agentName)).toEqual([null, 'Watcher', 'Scribe'])
+    // Owners are visited in id order (random UUIDs): compare as a set.
+    expect(result.perOwner?.map((run) => run.agentName ?? 'shared').sort()).toEqual(
+      ['Scribe', 'Watcher', 'shared']
+    )
     expect(result.perOwner?.find((run) => run.agentId === scribeId)?.result.ran).toBe(false)
     // Separate watermarks per namespace.
     const keys = db.driver

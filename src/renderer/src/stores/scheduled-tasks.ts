@@ -50,6 +50,17 @@ export const useScheduledTasksStore = create<ScheduledTasksStoreState>()((set, g
     }
   },
 
+  async runNow(id) {
+    try {
+      const task = await unwrap(window.uld.scheduledTasks.runNow(id))
+      set((state) => ({
+        tasks: sortTasks([task, ...state.tasks.filter((t) => t.id !== id)]),
+      }))
+    } catch (error) {
+      toastError('Could not run the task', error)
+    }
+  },
+
   async remove(id) {
     try {
       await unwrap(window.uld.scheduledTasks.delete(id))

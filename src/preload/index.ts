@@ -341,6 +341,7 @@ const api: UldApi = {
     delete: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksDelete, id),
       onChanged: subscribe(CHANNELS.scheduledTasksChanged),
     runs: (taskId) => ipcRenderer.invoke(CHANNELS.scheduledTaskRuns, taskId),
+    runNow: (id) => ipcRenderer.invoke(CHANNELS.scheduledTasksRunNow, id),
   },
   agents: {
     list: () => ipcRenderer.invoke(CHANNELS.agentsList),

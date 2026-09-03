@@ -119,6 +119,24 @@ export function resultNotification(
 }
 
 /**
+ * Notification copy for a finished routine (scheduled task). A routine owned
+ * by a bot carries the bot's name so the toast reads like the bot spoke.
+ */
+export function routineNotification(
+  task: { title: string; lastStatus: string; lastError: string | null; lastOutput: string },
+  botName: string | null,
+  onClick?: () => void
+): DesktopNotification {
+  const verb = task.lastStatus === 'error' ? 'failed' : 'finished'
+  return {
+    kind: 'result',
+    title: botName ? `🤖 ${botName} · ${task.title} ${verb}` : `${task.title} ${verb}`,
+    body: task.lastError ?? task.lastOutput,
+    ...(onClick ? { onClick } : {}),
+  }
+}
+
+/**
  * Title-only variant for private-space conversations: the shell's notification
  * centre persists bodies long after the app forgets them, so a private
  * conversation's content never becomes one.

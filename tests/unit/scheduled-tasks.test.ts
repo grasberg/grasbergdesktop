@@ -287,3 +287,58 @@ describe('resolveFirstRun', () => {
     ).toHaveProperty('error')
   })
 })
+
+describe('runNow (v50)', () => {
+  it('runs a paused task at once without moving its schedule, recording a non-catch-up run', async () => {
+    const runAt = Date.now() + 60 * 60_000
+    const task = db.scheduledTasks.create({
+      title: 'Digest',
+      prompt: 'Summarize.',
+      recurrence: 'daily',
+      runAt,
+    })
+    db.scheduledTasks.setEnabled(task.id, false)
+    const run = vi.fn(async () => 'Digest done')
+    const onChanged = vi.fn()
+    const scheduler = new ScheduledTaskScheduler({ db, run, onChanged })
+
+    await scheduler.runNow(task.id)
+    expect(run).toHaveBeenCalledTimes(1)
+    const after = db.scheduledTasks.getById(task.id)!
+    expect(after.lastStatus).toBe('ok')
+    expect(after.lastOutput).toBe('Digest done')
+    expect(after.nextRunAt).toBe(runAt) // untouched
+    expect(after.enabled).toBe(false) // still paused
+    const runs = db.scheduledTaskRuns.list(task.id)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].catchUp).toBe(false)
+    // running upsert, then the finished one
+    expect(onChanged.mock.calls.map((call) => call[0].task.lastStatus)).toEqual(['running', 'ok'])
+  })
+
+  it('dedupes a second Run now while the first is in flight, and rejects unknown ids', async () => {
+    const task = db.scheduledTasks.create({
+      title: 'Slow',
+      prompt: 'Take a while.',
+      recurrence: 'once',
+      runAt: Date.now() + 60 * 60_000,
+    })
+    let release: () => void = () => undefined
+    const run = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve('ok')
+        })
+    )
+    const scheduler = new ScheduledTaskScheduler({ db, run })
+    const first = scheduler.runNow(task.id)
+    const second = scheduler.runNow(task.id)
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1))
+    release()
+    await Promise.all([first, second])
+    expect(run).toHaveBeenCalledTimes(1)
+    // A manual run of a one-off does not complete it.
+    expect(db.scheduledTasks.getById(task.id)!.nextRunAt).not.toBeNull()
+    await expect(scheduler.runNow('nope')).rejects.toThrow(/Unknown/)
+  })
+})

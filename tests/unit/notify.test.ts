@@ -11,6 +11,7 @@ import {
   DesktopNotifier,
   approvalNotification,
   resultNotification,
+  routineNotification,
   type DesktopNotifierDeps,
 } from '../../src/main/services/notify'
 
@@ -123,5 +124,30 @@ describe('DesktopNotifier', () => {
     const { notifier, flash } = setup()
     notifier.clearAttention()
     expect(flash).toHaveBeenCalledWith(false)
+  })
+})
+
+describe('routineNotification', () => {
+  it('names the owning bot in the title and carries the click through', () => {
+    const onClick = vi.fn()
+    const notification = routineNotification(
+      { title: 'Nightly digest', lastStatus: 'ok', lastError: null, lastOutput: 'All quiet.' },
+      'Editor',
+      onClick
+    )
+    expect(notification.title).toBe('🤖 Editor · Nightly digest finished')
+    expect(notification.body).toBe('All quiet.')
+    notification.onClick?.()
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads plainly for an ownerless task and prefers the error text', () => {
+    const notification = routineNotification(
+      { title: 'Backup', lastStatus: 'error', lastError: 'disk full', lastOutput: '' },
+      null
+    )
+    expect(notification.title).toBe('Backup failed')
+    expect(notification.body).toBe('disk full')
+    expect(notification.onClick).toBeUndefined()
   })
 })
