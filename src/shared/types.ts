@@ -372,9 +372,68 @@ export interface Message {
    * implicit speaker.
    */
   agentId?: string | null
+  /**
+   * Bot Mode (v48): this row is part of a bot-to-bot handoff — the
+   * sender-side status marker (role 'system', invisible to the model), the
+   * target's incoming turn, or the reply/failure row routed back to the
+   * sender. Rendered as a handoff card instead of a plain message.
+   */
+  handoff?: MessageHandoff
   /** Monotonic order within the conversation. */
   seq: number
   createdAt: number
+}
+
+/** a2a_outbox.status (v48) — also the visible handoff status. */
+export type A2aOutboxStatus = 'queued' | 'delivered' | 'replied' | 'failed' | 'cancelled'
+
+/**
+ * Handoff chrome on a message row (messages.handoff_json, v48). Names are
+ * snapshotted at send time so the card still renders after a rename/delete.
+ */
+export interface MessageHandoff {
+  outboxId: string
+  /**
+   * 'out' = the sender-side marker (system row, status follows the outbox row);
+   * 'in' = the incoming turn in the target's chat; 'reply' = the reply or
+   * failure row in the sender's chat.
+   */
+  direction: 'out' | 'in' | 'reply'
+  /** Null = the app itself woke the bot (event/routine), not another bot. */
+  fromAgentId: string | null
+  toAgentId: string
+  fromName: string
+  toName: string
+  status: A2aOutboxStatus
+  /** Typed failure reason (provider_rate_limit, runtime_offline, …) when failed. */
+  reason?: string | null
+  updatedAt: number
+}
+
+/** One durable bot-to-bot delivery (a2a_outbox row, v48). */
+export interface A2aOutboxEntry {
+  id: string
+  /** Sending bot; null = the app itself (an event wake). */
+  fromAgentId: string | null
+  toAgentId: string
+  groupId: string | null
+  /** The sender's canonical chat — where the reply routes back; null for app-originated wakes. */
+  conversationId: string | null
+  body: string
+  status: A2aOutboxStatus
+  /** Chain depth (the hop cap survives restarts). */
+  hop: number
+  /** Send attempts started (max 2: one transient retry or one post-restart redelivery). */
+  attempts: number
+  /** Set once the turn runs in the target chat — the boot-recovery join. */
+  targetConversationId: string | null
+  assistantMessageId: string | null
+  /** The sender-side marker message, when one was written. */
+  handoffMessageId: string | null
+  error: string | null
+  createdAt: number
+  updatedAt: number
+  deliveredAt: number | null
 }
 
 /**
@@ -2100,6 +2159,10 @@ export interface BotRosterItem {
   snippet: string | null
   /** Generating right now, or wrote within the last 90 s (active-now strip). */
   active: boolean
+  /** Bot-to-bot deliveries waiting for this bot (a2a_outbox, v48). */
+  queuedCount: number
+  /** A bot-to-bot delivery is being answered in this bot's chat right now. */
+  inFlight: boolean
 }
 
 /** One group-room row of the Bots pane roster. */

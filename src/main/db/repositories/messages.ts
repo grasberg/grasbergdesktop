@@ -7,6 +7,7 @@ import type {
   Attachment,
   FailoverAttempt,
   Message,
+  MessageHandoff,
   MessageRole,
   MessageStatus,
   MoaReferenceOutput,
@@ -39,6 +40,8 @@ export interface MessagePatch {
   modelId?: string
   /** Reliability failover hops (stored inside usage_json); null clears. */
   failedOverFrom?: FailoverAttempt[] | null
+  /** Bot handoff chrome/status (v48); null clears the column. */
+  handoff?: MessageHandoff | null
 }
 
 export interface MessagesRepository {
@@ -94,6 +97,7 @@ interface MessageRow {
   compare_json: string | null
   research_json: string | null
   agent_id: string | null
+  handoff_json: string | null
   seq: number
   created_at: number
 }
@@ -153,6 +157,7 @@ function toMessage(row: MessageRow): Message {
     compare: parseJsonColumn<Message['compare']>(row.compare_json),
     research: parseJsonColumn<ResearchRunInfo>(row.research_json),
     agentId: row.agent_id ?? undefined,
+    handoff: parseJsonColumn<MessageHandoff>(row.handoff_json),
     seq: row.seq,
     createdAt: row.created_at,
   }
@@ -213,8 +218,9 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         `INSERT INTO messages
            (id, conversation_id, role, content, reasoning, attachments_json,
             tool_calls_json, status, error_json, provider_id, model_id,
-            usage_json, moa_references_json, compare_json, research_json, agent_id, seq, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            usage_json, moa_references_json, compare_json, research_json, agent_id, handoff_json,
+            seq, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           message.id,
           message.conversationId,
@@ -232,6 +238,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           message.compare ? JSON.stringify(message.compare) : null,
           message.research ? JSON.stringify(message.research) : null,
           message.agentId ?? null,
+          message.handoff ? JSON.stringify(message.handoff) : null,
           message.seq,
           message.createdAt,
         ]
@@ -268,6 +275,7 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
           patch.moaReferences == null ? patch.moaReferences : JSON.stringify(patch.moaReferences),
         compare_json: patch.compare == null ? patch.compare : JSON.stringify(patch.compare),
         research_json: patch.research == null ? patch.research : JSON.stringify(patch.research),
+        handoff_json: patch.handoff == null ? patch.handoff : JSON.stringify(patch.handoff),
         provider_id: patch.providerId,
         model_id: patch.modelId,
       })

@@ -773,6 +773,11 @@ function bootstrap(): void {
     },
   })
   botService = bots
+  // Durable deliveries (v48): settle whatever the previous process died in
+  // the middle of and re-pump the queue. Runs after
+  // markDanglingStreamingAsStopped (above), so an interrupted target turn
+  // reads 'stopped', never 'streaming'.
+  bots.recover()
   // Heartbeats + canonical-chat auto-compaction (v47), 60 s cadence.
   if (process.env.SMOKE_TEST !== '1') bots.startMaintenance()
 

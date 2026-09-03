@@ -6,11 +6,12 @@
  *   (conversations.agent_id), created lazily. User turns in it ride the
  *   ordinary interactive send() pipeline; the bot's persona/memories/model
  *   pin/toolset are applied there by the chat service.
- * - Bot-to-bot messaging (`message_agent`): fire-and-forget deliveries. A
+ * - Bot-to-bot messaging (`message_agent`): fire-and-forget deliveries,
+ *   durable since v48 (a2a_outbox rows pumped per target, strictly FIFO). A
  *   delivery becomes a turn in the target's canonical chat; the completed
  *   reply is routed back into the sender's chat as an incoming message plus a
- *   desktop notification. One retry for transient provider failures; a hop
- *   counter stops ping-pong chains.
+ *   desktop notification. One retry for transient provider failures, one
+ *   redelivery after a restart, and a hop counter that stops ping-pong chains.
  * - Group rooms: one shared conversation, serial reply-or-pass rounds with
  *   Hermes caps (3 rounds / 10 messages per user send), @mention scoping and
  *   @user escalation ("needs you").
@@ -21,12 +22,14 @@
 import { randomUUID } from 'node:crypto'
 import { CHANNELS } from '@shared/ipc'
 import type {
+  A2aOutboxEntry,
   AgentProfile,
   BotGroup,
   BotGroupActivation,
   BotRoster,
   Conversation,
   Message,
+  MessageHandoff,
   ProviderErrorCode,
   ScheduledTask,
 } from '@shared/types'
@@ -38,6 +41,7 @@ import {
   formatBotReply,
   formatDeliveryFailure,
   formatIncomingBotMessage,
+  formatIncomingEvent,
   GROUP_MAX_MEMBERS,
   GROUP_MAX_MESSAGES,
   GROUP_MAX_ROUNDS,
@@ -51,11 +55,20 @@ import {
   planRoundParticipants,
   type BotIdentity,
 } from './bot-prompts'
+import { sanitizeUntrusted } from './untrusted'
 
 /** A delivery not answered within this window fails as delivery_timeout. */
 const DELIVERY_TIMEOUT_MS = 10 * 60_000
 /** Backoff before the single transient-failure retry. */
 const RETRY_DELAY_MS = 10_000
+/**
+ * Send attempts per delivery: the first one plus ONE more — a transient
+ * provider failure retries once, a restart mid-reply redelivers once. Both
+ * budgets come from the same persisted counter, so a row never loops.
+ */
+const MAX_DELIVERY_ATTEMPTS = 2
+/** Settled outbox rows older than this are pruned at boot. */
+const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60_000
 /** "Wrote within the last 90 s" half of the active-now strip (Hermes). */
 const ACTIVE_RECENT_MS = 90_000
 /** Heartbeat/auto-compact maintenance tick. */
@@ -105,19 +118,9 @@ export interface BotServiceDeps {
   }) => void
 }
 
-interface PendingDelivery {
-  id: string
-  senderAgentId: string
-  senderName: string
-  senderConversationId: string
-  targetAgentId: string
-  message: string
-  hop: number
-  attempts: number
-}
-
+/** The delivery whose turn is running in a target chat (this process only). */
 interface InFlightDelivery {
-  delivery: PendingDelivery
+  outboxId: string
   assistantMessageId: string
   timer: NodeJS.Timeout
 }
@@ -170,10 +173,16 @@ function identity(agent: AgentProfile): BotIdentity {
 }
 
 export class BotService {
-  /** Queued deliveries per target agent id (FIFO). */
-  private readonly queues = new Map<string, PendingDelivery[]>()
-  /** The delivery whose turn is currently running, keyed by target CONVERSATION id. */
+  /**
+   * The delivery whose turn is currently running, keyed by target CONVERSATION
+   * id. Queued deliveries live in a2a_outbox (v48), not in memory.
+   */
   private readonly inFlight = new Map<string, InFlightDelivery>()
+  /** Targets with a pump in progress (single-flight per target). */
+  private readonly pumping = new Set<string>()
+  /** Targets whose running pump was asked to go another round. */
+  private readonly pumpAgain = new Set<string>()
+  private recovered = false
   /** Delivery hop depth of the turn currently running in a conversation. */
   private readonly turnHops = new Map<string, number>()
   /** One active round-runner per group room. */
@@ -228,7 +237,25 @@ export class BotService {
    * Queued deliveries to it fail out quietly.
    */
   cleanupDeletedAgent(agent: AgentProfile): void {
+    // Outbox, both directions: rows addressed TO the bot fail visibly in their
+    // senders' chats (what pump does when the target is gone); rows it SENT
+    // are cancelled — its chat, the reply destination, goes with it.
+    for (const row of this.deps.db.a2aOutbox.listOpen({ toAgentId: agent.id })) {
+      if (row.targetConversationId) {
+        const entry = this.inFlight.get(row.targetConversationId)
+        if (entry?.outboxId === row.id) {
+          clearTimeout(entry.timer)
+          this.inFlight.delete(row.targetConversationId)
+        }
+      }
+      this.deliverFailure(row, 'missing_config', 'the bot no longer exists')
+    }
+    for (const row of this.deps.db.a2aOutbox.cancelForSender(agent.id)) {
+      this.onSettled({ ...row, status: 'cancelled' }, null)
+    }
     if (agent.chatConversationId) {
+      const entry = this.inFlight.get(agent.chatConversationId)
+      if (entry) clearTimeout(entry.timer)
       this.inFlight.delete(agent.chatConversationId)
       this.turnHops.delete(agent.chatConversationId)
       const heartbeat = this.pendingHeartbeats.get(agent.chatConversationId)
@@ -236,7 +263,6 @@ export class BotService {
       this.pendingHeartbeats.delete(agent.chatConversationId)
       this.deps.db.conversations.remove(agent.chatConversationId)
     }
-    this.queues.delete(agent.id)
     this.lastHeartbeatAt.delete(agent.id)
     this.idleCompactAttempted.delete(agent.id)
     this.dailyCompactDone.delete(agent.id)
@@ -254,8 +280,10 @@ export class BotService {
     const bots = db.agents.list().map((agent) => {
       const conversationId = agent.chatConversationId
       const last = conversationId ? db.messages.lastSnippet(conversationId) : null
+      const inFlight = conversationId !== null && this.inFlight.has(conversationId)
       const active =
-        (conversationId !== null && this.deps.chat.isConversationActive(conversationId ?? '')) ||
+        inFlight ||
+        (conversationId !== null && this.deps.chat.isConversationActive(conversationId)) ||
         (last !== null && now - last.createdAt < ACTIVE_RECENT_MS)
       return {
         agent,
@@ -263,6 +291,8 @@ export class BotService {
         lastMessageAt: last?.createdAt ?? null,
         snippet: last ? last.content.replace(/\s+/g, ' ').trim().slice(0, 100) : null,
         active,
+        queuedCount: db.a2aOutbox.countQueued(agent.id),
+        inFlight,
       }
     })
     const groups = db.botGroups.list().map((group) => {
@@ -277,11 +307,12 @@ export class BotService {
     return { bots, groups }
   }
 
-  // -- bot-to-bot messaging (`message_agent`) -----------------------------------
+  // -- bot-to-bot messaging (`message_agent`, durable a2a_outbox since v48) --
 
   /**
-   * Tool entry: queue a fire-and-forget delivery. Returns the acknowledgement
-   * (or error) string shown to the calling model.
+   * Tool entry: persist a fire-and-forget delivery and pump the target's
+   * queue. Returns the acknowledgement (or error) string shown to the calling
+   * model. The row survives restarts — see `recover()`.
    */
   async messengerSend(
     senderConversationId: string,
@@ -328,19 +359,17 @@ export class BotService {
         'instead of messaging further.'
       )
     }
-    const delivery: PendingDelivery = {
+    db.a2aOutbox.insert({
       id: randomUUID(),
-      senderAgentId: senderAgent.id,
-      senderName: senderAgent.name,
-      senderConversationId,
-      targetAgentId: targetAgent.id,
-      message,
+      fromAgentId: senderAgent.id,
+      toAgentId: targetAgent.id,
+      conversationId: senderConversationId,
+      // Data, never instructions: stored verbatim except for chat-template
+      // token literals (the same posture as fetched web content, v47).
+      body: sanitizeUntrusted(message),
       hop,
-      attempts: 0,
-    }
-    const queue = this.queues.get(targetAgent.id) ?? []
-    queue.push(delivery)
-    this.queues.set(targetAgent.id, queue)
+    })
+    this.botsChanged({ agentId: targetAgent.id })
     // Fire and forget: the sender's turn continues; delivery pumps async.
     void this.pump(targetAgent.id)
     return (
@@ -349,64 +378,103 @@ export class BotService {
     )
   }
 
-  /** Starts the next queued delivery for a target, if its chat is free. */
+  /**
+   * Starts the oldest queued delivery for a target, if its chat is free.
+   * Single-flight per target: the DB read is no longer an atomic shift, so a
+   * second pump racing the first must not start the same row twice.
+   */
   private async pump(targetAgentId: string): Promise<void> {
-    const queue = this.queues.get(targetAgentId)
-    if (!queue || queue.length === 0) return
+    if (this.pumping.has(targetAgentId)) {
+      // A pump requested while one runs (e.g. a completion hook landing in
+      // the microtask window after a delivery) must not be dropped: the
+      // running loop goes one more round.
+      this.pumpAgain.add(targetAgentId)
+      return
+    }
+    this.pumping.add(targetAgentId)
+    try {
+      do {
+        this.pumpAgain.delete(targetAgentId)
+        if (await this.pumpOnce(targetAgentId)) this.pumpAgain.add(targetAgentId)
+      } while (this.pumpAgain.has(targetAgentId))
+    } catch (e) {
+      // A background pump must never surface as an unhandled rejection.
+      console.error('[bots] delivery pump failed:', errorMessageOf(e))
+    } finally {
+      this.pumping.delete(targetAgentId)
+    }
+  }
+
+  /** One delivery attempt for a target. Resolves true when the next row should be tried at once. */
+  private async pumpOnce(targetAgentId: string): Promise<boolean> {
+    const db = this.deps.db
+    const next = db.a2aOutbox.nextQueued(targetAgentId)
+    if (!next) return false
     let chat: Conversation
     try {
       chat = this.ensureBotChat(targetAgentId)
     } catch {
       // Profile deleted while queued: fail every pending delivery for it.
-      for (const dropped of queue.splice(0)) {
+      for (const dropped of db.a2aOutbox.listOpen({ toAgentId: targetAgentId })) {
         this.deliverFailure(dropped, 'missing_config', 'the bot no longer exists')
       }
-      return
+      return false
     }
     if (this.inFlight.has(chat.id) || this.deps.chat.isConversationActive(chat.id)) {
-      return // the completion hook pumps again when the current turn ends
+      return false // the completion hook (or the maintenance tick) pumps again later
     }
-    const delivery = queue.shift()
-    if (!delivery) return
-    const content = formatIncomingBotMessage(delivery.senderName, delivery.message)
-    this.turnHops.set(chat.id, delivery.hop)
+    const senderName = next.fromAgentId
+      ? (db.agents.getById(next.fromAgentId)?.name ?? 'unknown bot')
+      : null
+    const content = senderName
+      ? formatIncomingBotMessage(senderName, next.body)
+      : formatIncomingEvent(next.body)
+    this.turnHops.set(chat.id, next.hop)
     try {
       const result = await this.deps.chat.send({ conversationId: chat.id, content })
       if (!result.assistantMessage) {
         // Defensive: only a queued result lacks the placeholder, and bot
-        // deliveries never opt into queueing — requeue and let the
-        // completion hook pump again.
-        queue.unshift(delivery)
+        // deliveries never opt into queueing — the row stays queued and the
+        // completion hook pumps again.
         this.turnHops.delete(chat.id)
-        return
+        return false
       }
+      db.a2aOutbox.markDelivered(next.id, {
+        targetConversationId: chat.id,
+        assistantMessageId: result.assistantMessage.id,
+      })
       this.inFlight.set(chat.id, {
-        delivery,
+        outboxId: next.id,
         assistantMessageId: result.assistantMessage.id,
         timer: setTimeout(() => this.expire(chat.id, targetAgentId), DELIVERY_TIMEOUT_MS),
       })
+      this.onDelivered(next, result.userMessage ?? null)
       this.botsChanged({ agentId: targetAgentId })
+      return false
     } catch (e) {
       this.turnHops.delete(chat.id)
       const text = errorMessageOf(e)
       if (text.includes('already streaming')) {
-        // Lost the race with a user turn — requeue untouched; the completion
-        // hook for that turn drains the queue.
-        queue.unshift(delivery)
-        return
+        // Lost the race with a user turn — the row is still queued; the
+        // completion hook for that turn drains it.
+        return false
       }
       const code = errorCodeOf(e)
-      if (TRANSIENT_CODES.has(code) && delivery.attempts < 1) {
+      if (TRANSIENT_CODES.has(code) && next.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
         // Hermes retry policy: transient failures retry ONCE, same chat,
         // history intact; auth/quota/config never retry.
-        delivery.attempts += 1
-        queue.unshift(delivery)
+        db.a2aOutbox.bumpAttempts(next.id)
         setTimeout(() => void this.pump(targetAgentId), RETRY_DELAY_MS)
-        return
+        return false
       }
-      this.deliverFailure(delivery, failureReason(code), text)
-      void this.pump(targetAgentId)
+      this.deliverFailure(next, failureReason(code), text)
+      return true // try the next row for this target
     }
+  }
+
+  /** Hook for the delivered turn's persisted user message (handoff chrome, PR 2). */
+  private onDelivered(_entry: A2aOutboxEntry, _userMessage: Message | null): void {
+    // Intentionally empty in v48 core; the visible-handoff layer fills it in.
   }
 
   /**
@@ -430,7 +498,13 @@ export class BotService {
     if (entry && entry.assistantMessageId === message.id) {
       clearTimeout(entry.timer)
       this.inFlight.delete(conversation.id)
-      this.routeReply(entry.delivery, message)
+      const row = this.deps.db.a2aOutbox.getById(entry.outboxId)
+      if (row) this.routeReply(row, message)
+    } else {
+      // DB-authoritative fallback: a delivered row this process no longer
+      // tracks (e.g. its timer expired without a reply) still gets routed.
+      const row = this.deps.db.a2aOutbox.inFlightFor(conversation.id)
+      if (row && row.assistantMessageId === message.id) this.routeReply(row, message)
     }
     void this.pump(conversation.agentId)
     this.botsChanged({ agentId: conversation.agentId })
@@ -459,14 +533,28 @@ export class BotService {
     }
   }
 
-  private routeReply(delivery: PendingDelivery, message: Message): void {
+  /**
+   * Routes a finished reply into the sender's chat and closes the row. The
+   * status transition and the reply row commit together, so a crash between
+   * them can never leave a routed-but-open row for recovery to route twice.
+   */
+  private routeReply(entry: A2aOutboxEntry, message: Message): void {
     const db = this.deps.db
-    const targetAgent = db.agents.getById(delivery.targetAgentId)
+    if (entry.status !== 'delivered') return // already settled (cancelled/failed)
+    const targetAgent = db.agents.getById(entry.toAgentId)
     const targetName = targetAgent?.name ?? 'unknown bot'
-    const senderChat = db.conversations.getById(delivery.senderConversationId)
-    if (!senderChat) return // sender's chat was deleted meanwhile
+    const senderChat = entry.conversationId
+      ? db.conversations.getById(entry.conversationId)
+      : null
     const reply = message.content.trim() || '[the bot returned no text]'
-    this.insertMessage(senderChat.id, 'user', formatBotReply(targetName, reply))
+    db.driver.transaction(() => {
+      db.a2aOutbox.markReplied(entry.id)
+      if (senderChat) {
+        this.insertMessage(senderChat.id, 'user', formatBotReply(targetName, reply), entry.toAgentId)
+      }
+      this.onSettled({ ...entry, status: 'replied' }, null)
+    })
+    if (!senderChat) return // sender's chat was deleted meanwhile
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: senderChat.id })
     this.botsChanged({ agentId: senderChat.agentId ?? undefined })
     this.deps.notify?.({
@@ -482,31 +570,39 @@ export class BotService {
     if (!entry) return
     this.inFlight.delete(conversationId)
     this.turnHops.delete(conversationId)
-    // The turn may have finished as 'complete' with the hook lost (e.g. app
-    // relaunch mid-delivery leaves no hook at all) — check before failing.
+    const row = this.deps.db.a2aOutbox.getById(entry.outboxId)
+    if (!row) return
+    // The turn may have finished as 'complete' with the hook lost — check
+    // before failing.
     const message = this.deps.db.messages.getById(entry.assistantMessageId)
     if (message && message.status === 'complete') {
-      this.routeReply(entry.delivery, message)
+      this.routeReply(row, message)
     } else {
-      this.deliverFailure(
-        entry.delivery,
-        'delivery_timeout',
-        'the reply did not arrive in time'
-      )
+      this.deliverFailure(row, 'delivery_timeout', 'the reply did not arrive in time')
     }
     void this.pump(targetAgentId)
   }
 
-  private deliverFailure(delivery: PendingDelivery, reason: string, detail: string): void {
+  private deliverFailure(entry: A2aOutboxEntry, reason: string, detail: string): void {
     const db = this.deps.db
-    const senderChat = db.conversations.getById(delivery.senderConversationId)
+    if (entry.status !== 'queued' && entry.status !== 'delivered') return
+    const targetName = db.agents.getById(entry.toAgentId)?.name ?? 'unknown bot'
+    const senderChat = entry.conversationId
+      ? db.conversations.getById(entry.conversationId)
+      : null
+    db.driver.transaction(() => {
+      db.a2aOutbox.markFailed(entry.id, `${reason}: ${detail}`)
+      if (senderChat) {
+        this.insertMessage(
+          senderChat.id,
+          'user',
+          formatDeliveryFailure(targetName, reason, detail),
+          entry.toAgentId
+        )
+      }
+      this.onSettled({ ...entry, status: 'failed' }, reason)
+    })
     if (!senderChat) return
-    const targetName = db.agents.getById(delivery.targetAgentId)?.name ?? 'unknown bot'
-    this.insertMessage(
-      senderChat.id,
-      'user',
-      formatDeliveryFailure(targetName, reason, detail)
-    )
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: senderChat.id })
     this.botsChanged({})
     this.deps.notify?.({
@@ -515,6 +611,57 @@ export class BotService {
       status: 'error',
       conversationId: senderChat.id,
     })
+  }
+
+  /** Hook for a settled row (handoff status chrome, PR 2). */
+  private onSettled(_entry: A2aOutboxEntry, _reason: string | null): void {
+    // Intentionally empty in v48 core; the visible-handoff layer fills it in.
+  }
+
+  /**
+   * Boot recovery (v48). Must run AFTER messages.markDanglingStreamingAsStopped
+   * so an interrupted target turn reads 'stopped', never 'streaming'. Settles
+   * every 'delivered' row: a complete reply is routed (its completion hook
+   * died with the process); anything else is redelivered once, then fails as
+   * runtime_offline. Queued rows are pumped. Idempotent; never throws.
+   */
+  recover(): { routed: number; requeued: number; failed: number } {
+    const counts = { routed: 0, requeued: 0, failed: 0 }
+    if (this.recovered) return counts
+    this.recovered = true
+    const db = this.deps.db
+    for (const row of db.a2aOutbox.listOpen()) {
+      if (row.status !== 'delivered') continue
+      try {
+        const message = row.assistantMessageId ? db.messages.getById(row.assistantMessageId) : null
+        if (message && message.status === 'complete') {
+          this.routeReply(row, message)
+          counts.routed += 1
+        } else if (row.attempts < MAX_DELIVERY_ATTEMPTS) {
+          db.a2aOutbox.requeue(row.id)
+          this.onSettled({ ...row, status: 'queued' }, null)
+          counts.requeued += 1
+        } else {
+          this.deliverFailure(row, 'runtime_offline', 'the app was closed while the bot was replying')
+          counts.failed += 1
+        }
+      } catch (e) {
+        console.error('[bots] recovery failed for delivery', row.id, errorMessageOf(e))
+      }
+    }
+    try {
+      db.a2aOutbox.pruneTerminal(Date.now() - OUTBOX_RETENTION_MS)
+    } catch {
+      // Housekeeping only.
+    }
+    for (const target of db.a2aOutbox.queuedTargets()) void this.pump(target)
+    if (counts.routed + counts.requeued + counts.failed > 0) this.botsChanged({})
+    return counts
+  }
+
+  /** Recent deliveries touching a bot, newest first (the editor's Deliveries card). */
+  listOutbox(agentId: string): A2aOutboxEntry[] {
+    return this.deps.db.a2aOutbox.listForAgent(agentId, 50)
   }
 
   // -- group rooms --------------------------------------------------------------
@@ -819,6 +966,10 @@ export class BotService {
         console.error(`[bots] maintenance failed for ${agent.name}:`, errorMessageOf(e))
       }
     }
+    // Completion hooks fire only for 'complete' turns: a user turn that ended
+    // in stopped/error would otherwise strand the target's queue until the
+    // next completion. The tick closes that gap.
+    for (const target of this.deps.db.a2aOutbox.queuedTargets()) void this.pump(target)
   }
 
   private async maybeHeartbeat(agent: AgentProfile, now: number): Promise<void> {
@@ -836,7 +987,7 @@ export class BotService {
       this.deps.chat.isConversationActive(chat.id) ||
       this.inFlight.has(chat.id) ||
       this.pendingHeartbeats.has(chat.id) ||
-      (this.queues.get(agent.id)?.length ?? 0) > 0
+      this.deps.db.a2aOutbox.countQueued(agent.id) > 0
     ) {
       return
     }
@@ -912,9 +1063,10 @@ export class BotService {
 
   private insertMessage(
     conversationId: string,
-    role: 'user' | 'assistant',
+    role: 'user' | 'assistant' | 'system',
     content: string,
-    agentId?: string
+    agentId?: string,
+    handoff?: MessageHandoff
   ): Message {
     const message: Message = {
       id: randomUUID(),
@@ -923,6 +1075,7 @@ export class BotService {
       content,
       status: 'complete',
       ...(agentId ? { agentId } : {}),
+      ...(handoff ? { handoff } : {}),
       seq: this.deps.db.messages.nextSeq(conversationId),
       createdAt: Date.now(),
     }

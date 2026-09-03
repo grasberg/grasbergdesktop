@@ -1227,4 +1227,49 @@ export const MIGRATIONS: Migration[] = [
        )`,
     ],
   },
+  {
+    version: 48,
+    name: 'bot-outbox',
+    // Durable bot-to-bot deliveries. Before v48 a `message_agent` delivery
+    // lived in a BotService in-memory queue and an app restart silently
+    // dropped it. a2a_outbox is one row per delivery, pumped per target bot
+    // strictly FIFO; status moves queued → delivered (the turn runs in the
+    // target's chat; target_conversation_id/assistant_message_id set) →
+    // replied (reply routed into conversation_id, the sender's chat) or
+    // failed; cancelled when the sender profile is deleted. hop persists the
+    // chain depth so the ping-pong cap survives restarts; attempts bounds the
+    // single transient retry AND the single post-restart redelivery. Boot
+    // recovery (BotService.recover, after markDanglingStreamingAsStopped)
+    // routes a completed reply whose completion hook died with the process
+    // and redelivers everything else once. from_agent_id is nullable so the
+    // app itself can wake a bot through the same rails (events, later).
+    // messages.handoff_json carries the visible handoff chrome (a
+    // MessageHandoff) on the sender-side marker row, the target's incoming
+    // turn and the routed reply; handoff_message_id points at the marker.
+    // No FKs, by the v30/v34/v46 precedent — rows outlive the profiles and
+    // chats they name; BotService fails/cancels rows app-side on delete.
+    statements: [
+      `CREATE TABLE a2a_outbox (
+         id TEXT PRIMARY KEY,
+         from_agent_id TEXT,
+         to_agent_id TEXT NOT NULL,
+         group_id TEXT,
+         conversation_id TEXT,
+         body TEXT NOT NULL,
+         status TEXT NOT NULL DEFAULT 'queued',
+         hop INTEGER NOT NULL DEFAULT 1,
+         attempts INTEGER NOT NULL DEFAULT 0,
+         target_conversation_id TEXT,
+         assistant_message_id TEXT,
+         handoff_message_id TEXT,
+         error TEXT,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL,
+         delivered_at INTEGER
+       )`,
+      `CREATE INDEX idx_a2a_outbox_target ON a2a_outbox(to_agent_id, status, created_at)`,
+      `CREATE INDEX idx_a2a_outbox_sender ON a2a_outbox(from_agent_id, status)`,
+      `ALTER TABLE messages ADD COLUMN handoff_json TEXT`,
+    ],
+  },
 ]

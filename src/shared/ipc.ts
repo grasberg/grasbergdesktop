@@ -26,6 +26,7 @@ import type {
   BotGroup,
   BotGroupActivation,
   BotRoster,
+  A2aOutboxEntry,
   ChatParams,
   CodeChange,
   CheckpointLite,
@@ -383,6 +384,8 @@ export const CHANNELS = {
   botGroupSend: 'bots:groups:send',
   botGroupStop: 'bots:groups:stop',
   botGroupMarkSeen: 'bots:groups:markSeen',
+  // Durable deliveries (v48): recent outbox rows touching a bot
+  botsOutbox: 'bots:outbox',
   // Bot gateway (v47): per-bot external Telegram presence
   botBindingGet: 'bots:binding:get',
   botBindingSetToken: 'bots:binding:setToken',
@@ -1285,6 +1288,8 @@ export interface UldApi {
     roster(): Promise<IpcResult<BotRoster>>
     /** Get-or-create the bot's canonical chat; returns its conversation id. */
     openChat(agentId: string): Promise<IpcResult<{ conversationId: string }>>
+    /** Recent bot-to-bot deliveries touching a bot, newest first (v48). */
+    outbox(agentId: string): Promise<IpcResult<A2aOutboxEntry[]>>
     createGroup(input: {
       name: string
       memberIds: string[]

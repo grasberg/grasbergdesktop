@@ -220,6 +220,14 @@ export function formatIncomingBotMessage(senderName: string, message: string): s
   return `Message from 🤖 ${senderName} (@${botSlug(senderName)}): ${message}`
 }
 
+/**
+ * An app-originated wake (from_agent_id NULL in a2a_outbox: an event or a
+ * routine trigger) as persisted into the bot's canonical chat.
+ */
+export function formatIncomingEvent(body: string): string {
+  return `Event: ${body}`
+}
+
 /** A teammate's reply as persisted back into the sender's canonical chat. */
 export function formatBotReply(targetName: string, reply: string): string {
   return `Reply from 🤖 ${targetName} (@${botSlug(targetName)}): ${reply}`

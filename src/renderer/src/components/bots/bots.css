@@ -529,3 +529,80 @@
   color: var(--text);
   font: inherit;
 }
+
+/* -- Deliveries card (v48): durable bot-to-bot outbox ------------------------- */
+
+.bot-deliveries {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.bot-deliveries h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-delivery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bot-delivery {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) 1fr auto auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.bot-delivery-dir {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.bot-delivery-body {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-delivery-status {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  white-space: nowrap;
+}
+
+.bot-delivery.status-queued .bot-delivery-status {
+  color: var(--text-muted);
+}
+
+.bot-delivery.status-replied .bot-delivery-status {
+  color: var(--success);
+}
+
+.bot-delivery.status-failed .bot-delivery-status {
+  color: var(--danger);
+}
+
+.bot-delivery time {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bot-delivery-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}

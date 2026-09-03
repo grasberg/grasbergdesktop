@@ -2547,6 +2547,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     const conversation = requireBots().ensureBotChat(requireString(agentId, 'Agent id'))
     return { conversationId: conversation.id }
   })
+  register(CHANNELS.botsOutbox, (agentId) =>
+    requireBots().listOutbox(requireString(agentId, 'Agent id'))
+  )
   register(CHANNELS.botGroupCreate, (input) => {
     const parsed = parseInput(
       z.object({

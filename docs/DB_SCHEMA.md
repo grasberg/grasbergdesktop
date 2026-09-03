@@ -69,6 +69,7 @@ authoritative, append-only list; the table below is a summary and may lag it):
 | 45 | `app-lock-private-spaces` | new `spaces` table; nullable `conversations.space_id` (NULL = default space; no FK — delete is app-guarded to empty spaces) + `idx_conversations_space` |
 | 46 | `bot-mode` | Bot Mode (Hermes-style): `agents.title`/`avatar_json`/`hidden`/`chat_conversation_id`; `conversations.agent_id` (canonical bot chat, excluded from the sidebar listing) + `idx_conversations_agent`; `messages.agent_id` (author attribution); new `bot_groups` + `bot_group_members` tables (group rooms; one shared transcript conversation per room). All pointers deliberately without FKs — the app cleans up on delete |
 | 47 | `bot-gateway` | OpenClaw-inspired Bot Mode hardening: `agents.heartbeat_json`/`reset_json`/`message_allow_json` (heartbeat, auto-compact policy, bot-to-bot allowlist); `bot_groups.activation` ('always'\|'mention') + `bot_group_members.observer`; `scheduled_tasks.webhook_url` (delivery target); new `bot_bindings` table (per-bot external Telegram presence — the token lives in `tool_secrets`, never here) |
+| 48 | `bot-outbox` | new `a2a_outbox` table — durable bot-to-bot (`message_agent`) deliveries: queued → delivered → replied \| failed \| cancelled, `hop` + `attempts` persisted, `target_conversation_id`/`assistant_message_id` for boot recovery; `messages.handoff_json` (visible handoff chrome on the sender marker, the target's incoming turn and the routed reply). No FKs — app-side cleanup on delete |
 
 ## Tables
 
@@ -286,6 +287,7 @@ covers audit needs where they matter.
 | `usage_json` | TEXT nullable | `TokenUsage` JSON; may additionally carry a `failedOverFrom` key (`FailoverAttempt[]`, Reliability Autopilot hops) that the messages repository splits back out of the parsed value — its compose/split helpers are the only (de)serialization point for this column |
 | `moa_references_json` | TEXT nullable | `MoaReferenceOutput[]` JSON — the advisor model outputs behind a Mixture-of-Agents answer (v17) |
 | `agent_id` | TEXT nullable | Bot Mode (v46): the agent profile that authored this message (group-room turns, bot-chat turns); no FK — an unknown id renders as an unknown author |
+| `handoff_json` | TEXT nullable | Bot Mode (v48): `MessageHandoff` JSON — this row is part of a bot-to-bot handoff (`direction` 'out' = the sender-side status marker, a `system`-role row the model never sees; 'in' = the target's incoming turn; 'reply' = the routed reply/failure row). `status` mirrors the `a2a_outbox` row |
 | `seq` | INTEGER | order within the conversation |
 | `created_at` | INTEGER | unix ms |
 
@@ -526,11 +528,11 @@ the room is opened).
 
 PK `(group_id, agent_id)`.
 
-Bot-to-bot messaging (`message_agent` tool, canonical bot chats only) keeps NO
-tables: deliveries are in-memory queues in `BotService` (fire-and-forget; the
-reply routes back through the completion-hook, with a single transient-failure
-retry, typed failure reasons and a hop cap of 6). A queued delivery lost to an
-app restart simply never lands — the sender's chat shows no reply.
+Bot-to-bot messaging (`message_agent` tool, canonical bot chats only) is
+fire-and-forget: the reply routes back through the completion hook, with a
+single transient-failure retry, typed failure reasons and a hop cap of 6. Since
+v48 every delivery is a durable `a2a_outbox` row (below) — before that the
+queue lived in memory and an app restart silently dropped it.
 
 # Bot gateway (v47)
 
@@ -580,3 +582,46 @@ running stream COMPLETES — never after a Stop or error. Fetched web content
 (`fetch_url`, `web_search`) is wrapped in `<<<EXTERNAL_UNTRUSTED_CONTENT>>>`
 boundary markers with chat-template token literals stripped
 (`src/main/services/untrusted.ts`).
+
+# Durable bot-to-bot deliveries (v48)
+
+### `a2a_outbox` (v48)
+
+One row per `message_agent` delivery. `BotService` pumps rows per target bot
+strictly FIFO (`created_at, rowid`), one turn in the target's canonical chat at
+a time and deliberately WITHOUT the busy-send queue (a coalesced queued turn
+would merge two deliveries into one reply and break 1:1 routing). `status`
+moves `queued → delivered` (the turn started; `target_conversation_id`,
+`assistant_message_id`, `delivered_at` set) `→ replied` (reply routed into
+`conversation_id`, the sender's chat) or `failed` (`error` = `reason: detail`);
+`cancelled` when the sender profile is deleted. `hop` persists the chain depth
+so the hop cap survives restarts; `attempts` counts send attempts and bounds
+BOTH the single transient retry and the single post-restart redelivery (max 2).
+
+Boot recovery (`BotService.recover`, after `markDanglingStreamingAsStopped`):
+a `delivered` row whose assistant message is `complete` is routed (its
+completion hook died with the process); anything else is redelivered once,
+then fails as `runtime_offline`. Queued rows are pumped; the 60 s maintenance
+tick also drains queues stranded by a stopped/errored user turn. `from_agent_id`
+is nullable so the app itself can wake a bot through the same rails (events).
+No FKs; deleting a bot fails open rows addressed to it (`missing_config`) and
+cancels rows it sent. Not part of backups (runtime state); settled rows older
+than 30 days are pruned at boot.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `from_agent_id` | TEXT nullable | sending bot; NULL = the app (event wake); no FK |
+| `to_agent_id` | TEXT | target bot; no FK |
+| `group_id` | TEXT nullable | reserved (NULL) |
+| `conversation_id` | TEXT nullable | the sender's canonical chat — where the reply lands; NULL for app-originated wakes |
+| `body` | TEXT | the message, verbatim data (never interpreted; chat-template token literals stripped on insert) |
+| `status` | TEXT | `queued` \| `delivered` \| `replied` \| `failed` \| `cancelled` (enforced in TypeScript) |
+| `hop`, `attempts` | INTEGER | chain depth (cap 6) / send attempts started (max 2) |
+| `target_conversation_id`, `assistant_message_id` | TEXT nullable | set on delivery; the recovery join |
+| `handoff_message_id` | TEXT nullable | the sender-side marker message (`messages.handoff_json` direction 'out') |
+| `error` | TEXT nullable | `reason: detail` on failure |
+| `created_at`, `updated_at`, `delivered_at` | INTEGER | unix ms |
+
+Indexes: `idx_a2a_outbox_target (to_agent_id, status, created_at)`,
+`idx_a2a_outbox_sender (from_agent_id, status)`.
