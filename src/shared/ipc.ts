@@ -378,6 +378,10 @@ export const CHANNELS = {
   agentRunStop: 'agents:runs:stop',
   agentPackExport: 'agents:pack:export',
   agentPackImport: 'agents:pack:import',
+  // Events → bot (v50)
+  agentsTriggerInfo: 'agents:trigger:info',
+  agentsWatchInfo: 'agents:watch:info',
+  agentsWake: 'agents:wake',
 
   // Bot Mode (v46): roster, canonical bot chats, group rooms
   botsRoster: 'bots:roster',
@@ -1312,6 +1316,12 @@ export interface UldApi {
     stopRun(runId: string): Promise<IpcResult<boolean>>
     packExport(): Promise<IpcResult<{ canceled: boolean; path?: string }>>
     packImport(): Promise<IpcResult<{ canceled: boolean; agents?: number; skills?: number; hooks?: number }>>
+    /** The bot's wake URL on the loopback trigger endpoint (null while the endpoint is off). */
+    triggerInfo(agentId: string): Promise<IpcResult<WorkflowTriggerInfo>>
+    /** Whether the bot's folder watch is live, and its last error. */
+    watchInfo(agentId: string): Promise<IpcResult<WorkflowWatchStatus>>
+    /** Queues a manual test event in the bot's chat. */
+    wake(agentId: string, payload: string): Promise<IpcResult<{ deliveryId: string }>>
   }
   /** Bot Mode (v46): the Bots pane roster, canonical chats and group rooms. */
   bots: {

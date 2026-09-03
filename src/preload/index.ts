@@ -351,6 +351,9 @@ const api: UldApi = {
     runs: (conversationId) => ipcRenderer.invoke(CHANNELS.agentRunsList, conversationId),
     stopRun: (runId) => ipcRenderer.invoke(CHANNELS.agentRunStop, runId),
     packExport: () => ipcRenderer.invoke(CHANNELS.agentPackExport),
+    triggerInfo: (agentId) => ipcRenderer.invoke(CHANNELS.agentsTriggerInfo, agentId),
+    watchInfo: (agentId) => ipcRenderer.invoke(CHANNELS.agentsWatchInfo, agentId),
+    wake: (agentId, payload) => ipcRenderer.invoke(CHANNELS.agentsWake, agentId, payload),
     packImport: () => ipcRenderer.invoke(CHANNELS.agentPackImport),
   },
   bots: {

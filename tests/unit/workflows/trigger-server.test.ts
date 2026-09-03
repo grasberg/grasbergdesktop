@@ -334,3 +334,42 @@ describe('WorkflowTriggerServer', () => {
     await expect(post(`/run/wf-open?token=${TOKEN}`)).rejects.toThrow()
   })
 })
+
+describe('agent wakes (v50)', () => {
+  it('queues an event for an opted-in bot with 202, refuses others with 403, and still needs the token', async () => {
+    const woken: Array<{ agentId: string; payload: string }> = []
+    const bots = new WorkflowTriggerServer({
+      settings: () => ({ enabled: true, port: 0, token: TOKEN }),
+      isTriggerable: () => false,
+      run: async () => okResult(),
+      isAgentTriggerable: (agentId) => agentId === 'bot-1',
+      wakeAgent: async (agentId, payload) => {
+        woken.push({ agentId, payload })
+      },
+    })
+    bots.sync()
+    for (let i = 0; i < 100 && bots.url() === null; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    const base = bots.agentUrl('bot-1')
+    if (!base) throw new Error('the endpoint never bound')
+    try {
+      const ok = await fetch(base, { method: 'POST', body: 'build failed' })
+      expect(ok.status).toBe(202)
+      expect(woken).toEqual([{ agentId: 'bot-1', payload: 'build failed' }])
+
+      const refused = await fetch(base.replace('/agent/bot-1', '/agent/bot-2'), {
+        method: 'POST',
+        body: 'x',
+      })
+      expect(refused.status).toBe(403)
+      expect(await refused.text()).toContain('That bot does not accept triggers.')
+
+      const noToken = await fetch(base.split('?')[0], { method: 'POST', body: 'x' })
+      expect(noToken.status).toBe(401)
+      expect(woken).toHaveLength(1)
+    } finally {
+      bots.stop()
+    }
+  })
+})

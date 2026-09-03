@@ -13,6 +13,7 @@ import type {
   BotAvatar,
   BotHeartbeat,
   BotResetPolicy,
+  WorkflowWatchConfig,
 } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 import { parseStringArray, updateById } from './util'
@@ -29,6 +30,8 @@ export interface AgentsRepository {
   setChatConversation(id: string, conversationId: string | null): void
   /** The user is looking at the canonical chat: stamps chat_seen_at (v49). */
   markChatSeen(id: string, seenAt: number): void
+  /** Enabled bots with an ENABLED folder watch (v50) — what the watcher runs. */
+  listWatchedLite(): Array<{ id: string; watch: WorkflowWatchConfig }>
   remove(id: string): void
 }
 
@@ -50,6 +53,8 @@ interface AgentRow {
   heartbeat_json: string | null
   reset_json: string | null
   message_allow_json: string | null
+  webhook_enabled: number
+  watch_json: string | null
   created_at: number
   updated_at: number
 }
@@ -99,6 +104,8 @@ function toAgent(row: AgentRow): AgentProfile {
     reset: parseObject<BotResetPolicy>(row.reset_json),
     messageAllow:
       row.message_allow_json === null ? null : parseStringArray(row.message_allow_json, []),
+    webhookEnabled: row.webhook_enabled === 1,
+    watch: parseObject<WorkflowWatchConfig>(row.watch_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -150,6 +157,8 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         heartbeat: input.heartbeat ?? null,
         reset: input.reset ?? null,
         messageAllow: input.messageAllow ?? null,
+        webhookEnabled: input.webhookEnabled === true,
+        watch: input.watch ?? null,
         createdAt: now,
         updatedAt: now,
       }
@@ -158,8 +167,8 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
            (id, name, description, system_prompt, provider_id, model_id,
             tool_ids_json, max_rounds, enabled, title, avatar_json, hidden,
             chat_conversation_id, heartbeat_json, reset_json, message_allow_json,
-            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            webhook_enabled, watch_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           agent.id,
           agent.name,
@@ -177,6 +186,8 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
           agent.heartbeat ? JSON.stringify(agent.heartbeat) : null,
           agent.reset ? JSON.stringify(agent.reset) : null,
           agent.messageAllow ? JSON.stringify(agent.messageAllow) : null,
+          agent.webhookEnabled ? 1 : 0,
+          agent.watch ? JSON.stringify(agent.watch) : null,
           now,
           now,
         ]
@@ -229,6 +240,10 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
               : patch.messageAllow === null
                 ? null
                 : JSON.stringify(patch.messageAllow),
+          webhook_enabled:
+            patch.webhookEnabled === undefined ? undefined : patch.webhookEnabled ? 1 : 0,
+          watch_json:
+            patch.watch === undefined ? undefined : patch.watch === null ? null : JSON.stringify(patch.watch),
         },
         { touchUpdatedAt: true }
       )
@@ -242,6 +257,20 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
     markChatSeen(id, seenAt) {
       // Deliberately no updated_at touch — reading is not editing.
       driver.run('UPDATE agents SET chat_seen_at = ? WHERE id = ?', [seenAt, id])
+    },
+
+    listWatchedLite() {
+      const rows = driver.all<{ id: string; watch_json: string | null }>(
+        'SELECT id, watch_json FROM agents WHERE enabled = 1 AND watch_json IS NOT NULL'
+      )
+      const result: Array<{ id: string; watch: WorkflowWatchConfig }> = []
+      for (const row of rows) {
+        const watch = parseObject<WorkflowWatchConfig>(row.watch_json)
+        if (watch && watch.enabled === true && typeof watch.folderPath === 'string') {
+          result.push({ id: row.id, watch })
+        }
+      }
+      return result
     },
 
     remove(id) {

@@ -354,3 +354,18 @@
 .bot-routines-status {
   margin: 0;
 }
+
+/* -- Events (v50) -------------------------------------------------------------- */
+
+.bot-events-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.bot-events-info code {
+  font-size: 11px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}

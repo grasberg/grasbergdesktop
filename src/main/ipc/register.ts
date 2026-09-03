@@ -2511,6 +2511,9 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       .nullable()
       .optional(),
     messageAllow: z.array(z.string().min(1).max(100)).max(50).nullable().optional(),
+    // Events → bot (v50): webhook opt-in + a folder watch (workflow shape).
+    webhookEnabled: z.boolean().optional(),
+    watch: workflowWatchSchema.nullish(),
   })
 
   register(CHANNELS.agentsList, () => db.agents.list())
@@ -2519,7 +2522,10 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     if (db.agents.getByName(parsed.name)) {
       throw invalid(`An agent named '${parsed.name}' already exists.`)
     }
-    return db.agents.create(parsed)
+    assertWatchCanFire(parsed.watch)
+    const created = db.agents.create(parsed)
+    if (parsed.watch) deps.workflowWatcher?.sync()
+    return created
   })
   register(CHANNELS.agentsUpdate, (id, patch) => {
     const agentId = requireString(id, 'Agent id')
@@ -2530,8 +2536,36 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
         throw invalid(`An agent named '${parsed.name}' already exists.`)
       }
     }
-    return found(db.agents.update(agentId, parsed), 'Agent')
+    if (parsed.watch !== undefined) assertWatchCanFire(parsed.watch)
+    const updated = found(db.agents.update(agentId, parsed), 'Agent')
+    // A watch change or an enable toggle changes what the watcher should run.
+    if (parsed.watch !== undefined || parsed.enabled !== undefined) deps.workflowWatcher?.sync()
+    return updated
   })
+  // Events → bot (v50): the wake URL, the watch state, and a manual test event.
+  register(CHANNELS.agentsTriggerInfo, (agentId): WorkflowTriggerInfo => {
+    const id = requireString(agentId, 'Agent id')
+    return {
+      running: deps.triggerServer?.running === true,
+      port: db.settings.get().workflowWebhookPort,
+      url: deps.triggerServer?.agentUrl(id) ?? null,
+    }
+  })
+  register(
+    CHANNELS.agentsWatchInfo,
+    (agentId): WorkflowWatchStatus =>
+      deps.workflowWatcher?.statusFor(`agent:${requireString(agentId, 'Agent id')}`) ?? {
+        watching: false,
+        lastError: null,
+      }
+  )
+  register(CHANNELS.agentsWake, (agentId, payload) =>
+    requireBots().wake(requireString(agentId, 'Agent id'), {
+      source: 'manual',
+      label: 'test event',
+      payload: parseInput(z.string().max(64_000), payload),
+    })
+  )
   register(CHANNELS.agentsDelete, (id) => {
     const agentId = requireString(id, 'Agent id')
     const agent = db.agents.getById(agentId)
@@ -2539,6 +2573,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     // Bot Mode cleanup: canonical chat + group memberships go with the
     // profile (Hermes "Delete Profile" semantics).
     if (agent) deps.botService?.cleanupDeletedAgent(agent)
+    if (agent?.watch) deps.workflowWatcher?.sync()
     return undefined
   })
   register(CHANNELS.agentRunsList, (conversationId) =>

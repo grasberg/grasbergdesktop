@@ -53,6 +53,13 @@ export interface TriggerServerDeps {
   settings: () => { enabled: boolean; port: number; token: string | null }
   /** True when this workflow exists AND opted into being triggered. */
   isTriggerable: (workflowId: string) => boolean
+  /** True when this bot exists, is enabled AND opted into webhook wakes (v50). */
+  isAgentTriggerable?: (agentId: string) => boolean
+  /**
+   * Queues one event turn in the bot's chat (v50). Resolves once queued —
+   * the caller gets 202, never waits for the bot's reply.
+   */
+  wakeAgent?: (agentId: string, payload: string) => Promise<void>
   /**
    * Starts the run and resolves with its result when it finishes. A failed run
    * RESOLVES with { ok: false } rather than rejecting, so the outcome has to be
@@ -142,6 +149,13 @@ export class WorkflowTriggerServer {
     return `http://127.0.0.1:${this.boundPort}/run/${workflowId}?token=${token}`
   }
 
+  /** The URL that wakes a bot (v50), or null while the endpoint is off. */
+  agentUrl(agentId = '<bot-id>'): string | null {
+    const { enabled, token } = this.deps.settings()
+    if (!enabled || !token || this.boundPort === null) return null
+    return `http://127.0.0.1:${this.boundPort}/agent/${agentId}?token=${token}`
+  }
+
   /** True once the listener is actually bound (not merely mid-bind). */
   get running(): boolean {
     return this.boundPort !== null
@@ -225,16 +239,22 @@ export class WorkflowTriggerServer {
       return
     }
 
-    const match = /^\/run\/([A-Za-z0-9-]{1,64})$/.exec(url.pathname)
+    const match = /^\/(run|agent)\/([A-Za-z0-9-]{1,64})$/.exec(url.pathname)
     if (!match) {
       send(res, 404, 'Not found.')
       return
     }
-    const workflowId = match[1]
-    if (!this.deps.isTriggerable(workflowId)) {
+    const kind = match[1]
+    const workflowId = match[2]
+    if (kind === 'run' && !this.deps.isTriggerable(workflowId)) {
       // Deliberately one message for "no such workflow" and "not opted in":
       // an authorized caller still has no business enumerating the library.
       send(res, 403, 'That workflow does not accept triggers.')
+      return
+    }
+    if (kind === 'agent' && !(this.deps.isAgentTriggerable?.(workflowId) ?? false)) {
+      // Same rule for bots (v50): each one opts in individually.
+      send(res, 403, 'That bot does not accept triggers.')
       return
     }
 
@@ -257,6 +277,17 @@ export class WorkflowTriggerServer {
     // releases the socket. Nothing is restored afterwards: once the response
     // finishes Node re-arms the socket with keepAliveTimeout itself.
     req.socket?.setTimeout(RUN_TIMEOUT_MS)
+    if (kind === 'agent') {
+      // A bot wake is queued, not awaited: the bot may take minutes and may
+      // even stop to ask the user something.
+      try {
+        await this.deps.wakeAgent?.(workflowId, body)
+        send(res, 202, 'Event queued for the bot.')
+      } catch (e) {
+        send(res, 500, redactSecrets(e instanceof Error ? e.message : 'The wake failed.'))
+      }
+      return
+    }
     try {
       const result = await this.deps.run(workflowId, 'webhook', body)
       if (!result.ok) {

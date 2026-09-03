@@ -1014,6 +1014,13 @@ function bootstrap(): void {
     },
     isTriggerable: (workflowId) => database.workflows.getById(workflowId)?.webhookEnabled === true,
     run: (workflowId, trigger, payload) => workflowRunner.runById(workflowId, trigger, payload),
+    // Events → bot (v50): POST /agent/<id> wakes a bot that opted in.
+    isAgentTriggerable: (agentId) => {
+      const agent = database.agents.getById(agentId)
+      return !!agent && agent.enabled && agent.webhookEnabled
+    },
+    wakeAgent: (agentId, payload) =>
+      bots.wake(agentId, { source: 'webhook', label: 'webhook', payload }).then(() => undefined),
     onError: (message) => notice(message, 'error'),
   })
   triggerServer = triggers
@@ -1031,8 +1038,27 @@ function bootstrap(): void {
   // picker (the user's grant); runs land in the same run history and notifier
   // via the runner's hooks, and share the scheduler's per-workflow queue key.
   const watcher = new WorkflowWatcherService({
-    listWatched: () => database.workflows.listWatchedLite(),
-    run: (id, trigger, payload) => workflowRunner.runById(id, trigger, payload),
+    // Workflows and, since v50, bots with a folder watch ("agent:<id>"): a
+    // file event wakes the bot through the outbox (queue key "workflow:agent:<id>").
+    listWatched: () => [
+      ...database.workflows.listWatchedLite(),
+      ...database.agents
+        .listWatchedLite()
+        .map((entry) => ({ id: `agent:${entry.id}`, watch: entry.watch })),
+    ],
+    run: (id, trigger, payload) => {
+      if (!id.startsWith('agent:')) return workflowRunner.runById(id, trigger, payload)
+      let label = 'file'
+      try {
+        const parsed = JSON.parse(payload) as { name?: unknown }
+        if (typeof parsed.name === 'string' && parsed.name) label = parsed.name
+      } catch {
+        // Not JSON — the generic label stands.
+      }
+      return bots
+        .wake(id.slice('agent:'.length), { source: 'watch', label, payload })
+        .then(() => ({ ok: true as const, nodeOutputs: {}, order: [] }))
+    },
     queue: scheduledRunQueue,
     onError: (_workflowId, message) => notice(message, 'error'),
   })

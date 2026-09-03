@@ -649,3 +649,17 @@ or `unread` joins the inbox count in the dock/tray badge.
 headless spend to the agent PROFILE it ran as (delegate(agent=…), scheduled
 tasks, room turns) — the roster reads running runs by id instead of matching
 the free-text `agent_name`; per-bot spend sums `headless_usage` by it.
+
+# Events → bot (v50)
+
+A bot can be woken from outside a chat. `agents.webhook_enabled` opts it in to the
+loopback trigger endpoint (`POST /agent/<id>?token=…`, answered 202 once the
+event is queued — the caller never waits for the reply); `agents.watch_json` is a
+`WorkflowWatchConfig` (enabled flag inside) that the workflow watcher runs under
+the id `agent:<id>` (queue key `workflow:agent:<id>`). Either path calls
+`BotService.wake`, which inserts an `a2a_outbox` row with `from_agent_id NULL` and
+`conversation_id NULL` — the same durable, per-bot FIFO as a teammate's message,
+so an event queues behind a busy chat and survives a restart — whose body is the
+label plus the payload wrapped in untrusted-content markers. The bot's turn runs
+with its normal interactive tools and approvals; with no sender to route to, the
+reply stays in the bot's chat and the user is notified instead.

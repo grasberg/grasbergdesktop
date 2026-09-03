@@ -385,3 +385,23 @@ it('runDelegate with an unknown agent name lists the available agents', async ()
   expect(result).toContain("no enabled agent named 'nope'")
   expect(result).toContain('writer')
 })
+
+describe('events → bot fields (v50)', () => {
+  it('round-trips webhookEnabled and the folder watch, and lists only enabled live watches', () => {
+    const watch = { enabled: true, folderPath: 'C:/drop', glob: '*.csv', event: 'created' as const }
+    const bot = db.agents.create({ name: 'Importer', systemPrompt: 'p', webhookEnabled: true, watch })
+    expect(db.agents.getById(bot.id)).toMatchObject({ webhookEnabled: true, watch })
+    const paused = db.agents.create({
+      name: 'Paused',
+      systemPrompt: 'p',
+      watch: { ...watch, enabled: false },
+    })
+    const disabled = db.agents.create({ name: 'Disabled', systemPrompt: 'p', enabled: false, watch })
+    expect(db.agents.listWatchedLite().map((entry) => entry.id)).toEqual([bot.id])
+    db.agents.update(bot.id, { watch: null, webhookEnabled: false })
+    expect(db.agents.getById(bot.id)).toMatchObject({ webhookEnabled: false, watch: null })
+    expect(db.agents.listWatchedLite()).toEqual([])
+    expect(db.agents.getById(paused.id)!.watch?.enabled).toBe(false)
+    expect(db.agents.getById(disabled.id)!.enabled).toBe(false)
+  })
+})

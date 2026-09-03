@@ -29,6 +29,7 @@ import type {
   BotGroupActivation,
   BotGroupMode,
   BotModeSettings,
+  BotWakeEvent,
   BotRoster,
   Conversation,
   DelegateFinishedInfo,
@@ -65,7 +66,7 @@ import {
   resolveBotModeLimits,
   type BotIdentity,
 } from './bot-prompts'
-import { sanitizeUntrusted } from './untrusted'
+import { sanitizeUntrusted, wrapUntrusted } from './untrusted'
 
 /** A delivery not answered within this window fails as delivery_timeout. */
 const DELIVERY_TIMEOUT_MS = 10 * 60_000
@@ -81,6 +82,8 @@ const MAX_DELIVERY_ATTEMPTS = 2
 const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60_000
 /** A mirrored delegation result is capped so it cannot swamp the bot's context. */
 const DELEGATE_MIRROR_MAX_CHARS = 40_000
+/** An event payload handed to a bot is capped the same way the trigger endpoint caps bodies. */
+const WAKE_PAYLOAD_MAX_CHARS = 64_000
 /** "Wrote within the last 90 s" half of the active-now strip (Hermes). */
 const ACTIVE_RECENT_MS = 90_000
 /** Heartbeat/auto-compact maintenance tick. */
@@ -476,6 +479,36 @@ export class BotService {
   }
 
   /**
+   * Event → bot (v50): an outside event — the trigger endpoint, a watched
+   * folder, a manual test — becomes ONE user-role turn in the bot's canonical
+   * chat, through the same durable outbox as a teammate's message: it queues
+   * behind a busy chat, survives a restart, and runs the bot's normal
+   * interactive tool loop with the usual approvals. The payload is data,
+   * never instructions: wrapped in untrusted-content markers. Resolves once
+   * the row is queued, never when the turn ends.
+   */
+  async wake(agentId: string, event: BotWakeEvent): Promise<{ deliveryId: string }> {
+    const db = this.deps.db
+    const agent = db.agents.getById(agentId)
+    if (!agent || !agent.enabled) throw new Error('Unknown or disabled bot.')
+    const label = event.label.replace(/\s+/g, ' ').trim().slice(0, 120) || event.source
+    const body =
+      `"${label}" via ${event.source}:\n` +
+      wrapUntrusted(event.payload.slice(0, WAKE_PAYLOAD_MAX_CHARS), `${event.source} ${label}`)
+    const row = db.a2aOutbox.insert({
+      id: randomUUID(),
+      fromAgentId: null,
+      toAgentId: agent.id,
+      conversationId: null,
+      body,
+      hop: 1,
+    })
+    this.botsChanged({ agentId: agent.id })
+    void this.pump(agent.id)
+    return { deliveryId: row.id }
+  }
+
+  /**
    * Starts the oldest queued delivery for a target, if its chat is free.
    * Single-flight per target: the DB read is no longer an atomic shift, so a
    * second pump racing the first must not start the same row twice.
@@ -662,7 +695,20 @@ export class BotService {
       }
       this.onSettled({ ...entry, status: 'replied' }, null)
     })
-    if (!senderChat) return // sender's chat was deleted meanwhile
+    if (!senderChat) {
+      if (entry.conversationId === null) {
+        // An event wake: there is no sender to route to — the bot's own chat
+        // holds the answer; tell the user it happened.
+        this.botsChanged({ agentId: entry.toAgentId })
+        this.deps.notify?.({
+          title: `🤖 ${targetName} handled an event`,
+          body: reply,
+          status: 'ok',
+          conversationId: message.conversationId,
+        })
+      }
+      return // else: the sender's chat was deleted meanwhile
+    }
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: senderChat.id })
     this.botsChanged({ agentId: senderChat.agentId ?? undefined })
     this.deps.notify?.({
@@ -711,7 +757,17 @@ export class BotService {
       }
       this.onSettled({ ...entry, status: 'failed' }, reason)
     })
-    if (!senderChat) return
+    if (!senderChat) {
+      if (entry.conversationId === null) {
+        this.deps.notify?.({
+          title: `🤖 ${targetName} could not handle an event`,
+          body: `${reason}: ${detail}`,
+          status: 'error',
+          conversationId: entry.targetConversationId,
+        })
+      }
+      return
+    }
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: senderChat.id })
     this.botsChanged({})
     this.deps.notify?.({

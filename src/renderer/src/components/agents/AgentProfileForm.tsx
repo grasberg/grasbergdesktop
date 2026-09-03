@@ -7,7 +7,13 @@
  */
 
 import { useEffect, useState, type ReactElement } from 'react'
-import type { AgentProfile, AgentProfileInput, BotUsageSummary } from '@shared/types'
+import type {
+  AgentProfile,
+  AgentProfileInput,
+  BotUsageSummary,
+  WorkflowTriggerInfo,
+  WorkflowWatchStatus,
+} from '@shared/types'
 import { formatCost } from '@shared/pricing'
 import { unwrap } from '@/api/uld'
 import BindingCard from '@/components/bots/BindingCard'
@@ -53,6 +59,12 @@ interface FormState {
   resetIdleMinutes: string
   restrictMessaging: boolean
   messageAllow: string[]
+  /** Events → bot (v50). */
+  webhookEnabled: boolean
+  watchEnabled: boolean
+  watchFolder: string
+  watchGlob: string
+  watchEvent: 'created' | 'changed'
 }
 
 function emptyForm(): FormState {
@@ -75,6 +87,11 @@ function emptyForm(): FormState {
     resetIdleMinutes: '',
     restrictMessaging: false,
     messageAllow: [],
+    webhookEnabled: false,
+    watchEnabled: false,
+    watchFolder: '',
+    watchGlob: '',
+    watchEvent: 'created',
   }
 }
 
@@ -104,6 +121,11 @@ function formFrom(agent: AgentProfile): FormState {
         : '',
     restrictMessaging: agent.messageAllow !== null,
     messageAllow: agent.messageAllow ?? [],
+    webhookEnabled: agent.webhookEnabled,
+    watchEnabled: agent.watch?.enabled ?? false,
+    watchFolder: agent.watch?.folderPath ?? '',
+    watchGlob: agent.watch?.glob ?? '',
+    watchEvent: agent.watch?.event ?? 'created',
   }
 }
 
@@ -130,7 +152,71 @@ function toInput(form: FormState): AgentProfileInput {
       : null,
     reset: dailyHour !== null || idleMinutes !== null ? { dailyHour, idleMinutes } : null,
     messageAllow: form.restrictMessaging ? form.messageAllow : null,
+    webhookEnabled: form.webhookEnabled,
+    watch: form.watchFolder
+      ? {
+          enabled: form.watchEnabled,
+          folderPath: form.watchFolder,
+          glob: form.watchGlob.trim(),
+          event: form.watchEvent,
+        }
+      : null,
   }
+}
+
+/** Live wake URL + watch state for a saved bot, plus a manual test event. */
+function BotEventsInfo({ agent }: { agent: AgentProfile }): ReactElement {
+  const [trigger, setTrigger] = useState<WorkflowTriggerInfo | null>(null)
+  const [watch, setWatch] = useState<WorkflowWatchStatus | null>(null)
+  const [testing, setTesting] = useState(false)
+  useEffect(() => {
+    let alive = true
+    void window.uld.agents.triggerInfo(agent.id).then((res) => {
+      if (alive && res.ok) setTrigger(res.data)
+    })
+    void window.uld.agents.watchInfo(agent.id).then((res) => {
+      if (alive && res.ok) setWatch(res.data)
+    })
+    return () => {
+      alive = false
+    }
+  }, [agent.id, agent.webhookEnabled, agent.watch])
+  const sendTest = async (): Promise<void> => {
+    setTesting(true)
+    try {
+      await unwrap(window.uld.agents.wake(agent.id, 'Test event from the bot editor.'))
+      useUiStore.getState().toast(`Test event queued for ${agent.name} — see its chat.`, 'success')
+    } catch (e) {
+      toastError('Could not send the test event', e)
+    } finally {
+      setTesting(false)
+    }
+  }
+  return (
+    <div className="bot-events-info">
+      {agent.webhookEnabled ? (
+        trigger?.url ? (
+          <p className="bot-form-hint">
+            Wake URL (POST, the body becomes the event): <code>{trigger.url}</code>
+          </p>
+        ) : (
+          <p className="bot-form-hint">
+            The trigger endpoint is off — switch it on under Workflows → trigger endpoint to get
+            this bot's wake URL.
+          </p>
+        )
+      ) : null}
+      {agent.watch?.enabled ? (
+        <p className="bot-form-hint">
+          Folder watch: {watch?.watching ? 'live' : 'not running'}
+          {watch?.lastError ? ` — ${watch.lastError}` : ''}
+        </p>
+      ) : null}
+      <button type="button" disabled={testing} onClick={() => void sendTest()}>
+        {testing ? 'Sending…' : 'Send test event'}
+      </button>
+    </div>
+  )
 }
 
 /** Estimated spend attributable to the bot (its chat + runs stamped with its id). */
@@ -473,6 +559,83 @@ export default function AgentProfileForm({
                 ))
             : null}
         </div>
+      </fieldset>
+
+      <fieldset className="bot-form-section">
+        <legend>Events</legend>
+        <label className="bot-form-inline">
+          <input
+            type="checkbox"
+            checked={form.webhookEnabled}
+            onChange={(e) => set({ webhookEnabled: e.target.checked })}
+          />
+          <span>
+            Accept wake-ups from the local trigger endpoint (POST /agent/…) — the request body
+            arrives as an untrusted event in this bot's chat
+          </span>
+        </label>
+        <div className="bot-form-grid">
+          <label>
+            Watched folder
+            <div className="bot-form-inline">
+              <input value={form.watchFolder} readOnly placeholder="None" />
+              <button
+                type="button"
+                onClick={() =>
+                  void window.uld.app.pickFolder().then((res) => {
+                    if (res.ok && res.data) set({ watchFolder: res.data, watchEnabled: true })
+                  })
+                }
+              >
+                Pick…
+              </button>
+              {form.watchFolder ? (
+                <button
+                  type="button"
+                  onClick={() => set({ watchFolder: '', watchEnabled: false, watchGlob: '' })}
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </label>
+          <label>
+            File filter (glob, optional)
+            <input
+              value={form.watchGlob}
+              onChange={(e) => set({ watchGlob: e.target.value })}
+              placeholder="*.csv"
+              maxLength={200}
+              disabled={!form.watchFolder}
+            />
+          </label>
+          <label>
+            Wake on
+            <select
+              value={form.watchEvent}
+              onChange={(e) => set({ watchEvent: e.target.value as 'created' | 'changed' })}
+              disabled={!form.watchFolder}
+            >
+              <option value="created">New files</option>
+              <option value="changed">Changed files</option>
+            </select>
+          </label>
+          <label className="bot-form-inline">
+            <input
+              type="checkbox"
+              checked={form.watchEnabled}
+              disabled={!form.watchFolder}
+              onChange={(e) => set({ watchEnabled: e.target.checked })}
+            />
+            <span>Watch enabled</span>
+          </label>
+        </div>
+        <span className="bot-form-hint">
+          An event is one turn in the bot's chat with its normal tools and approvals; the payload
+          is wrapped as untrusted content — a guardrail, not a boundary, so keep risky tools
+          approval-gated.
+        </span>
+        {editing ? <BotEventsInfo agent={editing} /> : null}
       </fieldset>
 
       {editing ? <BotRoutinesPanel agent={editing} /> : null}

@@ -2070,6 +2070,14 @@ export interface AgentProfile {
    * Null = every enabled bot (the open default); [] = messaging disabled.
    */
   messageAllow: string[] | null
+  /**
+   * Events → bot (v50): the loopback trigger endpoint may wake this bot
+   * (POST /agent/<id>). Off by default — each bot opts in, like a workflow's
+   * webhookEnabled — and the endpoint itself must be switched on.
+   */
+  webhookEnabled: boolean
+  /** Events → bot (v50): a watched folder wakes this bot (same shape as a workflow watch). */
+  watch: WorkflowWatchConfig | null
   createdAt: number
   updatedAt: number
 }
@@ -2113,6 +2121,8 @@ export interface AgentProfileInput {
   heartbeat?: BotHeartbeat | null
   reset?: BotResetPolicy | null
   messageAllow?: string[] | null
+  webhookEnabled?: boolean
+  watch?: WorkflowWatchConfig | null
 }
 
 export type AgentProfilePatch = Partial<AgentProfileInput>
@@ -2249,6 +2259,18 @@ export interface BotModeSettings {
   maxHops: number
   /** Room size ceiling (2–12). */
   groupMaxMembers: number
+}
+
+/**
+ * What woke a bot from outside a chat (v50). The payload is DATA, never an
+ * instruction: BotService wraps it in untrusted-content markers before the
+ * bot sees it.
+ */
+export interface BotWakeEvent {
+  source: 'webhook' | 'watch' | 'manual'
+  /** Short human label — the route, the file name, "test". */
+  label: string
+  payload: string
 }
 
 /** Payload of push:botsChanged. */

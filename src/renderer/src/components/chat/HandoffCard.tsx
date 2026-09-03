@@ -123,12 +123,14 @@ export default function HandoffCard({ message }: { message: Message }): ReactEle
   const speaker = incoming
     ? handoff.fromAgentId
       ? from
-      : { name: 'You', avatar: null }
+      : { name: delegate ? 'You' : 'Event', avatar: null }
     : to
   const title = delegate
     ? `Delegated by ${handoff.fromAgentId ? from.name : 'the user'}`
     : incoming
-      ? `${from.name} sent a message`
+      ? handoff.fromAgentId
+        ? `${from.name} sent a message`
+        : 'An event woke this bot'
       : handoff.status === 'failed'
         ? `Message to ${to.name} failed`
         : `${to.name} replied`
