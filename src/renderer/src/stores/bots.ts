@@ -98,16 +98,28 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
     }
   },
 
-  async createGroup(name, memberIds, activation, observerIds) {
+  async createGroup(name, memberIds, activation, observerIds, mode, leadAgentId) {
     try {
       const group = await unwrap(
-        window.uld.bots.createGroup({ name, memberIds, activation, observerIds })
+        window.uld.bots.createGroup({ name, memberIds, activation, observerIds, mode, leadAgentId })
       )
       await get().load()
       set({ activeGroupId: group.id, groupMessages: [] })
       return group
     } catch (e) {
       toastError('Failed to create group', e)
+      return null
+    }
+  },
+
+  async createGroupFromMoaPreset(presetId) {
+    try {
+      const group = await unwrap(window.uld.bots.createGroupFromMoaPreset(presetId))
+      await get().load()
+      set({ activeGroupId: group.id, groupMessages: [] })
+      return group
+    } catch (e) {
+      toastError('Failed to create the ensemble room', e)
       return null
     }
   },

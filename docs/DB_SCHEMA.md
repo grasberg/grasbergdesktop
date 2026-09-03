@@ -29,7 +29,7 @@ version is stored in the `meta` table under key `schema_version`. Adding a
 schema change means appending a new migration object — never editing an
 existing one.
 
-The schema is currently at **version 47** (`src/main/db/migrations.ts` is the
+The schema is currently at **version 50** (`src/main/db/migrations.ts` is the
 authoritative, append-only list; the table below is a summary and may lag it):
 
 | Version | Name | Adds |
@@ -71,6 +71,7 @@ authoritative, append-only list; the table below is a summary and may lag it):
 | 47 | `bot-gateway` | OpenClaw-inspired Bot Mode hardening: `agents.heartbeat_json`/`reset_json`/`message_allow_json` (heartbeat, auto-compact policy, bot-to-bot allowlist); `bot_groups.activation` ('always'\|'mention') + `bot_group_members.observer`; `scheduled_tasks.webhook_url` (delivery target); new `bot_bindings` table (per-bot external Telegram presence — the token lives in `tool_secrets`, never here) |
 | 48 | `bot-outbox` | new `a2a_outbox` table — durable bot-to-bot (`message_agent`) deliveries: queued → delivered → replied \| failed \| cancelled, `hop` + `attempts` persisted, `target_conversation_id`/`assistant_message_id` for boot recovery; `messages.handoff_json` (visible handoff chrome on the sender marker, the target's incoming turn and the routed reply). No FKs — app-side cleanup on delete |
 | 49 | `bot-attention` | roster attention: `agents.chat_seen_at` + `bot_groups.seen_at` (when the user last looked; backfilled to the upgrade moment), `agent_runs.agent_id` + `idx_agent_runs_agent` and `headless_usage.agent_id` + `idx_headless_usage_agent` (a run/spend attributed to the agent PROFILE; task rows backfilled from `scheduled_tasks.agent_id`). Plain nullable ADD COLUMNs |
+| 50 | `bot-rooms-events` | `bot_groups.mode` ('roundtable'\|'ensemble', default roundtable) + `bot_groups.lead_agent_id` (the synthesizing member of an ensemble room; nulled app-side when it leaves); `agents.webhook_enabled` + `agents.watch_json` (a bot's opt-in to being woken by the trigger endpoint / a watched folder). Plain ADD COLUMNs |
 
 ## Tables
 
@@ -517,6 +518,9 @@ the room is opened).
 | `name` | TEXT | display name (also mirrored to the transcript conversation's title) |
 | `conversation_id` | TEXT | the room transcript conversation; no FK — disband removes both |
 | `needs_user` | INTEGER | 1 = a member @user-escalated since the room was last opened |
+| `seen_at` | INTEGER nullable | v49: when the user last opened the room (unread = a bot turn newer than this) |
+| `mode` | TEXT | v50: `roundtable` (serial reply-or-pass rounds) \| `ensemble` (every member answers the latest user message in parallel as its own run, then the lead synthesizes one reply — a Mixture-of-Agents preset as a visible room; "Create bot room" on a preset makes one bot per distinct advisor model + a lead bot) |
+| `lead_agent_id` | TEXT nullable | v50: the synthesizing member of an ensemble room; must be a non-observer member; NULL for round tables |
 | `created_at`, `updated_at` | INTEGER | unix ms |
 
 ### `bot_group_members` (v46)

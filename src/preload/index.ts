@@ -359,6 +359,8 @@ const api: UldApi = {
     markSeen: (agentId) => ipcRenderer.invoke(CHANNELS.botsMarkSeen, agentId),
     usage: (agentId) => ipcRenderer.invoke(CHANNELS.botsUsage, agentId),
     createGroup: (input) => ipcRenderer.invoke(CHANNELS.botGroupCreate, input),
+    createGroupFromMoaPreset: (presetId) =>
+      ipcRenderer.invoke(CHANNELS.botGroupCreateFromMoa, presetId),
     updateGroup: (id, patch) => ipcRenderer.invoke(CHANNELS.botGroupUpdate, id, patch),
     deleteGroup: (id) => ipcRenderer.invoke(CHANNELS.botGroupDelete, id),
     groupSend: (groupId, content) => ipcRenderer.invoke(CHANNELS.botGroupSend, groupId, content),

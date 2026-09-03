@@ -2128,11 +2128,23 @@ export interface BotGroup {
    * a note-taker or auditor bot. Subset of memberIds.
    */
   observerIds: string[]
+  /** Room mode (v50); see BotGroupMode. */
+  mode: BotGroupMode
+  /** The synthesizing member of an ensemble room (a non-observer member); null for round tables. */
+  leadAgentId: string | null
   createdAt: number
   updatedAt: number
 }
 
 export type BotGroupActivation = 'always' | 'mention'
+
+/**
+ * Room mode (v50): 'roundtable' = the serial reply-or-pass rounds; 'ensemble'
+ * = every member answers the latest user message in parallel as its own run,
+ * then the lead synthesizes one reply (the Mixture-of-Agents shape as a
+ * visible room instead of a hidden preset).
+ */
+export type BotGroupMode = 'roundtable' | 'ensemble'
 
 /**
  * External chat presence for one bot (v47): its own Telegram bot, paired to

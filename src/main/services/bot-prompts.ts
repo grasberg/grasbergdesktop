@@ -258,3 +258,70 @@ export function formatDeliveryFailure(targetName: string, reason: string, detail
     `(reason codes mirror provider errors; auth/config failures need the user, transient ones were retried once)`
   )
 }
+
+// ---------------------------------------------------------------------------
+// Ensemble rooms (v50): the Mixture-of-Agents shape as a visible room
+// ---------------------------------------------------------------------------
+
+/** Persona for a bot auto-created from a MoA advisor model. */
+export const ENSEMBLE_ADVISOR_PERSONA =
+  'You are one of several advisor models answering the same question independently. Answer the ' +
+  'latest user message directly and completely, in your own words; do not address the other ' +
+  'advisors and do not defer to them.'
+
+/** Persona for a bot auto-created from a MoA aggregator model. */
+export const ENSEMBLE_LEAD_PERSONA =
+  'You lead an ensemble of advisor models. You receive their independent answers and write the ' +
+  'single reply the user reads: weigh them critically, reconcile disagreements, keep what is ' +
+  'well-supported, and synthesize in your own voice.'
+
+/** One advisor's turn in an ensemble room: answer the user, independently. */
+export function buildEnsembleAdvisorPrompt(input: {
+  self: BotIdentity
+  roomName: string
+  members: readonly BotIdentity[]
+  transcript: ReadonlyArray<{ speaker: string; text: string }>
+}): string {
+  const transcriptText = capTranscript(
+    input.transcript.map((entry) => `${entry.speaker}: ${entry.text}`).join('\n\n')
+  )
+  return [
+    `You are "${input.self.name}"${input.self.title.trim() ? ` (${input.self.title.trim()})` : ''}, ` +
+      `one advisor in the ensemble room "${input.roomName}". Every advisor answers the user ` +
+      'independently; the lead synthesizes afterwards. Members:\n' +
+      rosterLines(input.members),
+    `Transcript so far:\n---\n${transcriptText}\n---`,
+    'Answer the latest user message directly and completely, in your own voice for your role. ' +
+      'Do not address the other advisors and do not defer — the lead needs your full take.',
+  ].join('\n\n')
+}
+
+/** The lead's turn: synthesize the advisors' independent answers into one reply. */
+export function buildEnsembleLeadPrompt(input: {
+  self: BotIdentity
+  roomName: string
+  members: readonly BotIdentity[]
+  transcript: ReadonlyArray<{ speaker: string; text: string }>
+  advisorReplies: ReadonlyArray<{ name: string; text: string }>
+}): string {
+  const transcriptText = capTranscript(
+    input.transcript.map((entry) => `${entry.speaker}: ${entry.text}`).join('\n\n')
+  )
+  const analyses =
+    input.advisorReplies.length > 0
+      ? input.advisorReplies
+          .map((reply, index) => `### Advisor ${index + 1}: ${reply.name}\n${reply.text}`)
+          .join('\n\n')
+      : '(no advisor answered this round)'
+  return [
+    `You are "${input.self.name}"${input.self.title.trim() ? ` (${input.self.title.trim()})` : ''}, ` +
+      `the lead of the ensemble room "${input.roomName}". Members:\n` +
+      rosterLines(input.members),
+    `Transcript so far:\n---\n${transcriptText}\n---`,
+    `Independent answers from the advisors this round:\n\n${analyses}`,
+    'Write the single reply the user will read. Weigh the advisors critically — some may be ' +
+      'wrong or biased — reconcile disagreements, keep what is well-supported, and answer in your ' +
+      'own voice; do not list the advisors one by one. If a real judgment call needs the human, ' +
+      'include @user in your reply.',
+  ].join('\n\n')
+}

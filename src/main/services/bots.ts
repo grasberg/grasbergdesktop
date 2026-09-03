@@ -27,19 +27,25 @@ import type {
   BotAttention,
   BotGroup,
   BotGroupActivation,
+  BotGroupMode,
   BotRoster,
   Conversation,
   DelegateFinishedInfo,
   DelegateHandoffInfo,
   Message,
   MessageHandoff,
+  MoaModelRef,
   ProviderErrorCode,
   ScheduledTask,
 } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import {
+  buildEnsembleAdvisorPrompt,
+  buildEnsembleLeadPrompt,
   buildGroupTurnPrompt,
   buildHeartbeatPrompt,
+  ENSEMBLE_ADVISOR_PERSONA,
+  ENSEMBLE_LEAD_PERSONA,
   botSlug,
   formatBotReply,
   formatDelegationMarker,
@@ -811,20 +817,103 @@ export class BotService {
     memberIds: string[]
     activation?: BotGroupActivation
     observerIds?: string[]
+    mode?: BotGroupMode
+    leadAgentId?: string | null
   }): BotGroup {
     const members = this.resolveMembers(input.memberIds)
     const name = input.name.trim() || 'Group chat'
-    const conversation = this.deps.db.conversations.create({ mode: 'chat', title: name })
     const memberIds = members.map((member) => member.id)
+    const observerIds = (input.observerIds ?? []).filter((oid) => memberIds.includes(oid))
+    const mode = input.mode ?? 'roundtable'
+    const leadAgentId = mode === 'ensemble' ? (input.leadAgentId ?? null) : null
+    this.assertLead(mode, memberIds, observerIds, leadAgentId)
+    const conversation = this.deps.db.conversations.create({ mode: 'chat', title: name })
     const group = this.deps.db.botGroups.create({
       name,
       memberIds,
       conversationId: conversation.id,
       activation: input.activation,
-      observerIds: (input.observerIds ?? []).filter((oid) => memberIds.includes(oid)),
+      observerIds,
+      mode,
+      leadAgentId,
     })
     this.botsChanged({ groupId: group.id })
     return group
+  }
+
+  /** An ensemble room needs a lead that is a speaking (non-observer) member. */
+  private assertLead(
+    mode: BotGroupMode,
+    memberIds: readonly string[],
+    observerIds: readonly string[],
+    leadAgentId: string | null
+  ): void {
+    if (mode !== 'ensemble') return
+    if (!leadAgentId) throw new Error('An ensemble room needs a lead bot to synthesize the answers.')
+    if (!memberIds.includes(leadAgentId)) throw new Error('The lead must be a member of the room.')
+    if (observerIds.includes(leadAgentId)) throw new Error('The lead cannot be an observer.')
+  }
+
+  /**
+   * Turns a Mixture-of-Agents preset into a visible ensemble room: one bot per
+   * distinct advisor model (created on first use, reused after) and a lead bot
+   * for the aggregator. The preset itself keeps working for /moa.
+   */
+  createGroupFromMoaPreset(presetId: string): BotGroup {
+    const db = this.deps.db
+    const preset = db.settings.get().moaPresets.find((candidate) => candidate.id === presetId)
+    if (!preset || !preset.enabled) throw new Error('Unknown or disabled MoA preset.')
+    const lead = this.ensureModelBot(preset.aggregator, 'lead', preset.name)
+    const seen = new Set<string>([lead.id])
+    const advisors: AgentProfile[] = []
+    for (const ref of preset.referenceModels) {
+      const bot = this.ensureModelBot(ref, 'advisor', preset.name)
+      if (seen.has(bot.id)) continue
+      seen.add(bot.id)
+      advisors.push(bot)
+    }
+    if (advisors.length === 0) {
+      throw new Error(
+        'This preset needs at least one advisor model that differs from the aggregator.'
+      )
+    }
+    return this.createGroup({
+      name: preset.name,
+      memberIds: [...advisors.map((bot) => bot.id), lead.id],
+      mode: 'ensemble',
+      leadAgentId: lead.id,
+    })
+  }
+
+  /**
+   * The bot standing in for one provider/model pair. Named "<provider> ·
+   * <model>"; an existing bot with that name is reused when its pins match
+   * (and re-enabled), otherwise a numbered name avoids the clash. Ordinary
+   * profiles — the user may rename, re-persona or delete them.
+   */
+  private ensureModelBot(ref: MoaModelRef, role: 'advisor' | 'lead', presetName: string): AgentProfile {
+    const db = this.deps.db
+    const label = db.providers.getById(ref.providerId)?.label ?? ref.providerId
+    const base = `${label} · ${ref.modelId}`.slice(0, 90)
+    let name = base
+    for (let attempt = 2; attempt < 50; attempt++) {
+      const existing = db.agents.getByName(name)
+      if (!existing) break
+      if (existing.providerId === ref.providerId && existing.modelId === ref.modelId) {
+        return existing.enabled ? existing : (db.agents.update(existing.id, { enabled: true }) ?? existing)
+      }
+      name = `${base} (${attempt})`
+    }
+    return db.agents.create({
+      name,
+      title: role === 'lead' ? 'Ensemble lead' : 'Ensemble advisor',
+      description: `Created from the MoA preset "${presetName}"`,
+      systemPrompt: role === 'lead' ? ENSEMBLE_LEAD_PERSONA : ENSEMBLE_ADVISOR_PERSONA,
+      providerId: ref.providerId,
+      modelId: ref.modelId,
+      // Like MoA advisors: text in, text out, no tools.
+      toolIds: [],
+    })
   }
 
   updateGroup(
@@ -834,6 +923,8 @@ export class BotService {
       memberIds?: string[]
       activation?: BotGroupActivation
       observerIds?: string[]
+      mode?: BotGroupMode
+      leadAgentId?: string | null
     }
   ): BotGroup {
     const db = this.deps.db
@@ -858,6 +949,20 @@ export class BotService {
     }
     if (patch.activation !== undefined) {
       group = db.botGroups.setActivation(id, patch.activation) ?? group
+    }
+    if (patch.mode !== undefined || patch.leadAgentId !== undefined) {
+      const mode = patch.mode ?? group.mode
+      const lead =
+        mode === 'ensemble'
+          ? patch.leadAgentId === undefined
+            ? group.leadAgentId
+            : patch.leadAgentId
+          : null
+      this.assertLead(mode, group.memberIds, group.observerIds, lead)
+      group = db.botGroups.setMode(id, mode, lead) ?? group
+    } else if (group.mode === 'ensemble' && !group.leadAgentId) {
+      // The members changed and the lead left with them.
+      throw new Error('An ensemble room needs a lead bot to synthesize the answers.')
     }
     this.botsChanged({ groupId: id })
     return group
@@ -922,7 +1027,11 @@ export class BotService {
     const mentioned = parseBotMentions(text, members.map((member) => member.name))
     const controller = new AbortController()
     this.activeGroups.set(group.id, controller)
-    void this.runGroupRounds(group, members, mentioned, controller)
+    const run =
+      group.mode === 'ensemble'
+        ? this.runEnsembleRound(group, members, controller)
+        : this.runGroupRounds(group, members, mentioned, controller)
+    void run
       .catch((e) => {
         console.error('[bots] group rounds failed:', errorMessageOf(e))
       })
@@ -981,18 +1090,7 @@ export class BotService {
         if (controller.signal.aborted || messageCount >= GROUP_MAX_MESSAGES) return
         const agent = members.find((member) => member.name === name)
         if (!agent) continue
-        const transcript = db.messages
-          .listByConversation(group.conversationId)
-          .filter(
-            (m) =>
-              (m.role === 'user' || m.role === 'assistant') &&
-              (m.status === 'complete' || m.status === 'stopped') &&
-              m.content.trim().length > 0
-          )
-          .map((m) => ({
-            speaker: m.agentId ? (byId.get(m.agentId)?.name ?? 'Unknown bot') : 'User',
-            text: m.content,
-          }))
+        const transcript = this.roomTranscript(group, byId)
         const prompt = buildGroupTurnPrompt({
           self: identity(agent),
           roomName: group.name,
@@ -1034,6 +1132,117 @@ export class BotService {
         }
       }
       if (!spoke) return // a full silent round settles the room
+    }
+  }
+
+  /** The room transcript as the prompts see it (user + finished bot turns, oldest first). */
+  private roomTranscript(
+    group: BotGroup,
+    byId: ReadonlyMap<string, AgentProfile>
+  ): Array<{ speaker: string; text: string }> {
+    return this.deps.db.messages
+      .listByConversation(group.conversationId)
+      .filter(
+        (m) =>
+          (m.role === 'user' || m.role === 'assistant') &&
+          (m.status === 'complete' || m.status === 'stopped') &&
+          m.content.trim().length > 0
+      )
+      .map((m) => ({
+        speaker: m.agentId ? (byId.get(m.agentId)?.name ?? 'Unknown bot') : 'User',
+        text: m.content,
+      }))
+  }
+
+  /**
+   * Ensemble room (v50): every advisor answers the latest user message in
+   * PARALLEL as its own run, the replies post in member order, and the lead
+   * synthesizes one reply from them. No settlement loop, no PASS.
+   */
+  private async runEnsembleRound(
+    group: BotGroup,
+    members: AgentProfile[],
+    controller: AbortController
+  ): Promise<void> {
+    const db = this.deps.db
+    const byId = new Map(members.map((member) => [member.id, member]))
+    const lead = group.leadAgentId ? byId.get(group.leadAgentId) : undefined
+    const observers = new Set(group.observerIds)
+    const advisors = members.filter((member) => member.id !== lead?.id && !observers.has(member.id))
+    const identities = members.map(identity)
+    const transcript = this.roomTranscript(group, byId)
+    const generate = (agent: AgentProfile, prompt: string): Promise<string> =>
+      this.deps.chat.generateForWorkflow(prompt, undefined, undefined, {
+        useTools: false,
+        agentId: agent.id,
+        signal: controller.signal,
+        usage: { runKind: 'other', refId: group.id },
+      })
+
+    const outcomes = await Promise.allSettled(
+      advisors.map(async (agent) => ({
+        agent,
+        reply: await generate(
+          agent,
+          buildEnsembleAdvisorPrompt({
+            self: identity(agent),
+            roomName: group.name,
+            members: identities,
+            transcript,
+          })
+        ),
+      }))
+    )
+    if (controller.signal.aborted) return
+    const replies: Array<{ name: string; text: string }> = []
+    for (const outcome of outcomes) {
+      if (outcome.status === 'rejected') {
+        // An advisor's failure is never fatal (the MoA policy): the lead
+        // synthesizes from whoever answered.
+        console.error('[bots] ensemble advisor failed:', errorMessageOf(outcome.reason))
+        continue
+      }
+      const text = outcome.value.reply.trim()
+      if (!text) continue
+      this.insertMessage(group.conversationId, 'assistant', text, outcome.value.agent.id)
+      replies.push({ name: outcome.value.agent.name, text })
+    }
+    db.botGroups.touch(group.id, Date.now())
+    this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: group.conversationId })
+    this.botsChanged({ groupId: group.id })
+    if (!lead || controller.signal.aborted) return
+
+    let synthesis: string
+    try {
+      synthesis = await generate(
+        lead,
+        buildEnsembleLeadPrompt({
+          self: identity(lead),
+          roomName: group.name,
+          members: identities,
+          transcript,
+          advisorReplies: replies,
+        })
+      )
+    } catch (e) {
+      if (controller.signal.aborted) return
+      console.error(`[bots] ensemble lead failed for ${lead.name}:`, errorMessageOf(e))
+      return
+    }
+    const text = synthesis.trim()
+    if (!text || controller.signal.aborted) return
+    this.insertMessage(group.conversationId, 'assistant', text, lead.id)
+    db.botGroups.touch(group.id, Date.now())
+    this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: group.conversationId })
+    this.botsChanged({ groupId: group.id })
+    if (mentionsUser(text)) {
+      db.botGroups.setNeedsUser(group.id, true)
+      this.deps.notify?.({
+        title: `🤖 ${group.name} needs you`,
+        body: `${lead.name}: ${text.slice(0, 200)}`,
+        status: 'ok',
+        groupId: group.id,
+      })
     }
   }
 

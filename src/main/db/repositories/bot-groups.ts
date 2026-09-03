@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { BotGroup, BotGroupActivation } from '@shared/types'
+import type { BotGroup, BotGroupActivation, BotGroupMode } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 
 export interface BotGroupsRepository {
@@ -21,10 +21,14 @@ export interface BotGroupsRepository {
     conversationId: string
     activation?: BotGroupActivation
     observerIds?: string[]
+    mode?: BotGroupMode
+    leadAgentId?: string | null
   }): BotGroup
   rename(id: string, name: string): BotGroup | null
   setMembers(id: string, memberIds: string[], observerIds?: string[]): BotGroup | null
   setActivation(id: string, activation: BotGroupActivation): BotGroup | null
+  /** Room mode + lead (v50); a round table always stores a null lead. */
+  setMode(id: string, mode: BotGroupMode, leadAgentId: string | null): BotGroup | null
   setNeedsUser(id: string, needsUser: boolean): void
   /** The user opened the room: clears needs_user and stamps seen_at (v49). */
   markSeen(id: string, seenAt: number): void
@@ -43,6 +47,8 @@ interface BotGroupRow {
   needs_user: number
   seen_at: number | null
   activation: string
+  mode: string
+  lead_agent_id: string | null
   created_at: number
   updated_at: number
 }
@@ -66,6 +72,8 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       seenAt: row.seen_at,
       memberIds: members.map((member) => member.agentId),
       activation: row.activation === 'mention' ? 'mention' : 'always',
+      mode: row.mode === 'ensemble' ? 'ensemble' : 'roundtable',
+      leadAgentId: row.lead_agent_id,
       observerIds: members.filter((member) => member.observer).map((member) => member.agentId),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -109,9 +117,21 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       const now = Date.now()
       const id = randomUUID()
       driver.run(
-        `INSERT INTO bot_groups (id, name, conversation_id, needs_user, seen_at, activation, created_at, updated_at)
-         VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
-        [id, input.name, input.conversationId, now, input.activation ?? 'always', now, now]
+        `INSERT INTO bot_groups
+           (id, name, conversation_id, needs_user, seen_at, activation, mode, lead_agent_id,
+            created_at, updated_at)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          input.name,
+          input.conversationId,
+          now,
+          input.activation ?? 'always',
+          input.mode ?? 'roundtable',
+          input.mode === 'ensemble' ? (input.leadAgentId ?? null) : null,
+          now,
+          now,
+        ]
       )
       insertMembers(id, input.memberIds, input.observerIds ?? [])
       return getById(id) as BotGroup
@@ -131,7 +151,24 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
         observerIds ?? (getById(id)?.observerIds.filter((oid) => memberIds.includes(oid)) ?? [])
       driver.run('DELETE FROM bot_group_members WHERE group_id = ?', [id])
       insertMembers(id, memberIds, keepObservers)
+      // A lead that left the room is no lead (no FK — app-side, v50).
+      driver.run(
+        `UPDATE bot_groups SET lead_agent_id = NULL
+          WHERE id = ? AND lead_agent_id IS NOT NULL
+            AND lead_agent_id NOT IN (SELECT agent_id FROM bot_group_members WHERE group_id = ?)`,
+        [id, id]
+      )
       driver.run('UPDATE bot_groups SET updated_at = ? WHERE id = ?', [Date.now(), id])
+      return getById(id)
+    },
+
+    setMode(id, mode, leadAgentId) {
+      driver.run('UPDATE bot_groups SET mode = ?, lead_agent_id = ?, updated_at = ? WHERE id = ?', [
+        mode,
+        mode === 'ensemble' ? leadAgentId : null,
+        Date.now(),
+        id,
+      ])
       return getById(id)
     },
 

@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { AgentProfile, BotAttention, BotGroup, Message } from '@shared/types'
+import type { AgentProfile, BotAttention, BotGroup, BotGroupMode, Message } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import AgentProfileForm from '@/components/agents/AgentProfileForm'
 import Markdown from '@/components/chat/Markdown'
@@ -48,6 +48,8 @@ function GroupForm({
   const [activation, setActivation] = useState<'always' | 'mention'>(
     editing?.activation ?? 'always'
   )
+  const [mode, setMode] = useState<BotGroupMode>(editing?.mode ?? 'roundtable')
+  const [leadAgentId, setLeadAgentId] = useState<string>(editing?.leadAgentId ?? '')
   const createGroup = useBotsStore((s) => s.createGroup)
   const updateGroup = useBotsStore((s) => s.updateGroup)
 
@@ -56,20 +58,28 @@ function GroupForm({
   const toggleObserver = (id: string): void =>
     setObserverIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
 
-  const valid = name.trim().length > 0 && memberIds.length >= 2 && memberIds.length <= 6
+  const observers = observerIds.filter((id) => memberIds.includes(id))
+  const leadCandidates = memberIds.filter((id) => !observers.includes(id))
+  const lead = mode === 'ensemble' && leadCandidates.includes(leadAgentId) ? leadAgentId : null
+  const valid =
+    name.trim().length > 0 &&
+    memberIds.length >= 2 &&
+    memberIds.length <= 6 &&
+    (mode !== 'ensemble' || lead !== null)
 
   const submit = async (): Promise<void> => {
     if (!valid) return
-    const observers = observerIds.filter((id) => memberIds.includes(id))
     if (editing) {
       await updateGroup(editing.id, {
         name: name.trim(),
         memberIds,
         activation,
         observerIds: observers,
+        mode,
+        leadAgentId: lead,
       })
     } else {
-      await createGroup(name.trim(), memberIds, activation, observers)
+      await createGroup(name.trim(), memberIds, activation, observers, mode, lead)
     }
     onDone()
   }
@@ -87,15 +97,39 @@ function GroupForm({
         />
       </label>
       <label>
-        Activation
-        <select
-          value={activation}
-          onChange={(e) => setActivation(e.target.value as 'always' | 'mention')}
-        >
-          <option value="always">Open rounds — everyone may reply or pass</option>
-          <option value="mention">Mention only — a bot speaks when @named</option>
+        Mode
+        <select value={mode} onChange={(e) => setMode(e.target.value as BotGroupMode)}>
+          <option value="roundtable">Round table — short reply-or-pass rounds</option>
+          <option value="ensemble">Ensemble — everyone answers at once, the lead synthesizes</option>
         </select>
       </label>
+      {mode === 'ensemble' ? (
+        <label>
+          Lead (writes the reply you read)
+          <select value={lead ?? ''} onChange={(e) => setLeadAgentId(e.target.value)}>
+            <option value="">Pick a member…</option>
+            {leadCandidates.map((id) => {
+              const bot = bots.find((candidate) => candidate.id === id)
+              return bot ? (
+                <option key={id} value={id}>
+                  {bot.name}
+                </option>
+              ) : null
+            })}
+          </select>
+        </label>
+      ) : (
+        <label>
+          Activation
+          <select
+            value={activation}
+            onChange={(e) => setActivation(e.target.value as 'always' | 'mention')}
+          >
+            <option value="always">Open rounds — everyone may reply or pass</option>
+            <option value="mention">Mention only — a bot speaks when @named</option>
+          </select>
+        </label>
+      )}
       <div className="bot-member-pick">
         <span className="bot-form-hint">
           Members (2–6 bots). Observers read the room but speak only when @mentioned.
@@ -182,6 +216,11 @@ function RoomView({
       <header className="bot-room-header">
         <div className="bot-room-title">
           <strong>{group.name}</strong>
+          {group.mode === 'ensemble' ? (
+            <span className="bots-row-title" title="Every member answers at once; the lead synthesizes">
+              ensemble · lead {byId.get(group.leadAgentId ?? '')?.name ?? '—'}
+            </span>
+          ) : null}
           <span className="bot-room-members">
             {members.map((member) => (
               <span key={member.id} className="bot-room-member" title={member.title || member.name}>
@@ -461,6 +500,7 @@ export default function BotsView(): ReactElement {
                       {entry.row.group.name}
                       <span className="bots-row-title">
                         {entry.row.group.memberIds.length} bots
+                        {entry.row.group.mode === 'ensemble' ? ' · ensemble' : ''}
                       </span>
                       <AttentionChip attention={entry.row.attention} />
                     </span>

@@ -11,6 +11,7 @@ import type {
   Attachment,
   BotGroup,
   BotGroupActivation,
+  BotGroupMode,
   BotRoster,
   BotsChangedEvent,
   Conversation,
@@ -333,8 +334,12 @@ export interface BotsStoreState {
     name: string,
     memberIds: string[],
     activation?: BotGroupActivation,
-    observerIds?: string[]
+    observerIds?: string[],
+    mode?: BotGroupMode,
+    leadAgentId?: string | null
   ): Promise<BotGroup | null>
+  /** A MoA preset as a visible ensemble room (v50); selects the new room. */
+  createGroupFromMoaPreset(presetId: string): Promise<BotGroup | null>
   updateGroup(
     id: string,
     patch: {
@@ -342,6 +347,8 @@ export interface BotsStoreState {
       memberIds?: string[]
       activation?: BotGroupActivation
       observerIds?: string[]
+      mode?: BotGroupMode
+      leadAgentId?: string | null
     }
   ): Promise<void>
   deleteGroup(id: string): Promise<void>

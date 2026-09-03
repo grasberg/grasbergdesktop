@@ -3,6 +3,8 @@ import type { MoaModelRef, MoaPreset, ProviderConfig } from '@shared/types'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
+import { useBotsStore } from '@/stores/bots'
+import { useUiStore } from '@/stores/ui'
 import { providerUsable } from '@/lib/providers'
 
 /** Providers that can actually be called (enabled + key, or connected OAuth). */
@@ -206,6 +208,23 @@ function PresetCard({
           <input type="radio" name="moa-default" checked={isDefault} onChange={onMakeDefault} />
           <span>Default (/moa)</span>
         </label>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          title="One bot per advisor model plus a lead for the aggregator, deliberating in a visible room"
+          onClick={() =>
+            void useBotsStore
+              .getState()
+              .createGroupFromMoaPreset(preset.id)
+              .then((group) => {
+                if (!group) return
+                useUiStore.getState().openSettings(false)
+                useUiStore.getState().setView('bots')
+              })
+          }
+        >
+          Create bot room
+        </button>
         <button type="button" className="btn btn-ghost btn-danger-text" onClick={onDelete}>
           Delete
         </button>

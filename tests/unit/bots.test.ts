@@ -714,3 +714,185 @@ describe('BotService delegate handoffs (v49)', () => {
     expect(db.messages.listByConversation(chatId).at(-1)!.content).toContain('was stopped: halfway')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Ensemble rooms (v50): parallel advisors + a synthesizing lead; MoA bridge
+// ---------------------------------------------------------------------------
+
+describe('BotService ensemble rooms (v50)', () => {
+  async function settledRoom(service: BotService, groupId: string): Promise<void> {
+    const active = (service as unknown as { activeGroups: Map<string, unknown> }).activeGroups
+    await vi.waitFor(() => expect(active.has(groupId)).toBe(false), { timeout: 5000 })
+  }
+
+  it('runs every advisor in parallel, posts replies in member order, then the lead synthesizes', async () => {
+    const alpha = db.agents.create({ name: 'Alpha', systemPrompt: 'p' })
+    const beta = db.agents.create({ name: 'Beta', systemPrompt: 'p' })
+    const lead = db.agents.create({ name: 'Lead', systemPrompt: 'p' })
+    const pending: Array<{ agentId: string; prompt: string; resolve: (text: string) => void }> = []
+    let inFlight = 0
+    let maxInFlight = 0
+    const chat = makeFakeChat({
+      generateForWorkflow: (prompt, _p, _m, opts) =>
+        new Promise<string>((resolve) => {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          pending.push({
+            agentId: opts?.agentId ?? '',
+            prompt,
+            resolve: (text) => {
+              inFlight -= 1
+              resolve(text)
+            },
+          })
+        }),
+    })
+    const { service } = makeService(chat)
+    const group = service.createGroup({
+      name: 'Council',
+      memberIds: [alpha.id, beta.id, lead.id],
+      mode: 'ensemble',
+      leadAgentId: lead.id,
+    })
+    expect(group.mode).toBe('ensemble')
+    expect(group.leadAgentId).toBe(lead.id)
+
+    service.groupSend(group.id, 'Should we ship on Friday?')
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    expect(maxInFlight).toBe(2) // both advisors at once
+    expect(pending.map((p) => p.agentId).sort()).toEqual([alpha.id, beta.id].sort())
+    expect(pending[0].prompt).toContain('one advisor in the ensemble room')
+    // Beta answers first; the transcript still lists Alpha before Beta.
+    pending.find((p) => p.agentId === beta.id)!.resolve('No — Fridays are risky.')
+    pending.find((p) => p.agentId === alpha.id)!.resolve('Yes, ship it.')
+
+    await vi.waitFor(() => expect(pending).toHaveLength(3))
+    const leadCall = pending[2]
+    expect(leadCall.agentId).toBe(lead.id)
+    expect(leadCall.prompt).toContain('Advisor 1: Alpha')
+    expect(leadCall.prompt).toContain('Yes, ship it.')
+    expect(leadCall.prompt).toContain('Advisor 2: Beta')
+    leadCall.resolve('Ship Monday morning instead. @user please confirm.')
+    await settledRoom(service, group.id)
+
+    const turns = db.messages
+      .listByConversation(group.conversationId)
+      .filter((m) => m.role === 'assistant')
+    expect(turns.map((m) => m.agentId)).toEqual([alpha.id, beta.id, lead.id])
+    expect(turns[2].content).toContain('Ship Monday')
+    expect(db.botGroups.getById(group.id)!.needsUser).toBe(true)
+  })
+
+  it('an advisor failure is skipped and the lead still synthesizes', async () => {
+    const alpha = db.agents.create({ name: 'Alpha', systemPrompt: 'p' })
+    const beta = db.agents.create({ name: 'Beta', systemPrompt: 'p' })
+    const lead = db.agents.create({ name: 'Lead', systemPrompt: 'p' })
+    const chat = makeFakeChat({
+      generateForWorkflow: async (_prompt, _p, _m, opts) => {
+        if (opts?.agentId === alpha.id) throw new Error('provider down')
+        return opts?.agentId === beta.id ? 'Beta says yes.' : 'Synthesis: yes.'
+      },
+    })
+    const { service } = makeService(chat)
+    const group = service.createGroup({
+      name: 'Council',
+      memberIds: [alpha.id, beta.id, lead.id],
+      mode: 'ensemble',
+      leadAgentId: lead.id,
+    })
+    service.groupSend(group.id, 'Go?')
+    await settledRoom(service, group.id)
+    const turns = db.messages
+      .listByConversation(group.conversationId)
+      .filter((m) => m.role === 'assistant')
+    expect(turns.map((m) => m.content)).toEqual(['Beta says yes.', 'Synthesis: yes.'])
+  })
+
+  it('validates the lead: required for ensembles, a non-observer member; nulled when it leaves', () => {
+    const a = db.agents.create({ name: 'A', systemPrompt: 'p' })
+    const b = db.agents.create({ name: 'B', systemPrompt: 'p' })
+    const c = db.agents.create({ name: 'C', systemPrompt: 'p' })
+    const { service } = makeService(makeFakeChat())
+    expect(() =>
+      service.createGroup({ name: 'R', memberIds: [a.id, b.id], mode: 'ensemble' })
+    ).toThrow(/needs a lead/)
+    expect(() =>
+      service.createGroup({ name: 'R', memberIds: [a.id, b.id], mode: 'ensemble', leadAgentId: c.id })
+    ).toThrow(/member of the room/)
+    expect(() =>
+      service.createGroup({
+        name: 'R',
+        memberIds: [a.id, b.id],
+        observerIds: [a.id],
+        mode: 'ensemble',
+        leadAgentId: a.id,
+      })
+    ).toThrow(/observer/)
+    const room = service.createGroup({ name: 'R', memberIds: [a.id, b.id, c.id] })
+    expect(room.mode).toBe('roundtable')
+    expect(room.leadAgentId).toBeNull()
+    const ensemble = service.updateGroup(room.id, { mode: 'ensemble', leadAgentId: c.id })
+    expect(ensemble.leadAgentId).toBe(c.id)
+    // Dropping the lead from the members is refused for an ensemble room…
+    expect(() => service.updateGroup(room.id, { memberIds: [a.id, b.id] })).toThrow(/needs a lead/)
+    // …but a round table just forgets it.
+    service.updateGroup(room.id, { mode: 'roundtable' })
+    expect(service.updateGroup(room.id, { memberIds: [a.id, b.id] }).leadAgentId).toBeNull()
+  })
+
+  it('createGroupFromMoaPreset makes one bot per distinct advisor model + a lead, and reuses them', () => {
+    const provider = db.providers.create({
+      id: randomUUID(),
+      type: 'openai-compatible',
+      label: 'Acme',
+      baseUrl: 'https://acme.example/v1',
+      defaultModelId: 'big',
+      enabled: true,
+    })
+    db.settings.update({
+      moaPresets: [
+        {
+          id: 'preset-1',
+          name: 'Second opinion',
+          referenceModels: [
+            { providerId: provider.id, modelId: 'small' },
+            { providerId: provider.id, modelId: 'small' },
+            { providerId: provider.id, modelId: 'medium' },
+            { providerId: provider.id, modelId: 'big' }, // same as the aggregator: not an advisor
+          ],
+          aggregator: { providerId: provider.id, modelId: 'big' },
+          enabled: true,
+        },
+      ],
+    })
+    const { service } = makeService(makeFakeChat())
+    const room = service.createGroupFromMoaPreset('preset-1')
+    expect(room.mode).toBe('ensemble')
+    expect(room.name).toBe('Second opinion')
+    const names = db.agents.list().map((agent) => agent.name).sort()
+    expect(names).toEqual(['Acme · big', 'Acme · medium', 'Acme · small'])
+    const leadBot = db.agents.getByName('Acme · big')!
+    expect(room.leadAgentId).toBe(leadBot.id)
+    expect(leadBot.title).toBe('Ensemble lead')
+    expect(leadBot.toolIds).toEqual([])
+    expect(room.memberIds).toHaveLength(3)
+
+    // Second call: nothing new is created, the same bots are reused.
+    service.createGroupFromMoaPreset('preset-1')
+    expect(db.agents.list()).toHaveLength(3)
+
+    db.settings.update({
+      moaPresets: [
+        {
+          id: 'preset-2',
+          name: 'Lonely',
+          referenceModels: [{ providerId: provider.id, modelId: 'big' }],
+          aggregator: { providerId: provider.id, modelId: 'big' },
+          enabled: true,
+        },
+      ],
+    })
+    expect(() => service.createGroupFromMoaPreset('preset-2')).toThrow(/at least one advisor/)
+    expect(() => service.createGroupFromMoaPreset('nope')).toThrow(/Unknown/)
+  })
+})

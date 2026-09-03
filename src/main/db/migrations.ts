@@ -1298,4 +1298,23 @@ export const MIGRATIONS: Migration[] = [
         WHERE run_kind = 'scheduled_task' AND agent_id IS NULL`,
     ],
   },
+  {
+    version: 50,
+    name: 'bot-rooms-events',
+    // Ensemble rooms + event-woken bots. bot_groups.mode: 'roundtable' (the
+    // v46 serial reply-or-pass rounds) or 'ensemble' (every member answers
+    // the latest user message in parallel as its own run, then lead_agent_id
+    // synthesizes one reply — the Mixture-of-Agents shape as a VISIBLE room
+    // instead of a hidden preset behind one chat). agents.webhook_enabled and
+    // agents.watch_json belong to the event → bot layer that follows: a bot
+    // opts in, individually, to being woken by the loopback trigger endpoint
+    // or a watched folder. Plain nullable/defaulted ADD COLUMNs; no FKs (the
+    // Bot Mode precedent — a lead that leaves the room is nulled app-side).
+    statements: [
+      `ALTER TABLE bot_groups ADD COLUMN mode TEXT NOT NULL DEFAULT 'roundtable'`,
+      `ALTER TABLE bot_groups ADD COLUMN lead_agent_id TEXT`,
+      `ALTER TABLE agents ADD COLUMN webhook_enabled INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN watch_json TEXT`,
+    ],
+  },
 ]

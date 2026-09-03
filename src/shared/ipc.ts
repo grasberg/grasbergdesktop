@@ -25,6 +25,7 @@ import type {
   BotBinding,
   BotGroup,
   BotGroupActivation,
+  BotGroupMode,
   BotRoster,
   BotUsageSummary,
   A2aOutboxEntry,
@@ -385,6 +386,8 @@ export const CHANNELS = {
   botGroupSend: 'bots:groups:send',
   botGroupStop: 'bots:groups:stop',
   botGroupMarkSeen: 'bots:groups:markSeen',
+  // Ensemble rooms (v50): a MoA preset as a visible room
+  botGroupCreateFromMoa: 'bots:groups:createFromMoa',
   // Durable deliveries (v48): recent outbox rows touching a bot
   botsOutbox: 'bots:outbox',
   // Attention (v49): the user opened the bot's chat (clears unread)
@@ -1322,6 +1325,8 @@ export interface UldApi {
       memberIds: string[]
       activation?: BotGroupActivation
       observerIds?: string[]
+      mode?: BotGroupMode
+      leadAgentId?: string | null
     }): Promise<IpcResult<BotGroup>>
     updateGroup(
       id: string,
@@ -1330,8 +1335,12 @@ export interface UldApi {
         memberIds?: string[]
         activation?: BotGroupActivation
         observerIds?: string[]
+        mode?: BotGroupMode
+        leadAgentId?: string | null
       }
     ): Promise<IpcResult<BotGroup>>
+    /** One bot per distinct advisor model + a lead for the aggregator, as an ensemble room (v50). */
+    createGroupFromMoaPreset(presetId: string): Promise<IpcResult<BotGroup>>
     deleteGroup(id: string): Promise<IpcResult<void>>
     /** Post a user message into a room; rounds run detached (push events). */
     groupSend(groupId: string, content: string): Promise<IpcResult<void>>

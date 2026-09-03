@@ -2547,6 +2547,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     memberIds: z.array(z.string().min(1).max(100)).max(12).optional(),
     activation: z.enum(['always', 'mention']).optional(),
     observerIds: z.array(z.string().min(1).max(100)).max(12).optional(),
+    mode: z.enum(['roundtable', 'ensemble']).optional(),
+    leadAgentId: z.string().min(1).max(100).nullable().optional(),
   })
 
   register(CHANNELS.botsRoster, () => requireBots().roster())
@@ -2571,11 +2573,16 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
         memberIds: z.array(z.string().min(1).max(100)).max(12),
         activation: z.enum(['always', 'mention']).optional(),
         observerIds: z.array(z.string().min(1).max(100)).max(12).optional(),
+        mode: z.enum(['roundtable', 'ensemble']).optional(),
+        leadAgentId: z.string().min(1).max(100).nullable().optional(),
       }),
       input
     )
     return requireBots().createGroup(parsed)
   })
+  register(CHANNELS.botGroupCreateFromMoa, (presetId) =>
+    requireBots().createGroupFromMoaPreset(requireString(presetId, 'Preset id'))
+  )
   register(CHANNELS.botGroupUpdate, (id, patch) =>
     requireBots().updateGroup(requireString(id, 'Group id'), parseInput(groupPatchSchema, patch))
   )
