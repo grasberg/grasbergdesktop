@@ -12,6 +12,8 @@ import type { SqliteDriver } from '../driver'
 export interface HeadlessUsageInsert {
   runKind: string
   refId: string | null
+  /** The agent profile the run ran as (v49); omitted/null = none. */
+  agentId?: string | null
   providerId: string
   modelId: string
   promptTokens: number
@@ -63,13 +65,14 @@ export function createHeadlessUsageRepository(driver: SqliteDriver): HeadlessUsa
     insert(row) {
       driver.run(
         `INSERT INTO headless_usage
-           (id, run_kind, ref_id, provider_id, model_id, prompt_tokens,
+           (id, run_kind, ref_id, agent_id, provider_id, model_id, prompt_tokens,
             completion_tokens, cached_tokens, est_cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           randomUUID(),
           row.runKind,
           row.refId,
+          row.agentId ?? null,
           row.providerId,
           row.modelId,
           row.promptTokens,

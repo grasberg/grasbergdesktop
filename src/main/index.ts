@@ -21,7 +21,7 @@ import {
   shell,
   systemPreferences,
 } from 'electron'
-import { CHANNELS } from '@shared/ipc'
+import { CHANNELS, type NavigateTarget } from '@shared/ipc'
 import { toRunSnippet } from '@shared/workflow-status'
 import { openDatabase, type AppDatabase } from './db/database'
 import { redactSecrets } from './providers/redact'
@@ -259,6 +259,23 @@ function summonWindow(): void {
   win.focus()
   // The user is here now — stop the taskbar flashing.
   notifier?.clearAttention()
+}
+
+/** A navigation requested while the app was locked; flushed on unlock. */
+let pendingNavigate: NavigateTarget | null = null
+
+/**
+ * Summons the window and asks the renderer to open a conversation or bot room
+ * (notification clicks, v49). Held back while locked — the lock screen must
+ * never be bypassed by a deep link — and flushed by the unlock subscriber.
+ */
+function navigateTo(target: NavigateTarget): void {
+  summonWindow()
+  if (appLockService?.isLocked()) {
+    pendingNavigate = target
+    return
+  }
+  broadcast(CHANNELS.navigate, target)
 }
 
 /** Dev + packaged icon path; absent in packaged builds (exe icon applies). */
@@ -712,7 +729,7 @@ function bootstrap(): void {
             info.label,
             info.status === 'done' ? 'ok' : 'error',
             info.result || info.task,
-            () => undefined
+            () => navigateTo({ conversationId: info.conversationId })
           ),
           inPrivateSpace(info.conversationId)
         )
@@ -757,7 +774,10 @@ function bootstrap(): void {
         mainWindow.flashFrame(on)
       }
     },
-    unreadCount: () => countUnreviewed(collectInboxItems(database)),
+    // Inbox items to review plus bots/rooms that need the user or hold unread
+    // bot messages (v49) — one honest number.
+    unreadCount: () =>
+      countUnreviewed(collectInboxItems(database)) + (botService?.attentionCount() ?? 0),
   })
   notifier = desktopNotifier
 
@@ -768,9 +788,17 @@ function bootstrap(): void {
     db: database,
     chat: chatService!,
     broadcast,
-    notify: ({ title, body }) => {
-      desktopNotifier.notify({ kind: 'result', title, body, onClick: () => undefined })
+    notify: ({ title, body, conversationId, groupId }) => {
+      desktopNotifier.notify({
+        kind: 'result',
+        title,
+        body,
+        onClick: () =>
+          navigateTo({ conversationId: conversationId ?? null, groupId: groupId ?? null }),
+      })
     },
+    hasPendingFor: (conversationId) =>
+      broker.hasPendingFor(conversationId) || questions.hasPendingFor(conversationId),
   })
   botService = bots
   // Durable deliveries (v48): settle whatever the previous process died in
@@ -835,7 +863,9 @@ function bootstrap(): void {
       const isPrivate = inPrivateSpace(request.conversationId)
       desktopNotifier.notify(
         titleOnlyForPrivateSpace(
-          approvalNotification(request.toolCall.name, request.note, () => undefined),
+          approvalNotification(request.toolCall.name, request.note, () =>
+            navigateTo({ conversationId: request.conversationId })
+          ),
           isPrivate
         )
       )
@@ -868,6 +898,7 @@ function bootstrap(): void {
         kind: 'question',
         title: 'A task needs your input',
         body: isPrivate ? '' : request.question,
+        onClick: () => navigateTo({ conversationId: request.conversationId }),
       })
       // Same rule as approvals: a private-space question never leaves the box.
       if (isPrivate) return
@@ -1078,6 +1109,20 @@ function bootstrap(): void {
   subscribeMainEvents((channel, payload) => {
     if (channel === CHANNELS.appLockChanged && (payload as { locked?: boolean }).locked) {
       quick.hide()
+    }
+  })
+  // Roster attention feeds the badge (v49) — every delivery, escalation and
+  // mark-seen recomputes it; a navigation held during lock goes out on unlock.
+  subscribeMainEvents((channel, payload) => {
+    if (channel === CHANNELS.botsChanged) desktopNotifier.refreshBadge()
+    if (
+      channel === CHANNELS.appLockChanged &&
+      !(payload as { locked?: boolean }).locked &&
+      pendingNavigate
+    ) {
+      const target = pendingNavigate
+      pendingNavigate = null
+      broadcast(CHANNELS.navigate, target)
     }
   })
 

@@ -2281,3 +2281,51 @@
   color: var(--text);
   text-decoration: underline;
 }
+
+/* -- Bot chat header (v49) ---------------------------------------------------- */
+
+.chat-bot-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-bot-header-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-bot-header-role {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-bot-header-state {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.chat-bot-header-state.is-working {
+  color: var(--accent);
+  animation: handoff-pulse 1.6s ease-in-out infinite;
+}
+
+.chat-bot-header-state.is-needs-you {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.chat-bot-header-back {
+  margin-left: auto;
+  font-size: 12px;
+}

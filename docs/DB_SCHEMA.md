@@ -70,6 +70,7 @@ authoritative, append-only list; the table below is a summary and may lag it):
 | 46 | `bot-mode` | Bot Mode (Hermes-style): `agents.title`/`avatar_json`/`hidden`/`chat_conversation_id`; `conversations.agent_id` (canonical bot chat, excluded from the sidebar listing) + `idx_conversations_agent`; `messages.agent_id` (author attribution); new `bot_groups` + `bot_group_members` tables (group rooms; one shared transcript conversation per room). All pointers deliberately without FKs — the app cleans up on delete |
 | 47 | `bot-gateway` | OpenClaw-inspired Bot Mode hardening: `agents.heartbeat_json`/`reset_json`/`message_allow_json` (heartbeat, auto-compact policy, bot-to-bot allowlist); `bot_groups.activation` ('always'\|'mention') + `bot_group_members.observer`; `scheduled_tasks.webhook_url` (delivery target); new `bot_bindings` table (per-bot external Telegram presence — the token lives in `tool_secrets`, never here) |
 | 48 | `bot-outbox` | new `a2a_outbox` table — durable bot-to-bot (`message_agent`) deliveries: queued → delivered → replied \| failed \| cancelled, `hop` + `attempts` persisted, `target_conversation_id`/`assistant_message_id` for boot recovery; `messages.handoff_json` (visible handoff chrome on the sender marker, the target's incoming turn and the routed reply). No FKs — app-side cleanup on delete |
+| 49 | `bot-attention` | roster attention: `agents.chat_seen_at` + `bot_groups.seen_at` (when the user last looked; backfilled to the upgrade moment), `agent_runs.agent_id` + `idx_agent_runs_agent` and `headless_usage.agent_id` + `idx_headless_usage_agent` (a run/spend attributed to the agent PROFILE; task rows backfilled from `scheduled_tasks.agent_id`). Plain nullable ADD COLUMNs |
 
 ## Tables
 
@@ -625,3 +626,22 @@ than 30 days are pruned at boot.
 
 Indexes: `idx_a2a_outbox_target (to_agent_id, status, created_at)`,
 `idx_a2a_outbox_sender (from_agent_id, status)`.
+
+# Roster attention (v49)
+
+`BotService.roster()` computes one attention state per bot and room —
+`needs_you` (a pending approval/question in the bot's chat, or a room
+escalation) > `unread` (a bot-authored message newer than the user's last
+look) > `working` (generating, a delivery queued/in flight, a running agent
+run or routine, a room round) > `idle`. The "last look" is
+`agents.chat_seen_at` / `bot_groups.seen_at`, stamped by `bots:markSeen` /
+`bots:groups:markSeen` while the window is focused on that chat; both are
+backfilled to the upgrade moment. "Bot-authored" = an assistant row or any row
+stamped with `messages.agent_id` (routed bot replies included; handoff markers
+are system rows and excluded). The count of visible bots/rooms in `needs_you`
+or `unread` joins the inbox count in the dock/tray badge.
+
+`agent_runs.agent_id` and `headless_usage.agent_id` attribute a run / a
+headless spend to the agent PROFILE it ran as (delegate(agent=…), scheduled
+tasks, room turns) — the roster reads running runs by id instead of matching
+the free-text `agent_name`; per-bot spend sums `headless_usage` by it.

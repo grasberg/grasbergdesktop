@@ -2550,6 +2550,10 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.botsOutbox, (agentId) =>
     requireBots().listOutbox(requireString(agentId, 'Agent id'))
   )
+  register(CHANNELS.botsMarkSeen, (agentId) => {
+    requireBots().markBotSeen(requireString(agentId, 'Agent id'))
+    return undefined
+  })
   register(CHANNELS.botGroupCreate, (input) => {
     const parsed = parseInput(
       z.object({

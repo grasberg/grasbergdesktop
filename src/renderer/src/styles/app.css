@@ -1504,3 +1504,43 @@ kbd {
 .sidebar-space-switcher.space-private {
   border-color: var(--accent);
 }
+
+/* -- Bots attention badge on the sidebar nav button (v49) ------------------- */
+
+.sidebar-home-btn {
+  position: relative;
+}
+
+.sidebar-bots-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.sidebar-bots-badge.is-needs-you {
+  background: var(--danger);
+  color: #fff;
+}
+
+.sidebar-bots-working {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: run-dot-pulse 1.6s ease-in-out infinite;
+  pointer-events: none;
+}

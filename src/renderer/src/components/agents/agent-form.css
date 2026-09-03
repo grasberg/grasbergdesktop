@@ -1,0 +1,291 @@
+/* Shared agent/bot editor (v49): one form for the Bots pane and Settings → Agents. */
+
+.bot-form {
+  max-width: 640px;
+  margin: 24px auto;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.bot-form h3 {
+  margin: 0;
+}
+
+.bot-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.bot-form input,
+.bot-form textarea,
+.bot-form select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.bot-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.bot-color-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bot-color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.bot-color-swatch.selected {
+  border-color: var(--text);
+}
+
+.bot-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bot-form-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.bot-member-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-member-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  color: var(--text) !important;
+  font-size: 13px !important;
+}
+
+.bot-member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bot-observer-check {
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}
+
+.bot-member-indent {
+  margin-left: 22px;
+}
+
+/* -- Telegram binding card ------------------------------------------------- */
+
+.bot-binding {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.bot-binding h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-binding-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bot-binding-row input {
+  flex: 1;
+}
+
+.bot-binding-status,
+.bot-binding-code {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.bot-binding-code code {
+  font-size: 15px;
+  letter-spacing: 0.2em;
+  padding: 2px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+}
+
+.bot-binding-groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-binding-groups li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.bot-binding-groups li span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- Sections + capabilities ------------------------------------------------- */
+
+.bot-form-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bot-form-section > legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+.bot-form-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px 12px;
+}
+
+.bot-form-tools label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px !important;
+  color: var(--text) !important;
+  font-size: 12.5px !important;
+}
+
+.bot-form-tools code {
+  font-size: 12px;
+}
+
+.bot-form-inline {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  color: var(--text) !important;
+  font-size: 13px !important;
+}
+
+.bot-form-inline input[type='number'] {
+  width: 90px;
+}
+
+/* -- Deliveries card (v48): durable bot-to-bot outbox ------------------------- */
+
+.bot-deliveries {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+
+.bot-deliveries h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bot-delivery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bot-delivery {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) 1fr auto auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.bot-delivery-dir {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.bot-delivery-body {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-delivery-status {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  white-space: nowrap;
+}
+
+.bot-delivery.status-queued .bot-delivery-status {
+  color: var(--text-muted);
+}
+
+.bot-delivery.status-replied .bot-delivery-status {
+  color: var(--success);
+}
+
+.bot-delivery.status-failed .bot-delivery-status {
+  color: var(--danger);
+}
+
+.bot-delivery time {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bot-delivery-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}

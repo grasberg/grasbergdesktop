@@ -386,6 +386,8 @@ export const CHANNELS = {
   botGroupMarkSeen: 'bots:groups:markSeen',
   // Durable deliveries (v48): recent outbox rows touching a bot
   botsOutbox: 'bots:outbox',
+  // Attention (v49): the user opened the bot's chat (clears unread)
+  botsMarkSeen: 'bots:markSeen',
   // Bot gateway (v47): per-bot external Telegram presence
   botBindingGet: 'bots:binding:get',
   botBindingSetToken: 'bots:binding:setToken',
@@ -529,7 +531,19 @@ export const CHANNELS = {
    * persisted, membership changed. Coarse by design; the store refetches.
    */
   botsChanged: 'push:botsChanged',
+  /**
+   * Sent with a NavigateTarget when main wants the window on a conversation
+   * or bot room — a notification click, chiefly. Held back while locked and
+   * flushed on unlock.
+   */
+  navigate: 'push:navigate',
 } as const
+
+/** Where a notification click (or main) wants the renderer to go. */
+export interface NavigateTarget {
+  conversationId?: string | null
+  groupId?: string | null
+}
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]
 
@@ -1119,6 +1133,8 @@ export interface UldApi {
   /** Notices raised by main itself (no request in flight), shown as a toast. */
   notices: {
     onNotice(cb: (notice: { message: string; level: 'info' | 'error' }) => void): () => void
+    /** Main asks the window to open a conversation/room (notification click). */
+    onNavigate(cb: (target: NavigateTarget) => void): () => void
   }
   /** The audit trail: every tool call, newest first. */
   activity: {
@@ -1290,6 +1306,8 @@ export interface UldApi {
     openChat(agentId: string): Promise<IpcResult<{ conversationId: string }>>
     /** Recent bot-to-bot deliveries touching a bot, newest first (v48). */
     outbox(agentId: string): Promise<IpcResult<A2aOutboxEntry[]>>
+    /** The user is looking at the bot's chat: clears its unread state (v49). */
+    markSeen(agentId: string): Promise<IpcResult<void>>
     createGroup(input: {
       name: string
       memberIds: string[]

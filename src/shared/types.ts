@@ -1307,6 +1307,8 @@ export interface AgentRun {
   conversationId: string | null
   projectId: string | null
   agentName: string | null
+  /** The agent profile the run ran as (v49); null = an ad-hoc delegate. */
+  agentId: string | null
   task: string
   status: 'running' | 'done' | 'error' | 'stopped'
   result: string
@@ -2025,6 +2027,11 @@ export interface AgentProfile {
    */
   chatConversationId: string | null
   /**
+   * Attention (v49): when the user last had the canonical chat open. A
+   * bot-authored message newer than this makes the bot "unread".
+   */
+  chatSeenAt: number | null
+  /**
    * Bot gateway (v47): periodic "anything need attention?" turn in the
    * canonical chat with a NO_REPLY quiet contract (OpenClaw heartbeat).
    * Null = no heartbeat.
@@ -2104,6 +2111,8 @@ export interface BotGroup {
   conversationId: string
   /** A member escalated with @user and the user hasn't opened the room since. */
   needsUser: boolean
+  /** Attention (v49): when the user last had the room open (unread = a bot turn newer than this). */
+  seenAt: number | null
   memberIds: string[]
   /**
    * Room activation (v47, OpenClaw grammar): 'always' = every user message
@@ -2163,6 +2172,8 @@ export interface BotRosterItem {
   queuedCount: number
   /** A bot-to-bot delivery is being answered in this bot's chat right now. */
   inFlight: boolean
+  /** Attention (v49): needs_you > unread > working > idle. */
+  attention: BotAttention
 }
 
 /** One group-room row of the Bots pane roster. */
@@ -2172,11 +2183,28 @@ export interface BotGroupRosterItem {
   snippet: string | null
   /** A round is currently running in this room. */
   active: boolean
+  /** Attention (v49): needs_you > unread > working > idle. */
+  attention: BotAttention
 }
 
 export interface BotRoster {
   bots: BotRosterItem[]
   groups: BotGroupRosterItem[]
+}
+
+/**
+ * Roster attention (v49), computed main-side in BotService.roster():
+ * 'needs_you' = a pending approval/question in the bot's chat or a room
+ * escalation; 'unread' = a bot-authored message the user hasn't seen;
+ * 'working' = generating, a delivery queued/in flight, a running agent run or
+ * routine, or a room round; else 'idle'.
+ */
+export type BotAttention = 'idle' | 'working' | 'needs_you' | 'unread'
+
+/** Payload of push:botsChanged. */
+export interface BotsChangedEvent {
+  agentId?: string | null
+  groupId?: string | null
 }
 
 // ---------------------------------------------------------------------------

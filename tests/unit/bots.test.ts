@@ -19,7 +19,12 @@ import {
   parseBotMentions,
   planRoundParticipants,
 } from '../../src/main/services/bot-prompts'
-import { BotService, type BotChatService } from '../../src/main/services/bots'
+import {
+  BotService,
+  isUnread,
+  resolveAttention,
+  type BotChatService,
+} from '../../src/main/services/bots'
 
 let dir: string
 let db: AppDatabase
@@ -458,5 +463,159 @@ describe('BotService routine mirroring', () => {
     expect(messages[0].content).toContain('Routine "Nightly check" ran')
     expect(messages[1].content).toBe('All systems normal.')
     expect(messages[1].agentId).toBe(agent.id)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Roster attention (v49): idle / working / needs_you / unread
+// ---------------------------------------------------------------------------
+
+describe('BotService roster attention (v49)', () => {
+  function attentionService(opts: { active?: boolean; pending?: Set<string> } = {}): BotService {
+    const chat = makeFakeChat({ isConversationActive: () => opts.active === true })
+    return new BotService({
+      db,
+      chat,
+      broadcast: () => undefined,
+      hasPendingFor: (conversationId) => opts.pending?.has(conversationId) ?? false,
+    })
+  }
+
+  function insertRow(
+    conversationId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    agentId?: string
+  ): void {
+    db.messages.insert({
+      id: randomUUID(),
+      conversationId,
+      role,
+      content,
+      status: 'complete',
+      ...(agentId ? { agentId } : {}),
+      seq: db.messages.nextSeq(conversationId),
+      createdAt: Date.now() + 5, // strictly after any seen stamp taken in this test
+    })
+  }
+
+  function botAttention(service: BotService, agentId: string): string {
+    return service.roster().bots.find((row) => row.agent.id === agentId)!.attention
+  }
+
+  it('is idle until a bot writes; a bot-authored message is unread until the chat is marked seen', () => {
+    const scout = db.agents.create({ name: 'Scout', systemPrompt: 'p' })
+    const service = attentionService()
+    const chat = service.ensureBotChat(scout.id)
+    expect(botAttention(service, scout.id)).toBe('idle')
+    insertRow(chat.id, 'user', 'hello there')
+    expect(botAttention(service, scout.id)).toBe('idle') // the user's own words never count
+    insertRow(chat.id, 'assistant', 'hi!')
+    expect(botAttention(service, scout.id)).toBe('unread')
+    service.markBotSeen(scout.id)
+    expect(db.agents.getById(scout.id)!.chatSeenAt).not.toBeNull()
+    expect(botAttention(service, scout.id)).toBe('idle')
+    // A routed reply from a teammate is bot-authored too (user role + agent_id).
+    insertRow(chat.id, 'user', 'Reply from 🤖 Editor: done', 'someone-else')
+    expect(botAttention(service, scout.id)).toBe('unread')
+  })
+
+  it('needs_you when an approval or question is pending in the chat, outranking unread', () => {
+    const scout = db.agents.create({ name: 'Scout', systemPrompt: 'p' })
+    const pending = new Set<string>()
+    const service = attentionService({ pending })
+    const chat = service.ensureBotChat(scout.id)
+    insertRow(chat.id, 'assistant', 'may I run this?')
+    pending.add(chat.id)
+    expect(botAttention(service, scout.id)).toBe('needs_you')
+    pending.delete(chat.id)
+    expect(botAttention(service, scout.id)).toBe('unread')
+  })
+
+  it('is working while generating, while a delivery waits, while a routine runs, and during a background run', async () => {
+    const scout = db.agents.create({ name: 'Scout', systemPrompt: 'p' })
+    const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
+    const busy = attentionService({ active: true })
+    busy.ensureBotChat(scout.id)
+    expect(botAttention(busy, scout.id)).toBe('working')
+
+    // A queued delivery makes the TARGET working (its chat is busy, so it waits).
+    const scoutChat = busy.ensureBotChat(scout.id)
+    await busy.messengerSend(scoutChat.id, 'Editor', 'when you can')
+    expect(busy.roster().bots.find((row) => row.agent.id === editor.id)!.queuedCount).toBe(1)
+
+    const idle = attentionService()
+    const task = db.scheduledTasks.create({
+      title: 'Nightly digest',
+      prompt: 'Summarize.',
+      recurrence: 'daily',
+      runAt: Date.now() + 60_000,
+      agentId: editor.id,
+    })
+    db.a2aOutbox.cancelForSender(scout.id) // clear the queued delivery from above
+    expect(botAttention(idle, editor.id)).toBe('idle')
+    db.scheduledTasks.markRunning(task.id, Date.now())
+    expect(botAttention(idle, editor.id)).toBe('working')
+    db.scheduledTasks.finish(task.id, {
+      status: 'ok',
+      output: 'done',
+      error: null,
+      nextRunAt: null,
+      enabled: false,
+      finishedAt: Date.now(),
+    })
+    expect(botAttention(idle, editor.id)).toBe('idle')
+
+    const run = db.agentPlatform.runStart({
+      conversationId: null,
+      projectId: null,
+      agentName: 'Editor',
+      agentId: editor.id,
+      task: 'proofread',
+      worktreePath: null,
+      providerId: null,
+      modelId: null,
+    })
+    expect(botAttention(idle, editor.id)).toBe('working')
+    db.agentPlatform.runFinish(run.id, 'done', 'ok')
+    expect(botAttention(idle, editor.id)).toBe('idle')
+  })
+
+  it('rooms: needs_you on escalation, unread on a newer bot turn, both cleared by markGroupSeen', () => {
+    const a = db.agents.create({ name: 'A', systemPrompt: 'p' })
+    const b = db.agents.create({ name: 'B', systemPrompt: 'p' })
+    const service = attentionService()
+    const group = service.createGroup({ name: 'Room', memberIds: [a.id, b.id] })
+    const roomOf = (): string => service.roster().groups.find((row) => row.group.id === group.id)!.attention
+    expect(roomOf()).toBe('idle')
+    insertRow(group.conversationId, 'assistant', 'I think we should ship.', a.id)
+    expect(roomOf()).toBe('unread')
+    db.botGroups.setNeedsUser(group.id, true)
+    expect(roomOf()).toBe('needs_you')
+    service.markGroupSeen(group.id)
+    expect(roomOf()).toBe('idle')
+    expect(db.botGroups.getById(group.id)!.seenAt).not.toBeNull()
+  })
+
+  it('attentionCount skips hidden bots and counts only needs_you/unread', () => {
+    const shown = db.agents.create({ name: 'Shown', systemPrompt: 'p' })
+    const hidden = db.agents.create({ name: 'Hidden', systemPrompt: 'p', hidden: true })
+    const service = attentionService()
+    insertRow(service.ensureBotChat(shown.id).id, 'assistant', 'news')
+    insertRow(service.ensureBotChat(hidden.id).id, 'assistant', 'news')
+    expect(service.attentionCount()).toBe(1)
+    service.markBotSeen(shown.id)
+    expect(service.attentionCount()).toBe(0)
+  })
+
+  it('resolveAttention precedence and isUnread edge cases', () => {
+    expect(resolveAttention({ working: true, needsYou: true, unread: true })).toBe('needs_you')
+    expect(resolveAttention({ working: true, needsYou: false, unread: true })).toBe('unread')
+    expect(resolveAttention({ working: true, needsYou: false, unread: false })).toBe('working')
+    expect(resolveAttention({ working: false, needsYou: false, unread: false })).toBe('idle')
+    expect(isUnread(null, null)).toBe(false)
+    expect(isUnread(10, null)).toBe(true)
+    expect(isUnread(10, 10)).toBe(false)
+    expect(isUnread(11, 10)).toBe(true)
   })
 })

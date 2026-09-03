@@ -7,6 +7,7 @@ import { usePromptsStore } from '@/stores/prompts'
 import { useUiStore } from '@/stores/ui'
 import { STARTER_PROMPTS } from '@/lib/starter-prompts'
 import MessageItem from './MessageItem'
+import BotChatHeader from './BotChatHeader'
 import Composer from './Composer'
 import CostBadge from './CostBadge'
 import './chat.css'
@@ -411,9 +412,13 @@ export default function ChatView(): ReactElement {
   return (
     <div className="chat-view">
       <header className="chat-header">
-        <h1 className="chat-title" title={conversation?.title ?? undefined}>
-          {conversation ? conversation.title : 'Chat'}
-        </h1>
+        {conversation?.agentId ? (
+          <BotChatHeader agentId={conversation.agentId} fallbackTitle={conversation.title} />
+        ) : (
+          <h1 className="chat-title" title={conversation?.title ?? undefined}>
+            {conversation ? conversation.title : 'Chat'}
+          </h1>
+        )}
         <ForkOriginChip />
         <div className="chat-header-actions">
           {conversation && <CostBadge conversationId={conversation.id} />}

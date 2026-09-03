@@ -24,6 +24,7 @@ import { CHANNELS } from '@shared/ipc'
 import type {
   A2aOutboxEntry,
   AgentProfile,
+  BotAttention,
   BotGroup,
   BotGroupActivation,
   BotRoster,
@@ -117,6 +118,8 @@ export interface BotServiceDeps {
     conversationId?: string | null
     groupId?: string | null
   }) => void
+  /** A pending approval/question raised from a conversation (roster needs-you state, v49). */
+  hasPendingFor?: (conversationId: string) => boolean
 }
 
 /** The delivery whose turn is running in a target chat (this process only). */
@@ -171,6 +174,23 @@ function errorMessageOf(e: unknown): string {
 
 function identity(agent: AgentProfile): BotIdentity {
   return { name: agent.name, title: agent.title, description: agent.description }
+}
+
+/** Roster attention precedence (v49): needs_you > unread > working > idle. */
+export function resolveAttention(flags: {
+  working: boolean
+  needsYou: boolean
+  unread: boolean
+}): BotAttention {
+  if (flags.needsYou) return 'needs_you'
+  if (flags.unread) return 'unread'
+  if (flags.working) return 'working'
+  return 'idle'
+}
+
+/** A bot-authored message newer than the user's last look = unread. */
+export function isUnread(lastBotAt: number | null, seenAt: number | null): boolean {
+  return lastBotAt !== null && (seenAt === null || lastBotAt > seenAt)
 }
 
 export class BotService {
@@ -278,34 +298,76 @@ export class BotService {
   roster(): BotRoster {
     const db = this.deps.db
     const now = Date.now()
+    const runningRuns = db.agentPlatform.listRunning()
+    const runningRoutineOwners = new Set(
+      db.scheduledTasks
+        .list()
+        .filter((task) => task.agentId && task.lastStatus === 'running')
+        .map((task) => task.agentId as string)
+    )
+    const pendingFor = (conversationId: string): boolean =>
+      this.deps.hasPendingFor?.(conversationId) ?? false
     const bots = db.agents.list().map((agent) => {
       const conversationId = agent.chatConversationId
       const last = conversationId ? db.messages.lastSnippet(conversationId) : null
       const inFlight = conversationId !== null && this.inFlight.has(conversationId)
-      const active =
+      const queuedCount = db.a2aOutbox.countQueued(agent.id)
+      const working =
         inFlight ||
+        queuedCount > 0 ||
         (conversationId !== null && this.deps.chat.isConversationActive(conversationId)) ||
-        (last !== null && now - last.createdAt < ACTIVE_RECENT_MS)
+        runningRoutineOwners.has(agent.id) ||
+        runningRuns.some((run) => run.agentId === agent.id)
+      const active = working || (last !== null && now - last.createdAt < ACTIVE_RECENT_MS)
+      const needsYou = conversationId !== null && pendingFor(conversationId)
+      const unread =
+        conversationId !== null &&
+        isUnread(db.messages.lastBotAuthoredAt(conversationId), agent.chatSeenAt)
       return {
         agent,
         conversationId,
         lastMessageAt: last?.createdAt ?? null,
         snippet: last ? last.content.replace(/\s+/g, ' ').trim().slice(0, 100) : null,
         active,
-        queuedCount: db.a2aOutbox.countQueued(agent.id),
+        queuedCount,
         inFlight,
+        attention: resolveAttention({ working, needsYou, unread }),
       }
     })
     const groups = db.botGroups.list().map((group) => {
       const last = db.messages.lastSnippet(group.conversationId)
+      const working = this.activeGroups.has(group.id)
+      const needsYou = group.needsUser || pendingFor(group.conversationId)
+      const unread = isUnread(db.messages.lastBotAuthoredAt(group.conversationId), group.seenAt)
       return {
         group,
         lastMessageAt: last?.createdAt ?? null,
         snippet: last ? last.content.replace(/\s+/g, ' ').trim().slice(0, 100) : null,
-        active: this.activeGroups.has(group.id),
+        active: working,
+        attention: resolveAttention({ working, needsYou, unread }),
       }
     })
     return { bots, groups }
+  }
+
+  /** The user is looking at the bot's chat: clears its unread state (v49). */
+  markBotSeen(agentId: string): void {
+    this.deps.db.agents.markChatSeen(agentId, Date.now())
+    this.botsChanged({ agentId })
+  }
+
+  /**
+   * Visible bots and rooms that need the user or hold unread bot messages —
+   * the Bots share of the dock/tray badge (v49).
+   */
+  attentionCount(): number {
+    const roster = this.roster()
+    const wants = (attention: BotAttention): boolean =>
+      attention === 'needs_you' || attention === 'unread'
+    return (
+      roster.bots.filter((row) => !row.agent.hidden && wants(row.attention)).length +
+      roster.groups.filter((row) => wants(row.attention)).length
+    )
   }
 
   // -- bot-to-bot messaging (`message_agent`, durable a2a_outbox since v48) --
@@ -806,7 +868,7 @@ export class BotService {
   }
 
   markGroupSeen(id: string): void {
-    this.deps.db.botGroups.setNeedsUser(id, false)
+    this.deps.db.botGroups.markSeen(id, Date.now())
     this.botsChanged({ groupId: id })
   }
 

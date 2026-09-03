@@ -27,6 +27,8 @@ export interface AgentsRepository {
   update(id: string, patch: AgentProfilePatch): AgentProfile | null
   /** Records the bot's canonical chat conversation (created lazily). */
   setChatConversation(id: string, conversationId: string | null): void
+  /** The user is looking at the canonical chat: stamps chat_seen_at (v49). */
+  markChatSeen(id: string, seenAt: number): void
   remove(id: string): void
 }
 
@@ -44,6 +46,7 @@ interface AgentRow {
   avatar_json: string | null
   hidden: number
   chat_conversation_id: string | null
+  chat_seen_at: number | null
   heartbeat_json: string | null
   reset_json: string | null
   message_allow_json: string | null
@@ -91,6 +94,7 @@ function toAgent(row: AgentRow): AgentProfile {
     avatar: parseAvatar(row.avatar_json),
     hidden: row.hidden === 1,
     chatConversationId: row.chat_conversation_id,
+    chatSeenAt: row.chat_seen_at,
     heartbeat: parseObject<BotHeartbeat>(row.heartbeat_json),
     reset: parseObject<BotResetPolicy>(row.reset_json),
     messageAllow:
@@ -142,6 +146,7 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         avatar: input.avatar ?? null,
         hidden: input.hidden === true,
         chatConversationId: null,
+        chatSeenAt: null,
         heartbeat: input.heartbeat ?? null,
         reset: input.reset ?? null,
         messageAllow: input.messageAllow ?? null,
@@ -232,6 +237,11 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
 
     setChatConversation(id, conversationId) {
       driver.run('UPDATE agents SET chat_conversation_id = ? WHERE id = ?', [conversationId, id])
+    },
+
+    markChatSeen(id, seenAt) {
+      // Deliberately no updated_at touch — reading is not editing.
+      driver.run('UPDATE agents SET chat_seen_at = ? WHERE id = ?', [seenAt, id])
     },
 
     remove(id) {

@@ -7,6 +7,7 @@ interface AgentRunRow {
   conversation_id: string | null
   project_id: string | null
   agent_name: string | null
+  agent_id: string | null
   task: string
   status: AgentRun['status']
   result: string
@@ -43,6 +44,7 @@ function toRun(row: AgentRunRow): AgentRun {
     conversationId: row.conversation_id,
     projectId: row.project_id,
     agentName: row.agent_name,
+    agentId: row.agent_id,
     task: row.task,
     status: row.status,
     result: row.result,
@@ -88,7 +90,14 @@ function toCheckpoint(row: CheckpointRow): Checkpoint {
 
 export interface AgentPlatformRepository {
   runsList(conversationId?: string): AgentRun[]
-  runStart(input: Omit<AgentRun, 'id' | 'status' | 'result' | 'startedAt' | 'finishedAt'>): AgentRun
+  runStart(
+    input: Omit<AgentRun, 'id' | 'status' | 'result' | 'startedAt' | 'finishedAt' | 'agentId'> & {
+      /** The agent profile the run runs as (v49); omitted = none. */
+      agentId?: string | null
+    }
+  ): AgentRun
+  /** Runs still in progress, newest first (the roster's "working" state, v49). */
+  listRunning(): AgentRun[]
   runFinish(id: string, status: Exclude<AgentRun['status'], 'running'>, result: string): AgentRun | null
   /**
    * Marks any run still in status 'running' as 'stopped' — recovery for agent
@@ -129,13 +138,18 @@ export function createAgentPlatformRepository(driver: SqliteDriver): AgentPlatfo
       const id = randomUUID()
       driver.run(
         `INSERT INTO agent_runs
-           (id, conversation_id, project_id, agent_name, task, status, result,
+           (id, conversation_id, project_id, agent_name, agent_id, task, status, result,
             worktree_path, provider_id, model_id, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, 'running', '', ?, ?, ?, ?, NULL)`,
-        [id, input.conversationId, input.projectId, input.agentName, input.task,
+         VALUES (?, ?, ?, ?, ?, ?, 'running', '', ?, ?, ?, ?, NULL)`,
+        [id, input.conversationId, input.projectId, input.agentName, input.agentId ?? null, input.task,
           input.worktreePath, input.providerId, input.modelId, now]
       )
       return runGet(id)!
+    },
+    listRunning() {
+      return driver
+        .all<AgentRunRow>(`SELECT * FROM agent_runs WHERE status = 'running' ORDER BY started_at DESC`)
+        .map(toRun)
     },
     runFinish(id, status, result) {
       driver.run(

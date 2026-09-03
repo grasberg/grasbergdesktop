@@ -20,6 +20,7 @@ import { useWorkflowsStore } from '@/stores/workflows'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 import { useOptimizerStore } from '@/stores/optimizer'
 import { useVoiceStore } from '@/stores/voice'
+import { useBotsStore } from '@/stores/bots'
 
 // Lazy like the other views (it already renders inside the view Suspense):
 // Home pulls the Markdown pipeline via its cards, which kept the CI-gated
@@ -126,6 +127,9 @@ export default function App(): React.JSX.Element {
     // section and failure dot work from the first paint.
     void useWorkflowsStore.getState().load()
     void useScheduledTasksStore.getState().load()
+    // Bots roster at boot (v49): the sidebar badge and bot-chat headers read
+    // it from the first paint, not only after the Bots view is opened.
+    void useBotsStore.getState().load()
     // Cheap status read; the composer mic and Transcribe actions gate on it.
     void useVoiceStore.getState().load()
   }, [lockStatus])
@@ -202,6 +206,27 @@ export default function App(): React.JSX.Element {
     const unsubscribeVoice = window.uld.voice.onDownloadProgress((event) => {
       useVoiceStore.getState().handleDownloadProgress(event)
     })
+    // Bot Mode roster events (deliveries, room turns, seen-stamps).
+    const unsubscribeBots = window.uld.bots.onChanged((event) => {
+      useBotsStore.getState().handleChanged(event)
+    })
+    // A notification click (or main) asks for a conversation or bot room.
+    const unsubscribeNavigate = window.uld.notices.onNavigate((target) => {
+      if (target.groupId) {
+        useUiStore.getState().setView('bots')
+        useBotsStore.getState().selectGroup(target.groupId)
+        return
+      }
+      if (!target.conversationId) return
+      const conversationId = target.conversationId
+      void window.uld.conversations.get(conversationId).then((res) => {
+        if (!res.ok) return
+        const spaces = useSpacesStore.getState()
+        const spaceId = res.data.spaceId ?? null
+        if (spaceId !== spaces.activeSpaceId) spaces.setActive(spaceId)
+        useConversationsStore.getState().select(conversationId)
+      })
+    })
     // A quick-assistant exchange was promoted into a real conversation:
     // refresh the sidebar and navigate to it. Promoted conversations always
     // land in the DEFAULT space (promoteQuick sets no spaceId), so switch
@@ -218,6 +243,8 @@ export default function App(): React.JSX.Element {
         })
     })
     return () => {
+      unsubscribeNavigate()
+      unsubscribeBots()
       unsubscribeQuickPromoted()
       unsubscribeVoice()
       unsubscribeStream()

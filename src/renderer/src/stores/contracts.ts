@@ -9,6 +9,10 @@ import type {
   AppLockStatus,
   AppSettings,
   Attachment,
+  BotGroup,
+  BotGroupActivation,
+  BotRoster,
+  BotsChangedEvent,
   Conversation,
   ConversationMode,
   ConversationSummary,
@@ -299,6 +303,52 @@ export interface ScheduledTasksStoreState {
   setEnabled(id: string, enabled: boolean): Promise<void>
   remove(id: string): Promise<void>
   handleChanged(event: ScheduledTasksChangedEvent): void
+}
+
+/**
+ * Bot Mode (v46): the Bots pane roster (bots + group rooms), the open room's
+ * transcript, and roster actions. Loaded at boot and kept live by the one
+ * app-wide push:botsChanged subscription (handleChanged) — deliveries, group
+ * turns, routine mirrors and seen-stamps all land as coarse "refetch" events.
+ */
+export interface BotsStoreState {
+  roster: BotRoster | null
+  loaded: boolean
+  /** Room open in the Bots view, or null = roster/empty state. */
+  activeGroupId: string | null
+  /** Transcript of the open room (refetched on push events). */
+  groupMessages: Message[]
+  /** Show hidden bots (dimmed) in the roster. */
+  showHidden: boolean
+
+  load(): Promise<void>
+  /** Wired once at app start to window.uld.bots.onChanged. */
+  handleChanged(event: BotsChangedEvent): void
+  /** Opens the bot's canonical chat in the conversation surface. */
+  openBotChat(agentId: string): Promise<void>
+  /** The user is looking at the bot's chat: clears its unread state (v49). */
+  markSeen(agentId: string): Promise<void>
+  selectGroup(groupId: string | null): void
+  createGroup(
+    name: string,
+    memberIds: string[],
+    activation?: BotGroupActivation,
+    observerIds?: string[]
+  ): Promise<BotGroup | null>
+  updateGroup(
+    id: string,
+    patch: {
+      name?: string
+      memberIds?: string[]
+      activation?: BotGroupActivation
+      observerIds?: string[]
+    }
+  ): Promise<void>
+  deleteGroup(id: string): Promise<void>
+  sendToGroup(groupId: string, content: string): Promise<void>
+  stopGroup(groupId: string): Promise<void>
+  setHidden(agentId: string, hidden: boolean): Promise<void>
+  setShowHidden(show: boolean): void
 }
 
 /** Offline voice: whisper model management, push-to-talk STT and read-aloud. */

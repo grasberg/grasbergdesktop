@@ -1,63 +1,33 @@
 /**
  * Bot Mode (v46) store: the Bots pane roster (bots + group rooms), the open
- * room's transcript, and roster actions. One app-wide subscription to
- * push:botsChanged keeps everything live — deliveries, group turns and
- * routine mirrors all land as coarse "refetch" events.
+ * room's transcript, and roster actions. App.tsx loads it at boot and wires
+ * the one push:botsChanged subscription to handleChanged — deliveries, group
+ * turns, routine mirrors and seen-stamps all land as coarse "refetch" events.
+ * Contract: BotsStoreState in ./contracts.
  */
 
 import { create } from 'zustand'
-import type { BotGroup, BotGroupActivation, BotRoster, Message } from '@shared/types'
+import type { BotRoster } from '@shared/types'
 import { unwrap } from '@/api/uld'
+import type { BotsStoreState } from './contracts'
 import { useConversationsStore } from './conversations'
 import { toastError } from './ui'
 
-export interface BotsStoreState {
-  roster: BotRoster | null
-  loaded: boolean
-  /** Room open in the Bots view, or null = roster/empty state. */
-  activeGroupId: string | null
-  /** Transcript of the open room (refetched on push events). */
-  groupMessages: Message[]
-  /** Show hidden bots (dimmed) in the roster. */
-  showHidden: boolean
-
-  load(): Promise<void>
-  /** Opens the bot's canonical chat in the conversation surface. */
-  openBotChat(agentId: string): Promise<void>
-  selectGroup(groupId: string | null): void
-  createGroup(
-    name: string,
-    memberIds: string[],
-    activation?: BotGroupActivation,
-    observerIds?: string[]
-  ): Promise<BotGroup | null>
-  updateGroup(
-    id: string,
-    patch: {
-      name?: string
-      memberIds?: string[]
-      activation?: BotGroupActivation
-      observerIds?: string[]
-    }
-  ): Promise<void>
-  deleteGroup(id: string): Promise<void>
-  sendToGroup(groupId: string, content: string): Promise<void>
-  stopGroup(groupId: string): Promise<void>
-  setHidden(agentId: string, hidden: boolean): Promise<void>
-  setShowHidden(show: boolean): void
-}
-
-let pushSubscribed = false
-function ensureBotsSubscription(): void {
-  if (pushSubscribed) return
-  pushSubscribed = true
-  window.uld.bots.onChanged((event) => {
-    const state = useBotsStore.getState()
-    void state.load()
-    if (event.groupId && event.groupId === state.activeGroupId) {
-      void reloadGroupMessages(event.groupId)
-    }
-  })
+/** Sidebar/badge summary of the roster (hidden bots excluded; rooms included). */
+export function botsAttentionSummary(roster: BotRoster): {
+  needsYou: number
+  unread: number
+  working: number
+} {
+  const summary = { needsYou: 0, unread: 0, working: 0 }
+  const count = (attention: string): void => {
+    if (attention === 'needs_you') summary.needsYou += 1
+    else if (attention === 'unread') summary.unread += 1
+    else if (attention === 'working') summary.working += 1
+  }
+  for (const row of roster.bots) if (!row.agent.hidden) count(row.attention)
+  for (const row of roster.groups) count(row.attention)
+  return summary
 }
 
 async function reloadGroupMessages(groupId: string): Promise<void> {
@@ -82,7 +52,6 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
   showHidden: false,
 
   async load() {
-    ensureBotsSubscription()
     try {
       const roster = await unwrap(window.uld.bots.roster())
       set({ roster, loaded: true })
@@ -92,12 +61,28 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
     }
   },
 
+  handleChanged(event) {
+    void get().load()
+    if (event.groupId && event.groupId === get().activeGroupId) {
+      void reloadGroupMessages(event.groupId)
+    }
+  },
+
   async openBotChat(agentId) {
     try {
       const { conversationId } = await unwrap(window.uld.bots.openChat(agentId))
       useConversationsStore.getState().select(conversationId)
+      void get().markSeen(agentId)
     } catch (e) {
       toastError('Failed to open bot chat', e)
+    }
+  },
+
+  async markSeen(agentId) {
+    try {
+      await unwrap(window.uld.bots.markSeen(agentId))
+    } catch {
+      // A missed stamp only leaves the unread chip on a little longer.
     }
   },
 

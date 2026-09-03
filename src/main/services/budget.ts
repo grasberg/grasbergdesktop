@@ -23,6 +23,8 @@ import type { AppDatabase } from '../db/database'
 export interface HeadlessUsageRef {
   runKind: HeadlessRunKind
   refId: string | null
+  /** The agent profile the run ran as (v49), for per-bot spend. */
+  agentId?: string | null
 }
 
 /**
@@ -42,6 +44,7 @@ export function recordHeadlessUsage(
     db.headlessUsage.insert({
       runKind: ref.runKind,
       refId: ref.refId,
+      agentId: ref.agentId ?? null,
       providerId: provider.id,
       modelId,
       promptTokens: usage.promptTokens ?? 0,

@@ -517,6 +517,7 @@ describe('buildInboxItems private blanking', () => {
     conversationId,
     projectId: null,
     agentName: 'Research bot',
+    agentId: null,
     task: 'summarize the secret plan',
     status: 'done',
     result: 'the secret result',

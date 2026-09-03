@@ -1272,4 +1272,30 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE messages ADD COLUMN handoff_json TEXT`,
     ],
   },
+  {
+    version: 49,
+    name: 'bot-attention',
+    // Attention states for the Bots roster/sidebar. agents.chat_seen_at and
+    // bot_groups.seen_at record when the user last had the chat/room open;
+    // "unread" = a bot-authored message newer than that. Both are backfilled
+    // to the upgrade moment so nothing lights up on first launch. agent_runs
+    // and headless_usage gain agent_id: a run/spend attributed to the agent
+    // PROFILE (delegate(agent=…), scheduled tasks, room turns), where before
+    // only the free-text agent_name / the task ref tied them together. Plain
+    // ADD COLUMNs; the headless_usage backfill derives the owner from
+    // scheduled_tasks.agent_id for existing task runs.
+    statements: [
+      `ALTER TABLE agents ADD COLUMN chat_seen_at INTEGER`,
+      `UPDATE agents SET chat_seen_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000`,
+      `ALTER TABLE bot_groups ADD COLUMN seen_at INTEGER`,
+      `UPDATE bot_groups SET seen_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000`,
+      `ALTER TABLE agent_runs ADD COLUMN agent_id TEXT`,
+      `CREATE INDEX idx_agent_runs_agent ON agent_runs(agent_id, started_at DESC)`,
+      `ALTER TABLE headless_usage ADD COLUMN agent_id TEXT`,
+      `CREATE INDEX idx_headless_usage_agent ON headless_usage(agent_id, created_at DESC)`,
+      `UPDATE headless_usage
+          SET agent_id = (SELECT t.agent_id FROM scheduled_tasks t WHERE t.id = headless_usage.ref_id)
+        WHERE run_kind = 'scheduled_task' AND agent_id IS NULL`,
+    ],
+  },
 ]

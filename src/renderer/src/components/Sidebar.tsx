@@ -5,6 +5,7 @@ import { groupTasks } from '@shared/task-groups'
 import { relativeTime } from '@/lib/format'
 import { modKeyLabel } from '@/lib/platform'
 import ScheduledTasks from '@/components/ScheduledTasks'
+import { botsAttentionSummary, useBotsStore } from '@/stores/bots'
 import { useConversationsStore } from '@/stores/conversations'
 import { useProjectsStore } from '@/stores/projects'
 import { useSpacesStore } from '@/stores/spaces'
@@ -474,6 +475,8 @@ export default function Sidebar(): React.JSX.Element {
   const loaded = useConversationsStore((s) => s.loaded)
   const projects = useProjectsStore((s) => s.projects)
   const view = useUiStore((s) => s.view)
+  const roster = useBotsStore((s) => s.roster)
+  const botsAttention = useMemo(() => (roster ? botsAttentionSummary(roster) : null), [roster])
   const spaces = useSpacesStore((s) => s.spaces)
   const activeSpaceId = useSpacesStore((s) => s.activeSpaceId)
   const [query, setQuery] = useState(useConversationsStore.getState().search)
@@ -569,11 +572,33 @@ export default function Sidebar(): React.JSX.Element {
         <button
           type="button"
           className={`btn-icon sidebar-home-btn${view === 'bots' ? ' active' : ''}`}
-          aria-label="Bots"
+          aria-label={
+            botsAttention && botsAttention.needsYou + botsAttention.unread > 0
+              ? `Bots — ${botsAttention.needsYou + botsAttention.unread} need attention`
+              : 'Bots'
+          }
           aria-current={view === 'bots' ? 'page' : undefined}
-          title="Bots"
+          title={
+            botsAttention && botsAttention.needsYou > 0
+              ? `Bots · ${botsAttention.needsYou} need you`
+              : botsAttention && botsAttention.unread > 0
+                ? `Bots · ${botsAttention.unread} unread`
+                : botsAttention && botsAttention.working > 0
+                  ? `Bots · ${botsAttention.working} working`
+                  : 'Bots'
+          }
           onClick={() => useUiStore.getState().setView('bots')}
         >
+          {botsAttention && botsAttention.needsYou + botsAttention.unread > 0 ? (
+            <span
+              className={`sidebar-bots-badge${botsAttention.needsYou > 0 ? ' is-needs-you' : ''}`}
+              aria-hidden="true"
+            >
+              {Math.min(99, botsAttention.needsYou + botsAttention.unread)}
+            </span>
+          ) : botsAttention && botsAttention.working > 0 ? (
+            <span className="sidebar-bots-working" aria-hidden="true" />
+          ) : null}
           <svg
             width="16"
             height="16"

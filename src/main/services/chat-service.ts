@@ -2156,6 +2156,7 @@ export class ChatService {
     const usageRef: HeadlessUsageRef = {
       runKind: opts?.usage?.runKind ?? 'other',
       refId: opts?.usage?.refId ?? null,
+      agentId: agent?.id ?? null,
     }
     const budgetHit = checkHeadlessBudget(this.db, usageRef, resolved.provider, resolved.modelId)
     if (budgetHit) {
@@ -2818,6 +2819,7 @@ export class ChatService {
       conversationId: ctx.conversation.id,
       projectId: ctx.conversation.projectId,
       agentName: profile?.name ?? agentName ?? null,
+      agentId: profile?.id ?? null,
       task,
       worktreePath: null,
       providerId: profile?.providerId ?? ctx.conversation.providerId,

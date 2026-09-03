@@ -30,6 +30,7 @@ function agentRun(overrides: Partial<AgentRun> = {}): AgentRun {
     conversationId: 'conv-1',
     projectId: null,
     agentName: 'researcher',
+    agentId: null,
     task: 'Investigate the flaky test',
     status: 'done',
     result: 'It is a race in the setup.',

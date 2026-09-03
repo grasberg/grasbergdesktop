@@ -1,188 +1,21 @@
 /**
- * Settings → Agents: user-defined sub-agents (persona + optional dedicated
- * model + optional restricted toolset). The assistant runs them with
- * delegate(agent="name"); workflow AI-agent nodes can select one too.
+ * Settings → Agents: the same profiles the Bots pane calls bots. One identity,
+ * one editor (AgentProfileForm, v49) — this tab lists them, toggles enable,
+ * opens their chat, and shows recent background runs.
  */
 
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import type { AgentProfile, AgentRun } from '@shared/types'
+import AgentProfileForm from '@/components/agents/AgentProfileForm'
+import { BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
 import { ConfirmButton, Switch } from '@/components/common/controls'
-import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
-import { useProvidersStore } from '@/stores/providers'
-import { useToolsStore } from '@/stores/tools'
+import { useBotsStore } from '@/stores/bots'
 import { useUiStore } from '@/stores/ui'
 import './settings.css'
 
-function AgentForm({
-  editing,
-  onDone,
-}: {
-  editing: AgentProfile | null
-  onDone: () => void
-}): ReactElement {
-  const providers = useProvidersStore((s) => s.providers)
-  const toolDefs = useToolsStore((s) => s.tools)
-  const toast = useUiStore((s) => s.toast)
-  const [name, setName] = useState(editing?.name ?? '')
-  const [description, setDescription] = useState(editing?.description ?? '')
-  const [systemPrompt, setSystemPrompt] = useState(editing?.systemPrompt ?? '')
-  const [providerId, setProviderId] = useState(editing?.providerId ?? '')
-  const [modelId, setModelId] = useState(editing?.modelId ?? '')
-  const [maxRounds, setMaxRounds] = useState(editing?.maxRounds ? String(editing.maxRounds) : '')
-  const [restrictTools, setRestrictTools] = useState(editing?.toolIds !== null && editing !== null)
-  const [toolIds, setToolIds] = useState<Set<string>>(new Set(editing?.toolIds ?? []))
-  const [busy, run] = useAsyncAction()
-
-  const toggleTool = (id: string): void => {
-    setToolIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const submit = async (): Promise<void> => {
-    if (!name.trim()) {
-      toast('Give the agent a name.', 'error')
-      return
-    }
-    if (!systemPrompt.trim()) {
-      toast('Give the agent a system prompt (its persona).', 'error')
-      return
-    }
-    const rounds = Math.floor(Number(maxRounds))
-    const input = {
-      name: name.trim(),
-      description: description.trim(),
-      systemPrompt,
-      providerId: providerId || null,
-      modelId: modelId.trim() || null,
-      toolIds: restrictTools ? [...toolIds] : null,
-      maxRounds: Number.isFinite(rounds) && rounds >= 1 ? Math.min(rounds, 40) : null,
-    }
-    await run(async () => {
-      const res = editing
-        ? await window.uld.agents.update(editing.id, input)
-        : await window.uld.agents.create(input)
-      if (!res.ok) {
-        toast(res.error.message, 'error')
-        return
-      }
-      onDone()
-    })
-  }
-
-  return (
-    <div className="card prompt-form">
-      <h5>{editing ? 'Edit agent' : 'New agent'}</h5>
-      <label className="field">
-        <span className="field-label">Name</span>
-        <input
-          className="input"
-          value={name}
-          maxLength={100}
-          placeholder="e.g. researcher"
-          onChange={(e) => setName(e.target.value)}
-        />
-        <p className="field-hint">The assistant calls it with delegate(agent=&quot;{name.trim() || 'name'}&quot;).</p>
-      </label>
-      <label className="field">
-        <span className="field-label">Description</span>
-        <input
-          className="input"
-          value={description}
-          maxLength={1024}
-          placeholder="What this agent is good at (shown in lists)"
-          onChange={(e) => setDescription(e.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span className="field-label">System prompt (persona)</span>
-        <textarea
-          className="textarea"
-          rows={7}
-          value={systemPrompt}
-          placeholder="You are a meticulous researcher. Investigate the task using the available tools…"
-          onChange={(e) => setSystemPrompt(e.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span className="field-label">Provider (empty = conversation&apos;s)</span>
-        <select className="select" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
-          <option value="">Use the conversation&apos;s provider</option>
-          {providers
-            .filter((p) => p.enabled)
-            .map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-        </select>
-      </label>
-      <label className="field">
-        <span className="field-label">Model id (empty = provider default)</span>
-        <input
-          className="input mono"
-          value={modelId}
-          placeholder="e.g. a cheaper model for routine work"
-          onChange={(e) => setModelId(e.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span className="field-label">Max rounds (empty = default 12)</span>
-        <input
-          className="input"
-          type="number"
-          min={1}
-          max={40}
-          value={maxRounds}
-          onChange={(e) => setMaxRounds(e.target.value)}
-        />
-      </label>
-      <div className="field">
-        <Switch
-          checked={restrictTools}
-          onChange={setRestrictTools}
-          label="Restrict the agent's tools"
-        />
-        <p className="field-hint">
-          Off = the standard sub-agent toolset (read-only project tools + fetch, with
-          approval-gated edits). On = only the tools picked below.
-        </p>
-      </div>
-      {restrictTools && (
-        <div className="field agent-tool-grid">
-          {toolDefs
-            .filter((t) => t.enabled && t.id !== 'delegate')
-            .map((t) => (
-              <label key={t.id} className="agent-tool-check">
-                <input
-                  type="checkbox"
-                  checked={toolIds.has(t.id)}
-                  onChange={() => toggleTool(t.id)}
-                />
-                <span className="mono">{t.name}</span>
-              </label>
-            ))}
-        </div>
-      )}
-      <div className="prompt-form-actions">
-        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? 'Saving…' : editing ? 'Save changes' : 'Add agent'}
-        </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
-          Cancel
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export default function AgentsTab(): ReactElement {
   const toast = useUiStore((s) => s.toast)
-  const toolsLoaded = useToolsStore((s) => s.loaded)
   const [agents, setAgents] = useState<AgentProfile[]>([])
   const [runs, setRuns] = useState<AgentRun[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -197,8 +30,7 @@ export default function AgentsTab(): ReactElement {
 
   useEffect(() => {
     void load()
-    if (!toolsLoaded) void useToolsStore.getState().load()
-  }, [load, toolsLoaded])
+  }, [load])
 
   useEffect(() => {
     if (!runs.some((run) => run.status === 'running')) return
@@ -210,12 +42,24 @@ export default function AgentsTab(): ReactElement {
     const res = await window.uld.agents.update(agent.id, { enabled })
     if (!res.ok) toast(res.error.message, 'error')
     await load()
+    void useBotsStore.getState().load()
   }
 
   const remove = async (id: string): Promise<void> => {
     const res = await window.uld.agents.delete(id)
     if (!res.ok) toast(res.error.message, 'error')
     await load()
+    void useBotsStore.getState().load()
+  }
+
+  const openBots = (): void => {
+    useUiStore.getState().openSettings(false)
+    useUiStore.getState().setView('bots')
+  }
+
+  const openChat = (agent: AgentProfile): void => {
+    useUiStore.getState().openSettings(false)
+    void useBotsStore.getState().openBotChat(agent.id)
   }
 
   return (
@@ -224,27 +68,38 @@ export default function AgentsTab(): ReactElement {
         <div>
           <h3>Agents</h3>
           <p className="field-hint">
-            Your own sub-agents: a persona, an optional dedicated (often cheaper) model, and an
-            optional restricted toolset. The assistant runs them with delegate(agent=&quot;name&quot;);
-            workflow AI-agent nodes can select one too.
+            Your agents are your bots: a persona, an optional dedicated model, a toolset, its own
+            memory and routines. The Bots pane is their home (chats, rooms, deliveries); this list
+            edits the very same profiles. The assistant reaches one with delegate(agent=&quot;name&quot;),
+            workflow AI-agent nodes and scheduled tasks can run as one.
           </p>
         </div>
-        {!formOpen ? (
-          <button type="button" className="btn" onClick={openAdd}>
-            + New agent
+        <div className="prompt-form-actions">
+          <button type="button" className="btn btn-ghost" onClick={openBots}>
+            Open Bots
           </button>
-        ) : null}
+          {!formOpen ? (
+            <button type="button" className="btn" onClick={openAdd}>
+              + New agent
+            </button>
+          ) : null}
+        </div>
       </header>
 
       {formOpen ? (
-        <AgentForm
-          key={editing?.id ?? 'new'}
-          editing={editing}
-          onDone={() => {
-            closeForm()
-            void load()
-          }}
-        />
+        <div className="card">
+          <AgentProfileForm
+            key={editing?.id ?? 'new'}
+            variant="settings"
+            editing={editing}
+            teammates={agents}
+            onSaved={() => {
+              closeForm()
+              void load()
+            }}
+            onCancel={closeForm}
+          />
+        </div>
       ) : null}
 
       {!loaded ? (
@@ -257,14 +112,14 @@ export default function AgentsTab(): ReactElement {
         <ul className="prompt-list">
           {agents.map((a) => (
             <li key={a.id} className="prompt-item card">
+              <BotAvatarBadge agent={a} size={32} />
               <div className="prompt-item-main">
                 <strong className="prompt-item-title">
                   {a.name}
+                  {a.title ? <span className="field-hint"> · {a.title}</span> : null}
                   {!a.enabled ? ' (disabled)' : ''}
                 </strong>
-                <p className="prompt-item-body">
-                  {a.description || a.systemPrompt.slice(0, 120)}
-                </p>
+                <p className="prompt-item-body">{a.description || a.systemPrompt.slice(0, 120)}</p>
               </div>
               <div className="prompt-item-actions">
                 <Switch
@@ -272,12 +127,15 @@ export default function AgentsTab(): ReactElement {
                   onChange={(v) => void setEnabled(a, v)}
                   label={`Enable agent ${a.name}`}
                 />
+                <button type="button" className="btn btn-ghost" onClick={() => openChat(a)}>
+                  Open chat
+                </button>
                 <button type="button" className="btn btn-ghost" onClick={() => openEdit(a)}>
                   Edit
                 </button>
                 <ConfirmButton
                   label="Delete"
-                  prompt="Delete this agent?"
+                  prompt="Delete this agent? Its chat and room memberships go too."
                   onConfirm={() => void remove(a.id)}
                 />
               </div>
@@ -301,7 +159,11 @@ export default function AgentsTab(): ReactElement {
                 </div>
                 <span className={`badge agent-run-${run.status}`}>{run.status}</span>
                 {run.status === 'running' ? (
-                  <button type="button" className="btn btn-ghost" onClick={() => void window.uld.agents.stopRun(run.id).then(() => load())}>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => void window.uld.agents.stopRun(run.id).then(() => load())}
+                  >
                     Stop
                   </button>
                 ) : null}

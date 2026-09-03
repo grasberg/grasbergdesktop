@@ -26,6 +26,8 @@ export interface BotGroupsRepository {
   setMembers(id: string, memberIds: string[], observerIds?: string[]): BotGroup | null
   setActivation(id: string, activation: BotGroupActivation): BotGroup | null
   setNeedsUser(id: string, needsUser: boolean): void
+  /** The user opened the room: clears needs_user and stamps seen_at (v49). */
+  markSeen(id: string, seenAt: number): void
   touch(id: string, updatedAtMs: number): void
   /** Drops the agent from every room (profile deleted). */
   removeMemberEverywhere(agentId: string): void
@@ -39,6 +41,7 @@ interface BotGroupRow {
   name: string
   conversation_id: string
   needs_user: number
+  seen_at: number | null
   activation: string
   created_at: number
   updated_at: number
@@ -60,6 +63,7 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       name: row.name,
       conversationId: row.conversation_id,
       needsUser: row.needs_user === 1,
+      seenAt: row.seen_at,
       memberIds: members.map((member) => member.agentId),
       activation: row.activation === 'mention' ? 'mention' : 'always',
       observerIds: members.filter((member) => member.observer).map((member) => member.agentId),
@@ -105,9 +109,9 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
       const now = Date.now()
       const id = randomUUID()
       driver.run(
-        `INSERT INTO bot_groups (id, name, conversation_id, needs_user, activation, created_at, updated_at)
-         VALUES (?, ?, ?, 0, ?, ?, ?)`,
-        [id, input.name, input.conversationId, input.activation ?? 'always', now, now]
+        `INSERT INTO bot_groups (id, name, conversation_id, needs_user, seen_at, activation, created_at, updated_at)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
+        [id, input.name, input.conversationId, now, input.activation ?? 'always', now, now]
       )
       insertMembers(id, input.memberIds, input.observerIds ?? [])
       return getById(id) as BotGroup
@@ -142,6 +146,10 @@ export function createBotGroupsRepository(driver: SqliteDriver): BotGroupsReposi
 
     setNeedsUser(id, needsUser) {
       driver.run('UPDATE bot_groups SET needs_user = ? WHERE id = ?', [needsUser ? 1 : 0, id])
+    },
+
+    markSeen(id, seenAt) {
+      driver.run('UPDATE bot_groups SET needs_user = 0, seen_at = ? WHERE id = ?', [seenAt, id])
     },
 
     touch(id, updatedAtMs) {

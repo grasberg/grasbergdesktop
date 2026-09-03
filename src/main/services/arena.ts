@@ -226,6 +226,7 @@ export interface ArenaServiceDeps {
         conversationId: string | null
         projectId: string | null
         agentName: string | null
+        agentId: string | null
         task: string
         worktreePath: string | null
         providerId: string | null
@@ -370,6 +371,7 @@ export class ArenaService {
         conversationId,
         projectId: worktreeProject.id,
         agentName: `arena-r${round}`,
+        agentId: null,
         task,
         worktreePath: worktree.path,
         providerId: ref.providerId,

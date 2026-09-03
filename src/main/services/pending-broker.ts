@@ -31,6 +31,8 @@ export interface BrokerHooks<TRequest, TAnswer> {
 
 interface PendingEntry<TAnswer> {
   resolve: (answer: TAnswer) => void
+  /** The conversation the request was raised from (the roster needs-you state, v49). */
+  conversationId: string | null
   timer: NodeJS.Timeout
   broadcast: Broadcast
   signal?: AbortSignal
@@ -80,7 +82,15 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
       timer.unref?.()
       const onAbort = (): void => this.settle(requestId, this.fallback)
       if (signal) signal.addEventListener('abort', onAbort, { once: true })
-      this.pending.set(requestId, { resolve, timer, broadcast, signal, onAbort })
+      const conversationId = (fullRequest as { conversationId?: unknown }).conversationId
+      this.pending.set(requestId, {
+        resolve,
+        conversationId: typeof conversationId === 'string' ? conversationId : null,
+        timer,
+        broadcast,
+        signal,
+        onAbort,
+      })
       try {
         broadcast(this.requestChannel, fullRequest)
       } catch {
@@ -116,6 +126,14 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
   /** True while `requestId` is still awaiting an answer. */
   has(requestId: string): boolean {
     return this.pending.has(requestId)
+  }
+
+  /** True while any request raised from `conversationId` awaits an answer (v49). */
+  hasPendingFor(conversationId: string): boolean {
+    for (const entry of this.pending.values()) {
+      if (entry.conversationId === conversationId) return true
+    }
+    return false
   }
 
   /** Called on app quit/teardown: every pending request resolves to the fallback. */

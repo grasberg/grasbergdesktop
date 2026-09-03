@@ -64,6 +64,13 @@ export interface MessagesRepository {
    */
   lastSnippet(conversationId: string): { content: string; createdAt: number } | null
   /**
+   * When the latest bot-authored message landed (an assistant turn, or any row
+   * stamped with agent_id — routed bot replies included; handoff markers are
+   * system rows and excluded). Null when nothing bot-authored exists. Unread
+   * math for the Bots roster (v49).
+   */
+  lastBotAuthoredAt(conversationId: string): number | null
+  /**
    * Marks any message still in status 'streaming' as 'stopped' — recovery for
    * generations interrupted by a crash/quit. Called at app boot. Returns the
    * number of messages fixed.
@@ -318,6 +325,16 @@ export function createMessagesRepository(driver: SqliteDriver): MessagesReposito
         [conversationId]
       )
       return row ? { content: row.content, createdAt: row.created_at } : null
+    },
+
+    lastBotAuthoredAt(conversationId) {
+      const row = driver.get<{ at: number | null }>(
+        `SELECT MAX(created_at) AS at FROM messages
+          WHERE conversation_id = ? AND status <> 'streaming' AND role <> 'system'
+            AND (role = 'assistant' OR agent_id IS NOT NULL)`,
+        [conversationId]
+      )
+      return row?.at ?? null
     },
 
     markDanglingStreamingAsStopped() {

@@ -5,7 +5,7 @@
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import { CHANNELS, type ChannelName, type UldApi } from '@shared/ipc'
+import { CHANNELS, type ChannelName, type NavigateTarget, type UldApi } from '@shared/ipc'
 import type {
   ArenaState,
   McpServerRuntime,
@@ -240,6 +240,7 @@ const api: UldApi = {
   },
   notices: {
     onNotice: subscribe<{ message: string; level: 'info' | 'error' }>(CHANNELS.mainNotice),
+    onNavigate: subscribe<NavigateTarget>(CHANNELS.navigate),
   },
   activity: {
     list: (query) => ipcRenderer.invoke(CHANNELS.activityList, query),
@@ -355,6 +356,7 @@ const api: UldApi = {
     roster: () => ipcRenderer.invoke(CHANNELS.botsRoster),
     openChat: (agentId) => ipcRenderer.invoke(CHANNELS.botsOpenChat, agentId),
     outbox: (agentId) => ipcRenderer.invoke(CHANNELS.botsOutbox, agentId),
+    markSeen: (agentId) => ipcRenderer.invoke(CHANNELS.botsMarkSeen, agentId),
     createGroup: (input) => ipcRenderer.invoke(CHANNELS.botGroupCreate, input),
     updateGroup: (id, patch) => ipcRenderer.invoke(CHANNELS.botGroupUpdate, id, patch),
     deleteGroup: (id) => ipcRenderer.invoke(CHANNELS.botGroupDelete, id),
