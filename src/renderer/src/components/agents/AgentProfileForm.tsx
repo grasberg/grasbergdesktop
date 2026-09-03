@@ -15,7 +15,7 @@ import DeliveriesCard from '@/components/bots/DeliveriesCard'
 import { useBotsStore } from '@/stores/bots'
 import { useProvidersStore } from '@/stores/providers'
 import { useToolsStore } from '@/stores/tools'
-import { toastError } from '@/stores/ui'
+import { toastError, useUiStore } from '@/stores/ui'
 import './agent-form.css'
 
 export interface AgentProfileFormProps {
@@ -140,6 +140,7 @@ export default function AgentProfileForm({
 }: AgentProfileFormProps): ReactElement {
   const [form, setForm] = useState<FormState>(editing ? formFrom(editing) : emptyForm())
   const [saving, setSaving] = useState(false)
+  const [dreaming, setDreaming] = useState(false)
   const providers = useProvidersStore((s) => s.providers)
   const loadProviders = useProvidersStore((s) => s.load)
   const toolDefs = useToolsStore((s) => s.tools)
@@ -171,6 +172,23 @@ export default function AgentProfileForm({
       toastError(editing ? 'Failed to save the bot' : 'Failed to create the bot', e)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const consolidateMemory = async (): Promise<void> => {
+    if (!editing || dreaming) return
+    setDreaming(true)
+    try {
+      const result = await unwrap(window.uld.memories.dream(editing.id))
+      const toast = useUiStore.getState().toast
+      if (!result.ran) toast(`${editing.name} has too few memories to consolidate yet.`)
+      else if (result.updated + result.removed + result.created === 0)
+        toast(`${editing.name}'s memory is already well consolidated.`, 'success')
+      else toast(`${editing.name}: ${result.before} → ${result.after} memories.`, 'success')
+    } catch (e) {
+      toastError('Consolidation failed', e)
+    } finally {
+      setDreaming(false)
     }
   }
 
@@ -429,9 +447,19 @@ export default function AgentProfileForm({
         <button type="button" onClick={onCancel}>
           Cancel
         </button>
+        {editing ? (
+          <button
+            type="button"
+            disabled={dreaming}
+            title="Consolidate this bot's own memories (its shared-pool view is untouched)"
+            onClick={() => void consolidateMemory()}
+          >
+            {dreaming ? 'Dreaming…' : 'Consolidate memory'}
+          </button>
+        ) : null}
         <span className="bot-form-hint">
-          Memory is per bot and lives in Settings → Memory; routines are scheduled tasks run as this
-          bot.
+          The bot reads its own memories plus the shared pool, writes only its own (Settings →
+          Memory); routines are scheduled tasks run as this bot.
         </span>
       </div>
     </div>

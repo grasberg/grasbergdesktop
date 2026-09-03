@@ -1916,7 +1916,14 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   })
 
   // Manual "Consolidate now": forced dream, bypassing the auto-run gates.
-  register(CHANNELS.memoriesDream, () => deps.dreamingService.dreamNow(true))
+  register(CHANNELS.memoriesDream, (agentId) =>
+    deps.dreamingService.dreamNow(
+      true,
+      agentId === undefined
+        ? undefined
+        : { agentId: parseInput(z.string().min(1).max(100).nullable(), agentId) }
+    )
+  )
 
   // -- notebooks ----------------------------------------------------------------
 

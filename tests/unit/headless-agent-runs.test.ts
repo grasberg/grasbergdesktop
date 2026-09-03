@@ -216,7 +216,7 @@ it('declines without asking when no remote channel is wired at all', async () =>
   expect(toolResult(fixture.adapter)).toContain('declined')
 })
 
-it("injects an agent's own memories into its prompt — and nobody else's", async () => {
+it("injects an agent's own memories plus the shared pool — never another agent's", async () => {
   const providerId = providerWithKey('m1')
   const watcher = db.agents.create({ name: 'Watcher', systemPrompt: 'You watch.' })
   const scribe = db.agents.create({ name: 'Scribe', systemPrompt: 'You write.' })
@@ -232,9 +232,9 @@ it("injects an agent's own memories into its prompt — and nobody else's", asyn
   const system = typeof systemContent === 'string' ? systemContent : ''
   expect(system).toContain('You watch.')
   expect(system).toContain('build 41')
-  // A separate recollection, not an overlay on the global pile.
+  // Own memories plus the user's shared pool; another agent's stay private.
   expect(system).not.toContain('not yours')
-  expect(system).not.toContain('user speaks Swedish')
+  expect(system).toContain('user speaks Swedish')
 })
 
 it("persists an agent's memory block under that agent, not the shared pool", async () => {

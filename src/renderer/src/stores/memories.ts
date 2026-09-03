@@ -11,8 +11,11 @@ import { createSimpleListActions, type SimpleListActions } from './simple-list'
 export interface MemoriesStoreState extends SimpleListActions<MemoryInput, MemoryPatch> {
   memories: Memory[]
   loaded: boolean
-  /** Manual consolidation ("dreaming"); rejects with a NormalizedError. */
-  dream(): Promise<DreamResult>
+  /**
+   * Manual consolidation ("dreaming"); rejects with a NormalizedError. Omit
+   * the owner for every namespace, null for the shared pool, an id for one bot.
+   */
+  dream(agentId?: string | null): Promise<DreamResult>
 }
 
 export const useMemoriesStore = create<MemoriesStoreState>()((set, get) => ({
@@ -26,8 +29,8 @@ export const useMemoriesStore = create<MemoriesStoreState>()((set, get) => ({
     onLoadFailed: () => set({ loaded: true }),
   }),
 
-  async dream() {
-    const result = await unwrap(window.uld.memories.dream())
+  async dream(agentId) {
+    const result = await unwrap(window.uld.memories.dream(agentId))
     await get().load()
     return result
   },

@@ -2716,6 +2716,13 @@ export interface DreamResult {
   updated: number
   removed: number
   created: number
+  /**
+   * Per-namespace breakdown, present only when at least one bot namespace was
+   * part of the run (the shared pool alone reports the flat counts). Each
+   * namespace — the shared pool (agentId null) and every bot with memories —
+   * is consolidated in its own model call, never mixed.
+   */
+  perOwner?: Array<{ agentId: string | null; agentName: string | null; result: DreamResult }>
 }
 
 // ---------------------------------------------------------------------------

@@ -88,26 +88,106 @@ describe('memory ownership', () => {
 })
 
 describe('dreaming and agent memories', () => {
-  it('consolidates only shared memories, never merging across owners', async () => {
+  it('dreams each owner in its own call, never merging across owners', async () => {
     for (let i = 0; i < 6; i++) {
       db.memories.create({ title: `shared-${i}`, content: `fact ${i}` })
     }
-    db.memories.create({ title: 'private', content: 'watcher only', agentId: watcherId })
+    db.memories.create({ title: 'private-a', content: 'watcher only a', agentId: watcherId })
+    db.memories.create({ title: 'private-b', content: 'watcher only b', agentId: watcherId })
+    db.memories.create({ title: 'lonely', content: 'scribe has one', agentId: scribeId })
 
-    let seenPrompt = ''
+    const prompts: string[] = []
     const dreaming = new DreamingService({
       db,
       generate: async (prompt) => {
-        seenPrompt = prompt
+        prompts.push(prompt)
+        return JSON.stringify({
+          operations: [{ action: 'create', title: `merged-${prompts.length}`, content: 'merged' }],
+        })
+      },
+    })
+    const result = await dreaming.dreamNow(true)
+
+    // Two calls: the shared pool and Watcher. Scribe has a single memory and
+    // is skipped; no prompt ever mixes owners.
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]).toContain('shared-0')
+    expect(prompts[0]).not.toContain('watcher only')
+    expect(prompts[1]).toContain('watcher only a')
+    expect(prompts[1]).not.toContain('shared-0')
+    expect(prompts[1]).toContain('Watcher')
+    // Creations inherit the namespace they were merged from.
+    expect(db.memories.listForAgent(null).map((m) => m.title)).toContain('merged-1')
+    expect(db.memories.listForAgent(watcherId).map((m) => m.title)).toContain('merged-2')
+    expect(db.memories.listForAgent(scribeId)).toHaveLength(1)
+    expect(result.perOwner?.map((run) => run.agentName)).toEqual([null, 'Watcher', 'Scribe'])
+    expect(result.perOwner?.find((run) => run.agentId === scribeId)?.result.ran).toBe(false)
+    // Separate watermarks per namespace.
+    const keys = db.driver
+      .all<{ key: string }>("SELECT key FROM meta WHERE key LIKE 'dreaming_last_run_at%'")
+      .map((row) => row.key)
+      .sort()
+    expect(keys).toEqual(['dreaming_last_run_at', `dreaming_last_run_at:${watcherId}`])
+  })
+
+  it('a scoped manual run touches only that namespace; a deleted profile is skipped', async () => {
+    for (let i = 0; i < 3; i++) db.memories.create({ title: `s-${i}`, content: 'x' })
+    db.memories.create({ title: 'w-1', content: 'x', agentId: watcherId })
+    db.memories.create({ title: 'w-2', content: 'x', agentId: watcherId })
+    db.memories.create({ title: 'gone-1', content: 'x', agentId: 'deleted-profile' })
+    db.memories.create({ title: 'gone-2', content: 'x', agentId: 'deleted-profile' })
+    const prompts: string[] = []
+    const dreaming = new DreamingService({
+      db,
+      generate: async (prompt) => {
+        prompts.push(prompt)
         return JSON.stringify({ operations: [] })
       },
     })
-    await dreaming.dreamNow(true)
+    await dreaming.dreamNow(true, { agentId: watcherId })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('w-1')
+    expect(prompts[0]).not.toContain('s-0')
 
-    // The private memory never reaches the consolidation prompt, so it can
-    // never be rewritten into, or merged with, someone else's recollection.
-    expect(seenPrompt).toContain('shared-0')
-    expect(seenPrompt).not.toContain('watcher only')
-    expect(db.memories.listForAgent(watcherId)).toHaveLength(1)
+    prompts.length = 0
+    await dreaming.dreamNow(true)
+    expect(prompts).toHaveLength(2) // shared + Watcher; the orphaned namespace never runs
+    expect(prompts.some((p) => p.includes('gone-1'))).toBe(false)
+  })
+
+  it('a failing namespace does not starve the others', async () => {
+    for (let i = 0; i < 3; i++) db.memories.create({ title: `s-${i}`, content: 'x' })
+    db.memories.create({ title: 'w-1', content: 'x', agentId: watcherId })
+    db.memories.create({ title: 'w-2', content: 'x', agentId: watcherId })
+    let calls = 0
+    const dreaming = new DreamingService({
+      db,
+      generate: async () => {
+        calls += 1
+        if (calls === 1) throw new Error('provider down')
+        return JSON.stringify({ operations: [] })
+      },
+    })
+    const result = await dreaming.dreamNow(true)
+    expect(calls).toBe(2)
+    expect(result.ran).toBe(true)
+    expect(result.perOwner?.map((run) => run.agentName)).toEqual(['Watcher'])
+  })
+})
+
+describe('memory read scope (listVisibleTo)', () => {
+  it('shows a bot its own memories first, then the shared pool, deduped by title with the bot winning', () => {
+    db.memories.create({ title: 'Deploy day', content: 'shared: Fridays' })
+    db.memories.create({ title: 'user-language', content: 'Swedish' })
+    db.memories.create({ title: 'deploy day', content: 'watcher: Thursdays', agentId: watcherId })
+    db.memories.create({ title: 'scribe-secret', content: 'not yours', agentId: scribeId })
+
+    const visible = db.memories.listVisibleTo(watcherId)
+    expect(visible.map((m) => m.content)).toEqual(['watcher: Thursdays', 'Swedish'])
+    expect(db.memories.listVisibleTo(null).map((m) => m.title).sort()).toEqual([
+      'Deploy day',
+      'user-language',
+    ])
+    expect(db.memories.listOwners().sort()).toEqual([null, scribeId, watcherId].sort())
   })
 })

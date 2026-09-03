@@ -1678,10 +1678,11 @@ export class ChatService {
         ? {
             memoryEnabled: true,
             // Shared memories for ordinary conversations; a bot chat (v46)
-            // gets the OWNING bot's memories instead — an agent profile's
-            // memories belong to that agent and never leak elsewhere.
+            // sees the OWNING bot's memories first plus the user's shared
+            // pool — never another bot's private recollection. Writes stay
+            // owner-scoped (the memory hook persists under the bot).
             memories: this.db.memories
-              .listForAgent(conversation.agentId ?? null)
+              .listVisibleTo(conversation.agentId ?? null)
               .slice(0, MEMORY_MAX_INJECTED)
               .map((m) => ({ title: m.title, content: m.content })),
           }
@@ -2518,13 +2519,14 @@ export class ChatService {
 
   /**
    * An agent profile's persona plus the memory section listing ITS memories
-   * (and the block format for writing new ones). Falls back to the bare
-   * persona when the user has memory switched off.
+   * first and the user's shared pool after (never another agent's), and the
+   * block format for writing new ones — which land under this agent. Falls
+   * back to the bare persona when the user has memory switched off.
    */
   private agentSystemPrompt(agent: AgentProfile, settings: AppSettings): string {
     if (!settings.memoryEnabled) return agent.systemPrompt
     const memories = this.db.memories
-      .listForAgent(agent.id)
+      .listVisibleTo(agent.id)
       .slice(0, MEMORY_MAX_INJECTED)
       .map((memory) => ({ title: memory.title, content: memory.content }))
     return [agent.systemPrompt.trim(), buildMemorySection(memories)]

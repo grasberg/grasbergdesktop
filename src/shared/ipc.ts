@@ -1157,7 +1157,11 @@ export interface UldApi {
     update(id: string, patch: MemoryPatch): Promise<IpcResult<Memory>>
     delete(id: string): Promise<IpcResult<void>>
     /** Manual "Consolidate now": runs a dream regardless of the auto toggle. */
-    dream(): Promise<IpcResult<DreamResult>>
+    /**
+     * Manual consolidation. Omit = every namespace (shared pool + each bot with
+     * memories, separately); null = the shared pool only; an id = that bot only.
+     */
+    dream(agentId?: string | null): Promise<IpcResult<DreamResult>>
   }
   documents: {
     /** Notebook summaries (kind 'doc' only), updated_at DESC, no content. */

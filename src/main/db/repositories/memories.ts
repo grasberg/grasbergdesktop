@@ -6,9 +6,16 @@
  *
  * Since v32 a memory has an OWNER: `agentId` null means shared (every ordinary
  * conversation sees it), a non-null one means the memory belongs to that agent
- * profile and only its runs ever see it. Titles are unique per owner, so two
- * agents can each keep a "last-seen" without overwriting one another — every
- * title-keyed operation below is therefore owner-scoped.
+ * profile. Two scopes, deliberately different:
+ * - WRITE / consolidation scope (`listForAgent`, `upsertByTitle`,
+ *   `removeByTitle`, dreaming): exactly one owner. An agent only ever edits,
+ *   forgets or consolidates its own memories.
+ * - READ / prompt scope (`listVisibleTo`): a bot sees its own memories AND
+ *   the user's shared pool (own first, titles deduped with the bot's winning)
+ *   — never another bot's private recollection.
+ * Titles are unique per owner, so two agents can each keep a "last-seen"
+ * without overwriting one another — every title-keyed operation below is
+ * therefore owner-scoped.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -20,11 +27,18 @@ export interface MemoriesRepository {
   /** EVERY memory regardless of owner, updated_at DESC (Settings → Memory). */
   list(): Memory[]
   /**
-   * One owner's view: the shared memories for `null`, or exactly that agent's
-   * memories for an id. Deliberately NOT shared+agent — an agent profile is a
-   * separate recollection, not an overlay on the global pile.
+   * One owner's rows: the shared memories for `null`, or exactly that agent's
+   * memories for an id. The write/consolidation scope — never shared+agent.
    */
   listForAgent(agentId: string | null): Memory[]
+  /**
+   * The prompt view for a run: the agent's own memories first, then the shared
+   * pool, deduped by title (case-insensitive; the agent's entry wins). For
+   * `null` = the shared pool alone. Never includes another agent's memories.
+   */
+  listVisibleTo(agentId: string | null): Memory[]
+  /** Owners that currently hold memories (null = the shared pool). Dreaming iterates these. */
+  listOwners(): Array<string | null>
   getById(id: string): Memory | null
   create(input: MemoryInput): Memory
   update(id: string, patch: MemoryPatch): Memory | null
@@ -118,6 +132,36 @@ export function createMemoriesRepository(driver: SqliteDriver): MemoriesReposito
         ownerParams(agentId)
       )
       return rows.map(toMemory)
+    },
+
+    listVisibleTo(agentId) {
+      if (agentId === null) {
+        return driver
+          .all<MemoryRow>('SELECT * FROM memories WHERE agent_id IS NULL ORDER BY updated_at DESC')
+          .map(toMemory)
+      }
+      const rows = driver.all<MemoryRow>(
+        `SELECT * FROM memories WHERE agent_id = ? OR agent_id IS NULL
+          ORDER BY (agent_id IS NULL) ASC, updated_at DESC`,
+        [agentId]
+      )
+      const seen = new Set<string>()
+      const visible: Memory[] = []
+      for (const row of rows) {
+        const key = row.title.trim().toLowerCase()
+        if (seen.has(key)) continue // the agent's own entry came first and wins
+        seen.add(key)
+        visible.push(toMemory(row))
+      }
+      return visible
+    },
+
+    listOwners() {
+      return driver
+        .all<{ agent_id: string | null }>(
+          'SELECT DISTINCT agent_id FROM memories ORDER BY (agent_id IS NULL) DESC, agent_id'
+        )
+        .map((row) => row.agent_id)
     },
 
     getById,

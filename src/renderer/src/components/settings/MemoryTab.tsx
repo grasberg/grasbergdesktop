@@ -93,13 +93,22 @@ export default function MemoryTab(): ReactElement {
 
   const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<Memory>()
 
+  // Owner filter: 'all' | 'shared' | an agent id. Filters the list and scopes
+  // "Consolidate now" — each namespace dreams in its own model call anyway.
+  const [owner, setOwner] = useState<string>('all')
+
   const consolidateNow = (): void => {
     void runDream(async () => {
-      const result = await dream()
+      const result = await dream(owner === 'all' ? undefined : owner === 'shared' ? null : owner)
       if (!result.ran) {
         toast('Not enough memories to consolidate yet.')
       } else if (result.updated + result.removed + result.created === 0) {
         toast('Memories are already well consolidated.', 'success')
+      } else if (result.perOwner && result.perOwner.length > 1) {
+        const parts = result.perOwner
+          .filter((run) => run.result.ran)
+          .map((run) => `${run.agentName ?? 'shared'} ${run.result.before} → ${run.result.after}`)
+        toast(`Dreaming done: ${parts.join(', ')}.`, 'success')
       } else {
         toast(`Dreaming done: ${result.before} → ${result.after} memories.`, 'success')
       }
@@ -182,6 +191,25 @@ export default function MemoryTab(): ReactElement {
         />
       </div>
 
+      {agents.length > 0 ? (
+        <label className="field memory-owner-filter">
+          <span className="field-label">Show</span>
+          <select className="select" value={owner} onChange={(e) => setOwner(e.target.value)}>
+            <option value="all">All memories</option>
+            <option value="shared">Shared (every conversation)</option>
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name} (bot-private)
+              </option>
+            ))}
+          </select>
+          <p className="field-hint">
+            Each bot keeps its own recollection and also reads the shared pool; "Consolidate now"
+            follows this filter and never mixes namespaces.
+          </p>
+        </label>
+      ) : null}
+
       {formOpen ? (
         <MemoryForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />
       ) : null}
@@ -194,7 +222,11 @@ export default function MemoryTab(): ReactElement {
         </div>
       ) : (
         <ul className="prompt-list">
-          {memories.map((m) => (
+          {memories
+            .filter((m) =>
+              owner === 'all' ? true : owner === 'shared' ? m.agentId == null : m.agentId === owner
+            )
+            .map((m) => (
             <li key={m.id} className="prompt-item card">
               <div className="prompt-item-main">
                 <strong className="prompt-item-title">
@@ -202,7 +234,7 @@ export default function MemoryTab(): ReactElement {
                   {/* An agent-owned memory is private to that agent's runs and
                       is never injected into an ordinary conversation. */}
                   {m.agentId ? (
-                    <span className="badge" title="Only this agent profile sees this memory">
+                    <span className="badge" title="Private to this bot (it also reads the shared pool)">
                       {agentName(m.agentId)}
                     </span>
                   ) : null}
