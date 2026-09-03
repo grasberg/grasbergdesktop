@@ -28,6 +28,7 @@ import type {
   BotGroup,
   BotGroupActivation,
   BotGroupMode,
+  BotModeSettings,
   BotRoster,
   Conversation,
   DelegateFinishedInfo,
@@ -54,17 +55,14 @@ import {
   formatHandoffMarker,
   formatIncomingBotMessage,
   formatIncomingEvent,
-  GROUP_MAX_MEMBERS,
-  GROUP_MAX_MESSAGES,
-  GROUP_MAX_ROUNDS,
   GROUP_MIN_MEMBERS,
   isHeartbeatQuiet,
   isPassReply,
   matchBotName,
-  MAX_BOT_HOPS,
   mentionsUser,
   parseBotMentions,
   planRoundParticipants,
+  resolveBotModeLimits,
   type BotIdentity,
 } from './bot-prompts'
 import { sanitizeUntrusted } from './untrusted'
@@ -428,7 +426,7 @@ export class BotService {
         : 'Error: bot-to-bot messaging is disabled for you.'
     }
     const hop = (this.turnHops.get(senderConversationId) ?? 0) + 1
-    if (hop > MAX_BOT_HOPS) {
+    if (hop > this.limits().maxHops) {
       return (
         'Error: this bot-to-bot chain is too deep. Let the thread end — summarize for the user ' +
         'instead of messaging further.'
@@ -1058,6 +1056,13 @@ export class BotService {
     this.startGroupRounds(group, members, pending.join('\n'))
   }
 
+  /**
+   * Round-table rounds. Since v50 the participants of ONE round answer in
+   * parallel — each as its own run against the same transcript snapshot —
+   * and their replies post in member order; members react to each other in
+   * the NEXT round. PASS, the settlement rule and the caps (now settings)
+   * are unchanged.
+   */
   private async runGroupRounds(
     group: BotGroup,
     members: AgentProfile[],
@@ -1065,6 +1070,7 @@ export class BotService {
     controller: AbortController
   ): Promise<void> {
     const db = this.deps.db
+    const limits = this.limits()
     const observers = new Set(group.observerIds)
     // Open (unmentioned) rounds are for speaking members only; an observer
     // reads the room and takes a turn ONLY when @mentioned (v47).
@@ -1077,41 +1083,50 @@ export class BotService {
     // Activation 'mention' (v47, the OpenClaw group default): only @named bots
     // take one turn each — no open rounds, no settlement loop. Silence when
     // nobody is mentioned; the message stays as room context.
-    const maxRounds = group.activation === 'mention' ? 1 : GROUP_MAX_ROUNDS
+    const maxRounds = group.activation === 'mention' ? 1 : limits.groupMaxRounds
     if (group.activation === 'mention' && mentioned.length === 0) return
     for (let round = 1; round <= maxRounds; round++) {
+      if (controller.signal.aborted || messageCount >= limits.groupMaxMessages) return
       const participants = planRoundParticipants(
         round === 1 && mentioned.length > 0 ? members.map((m) => m.name) : speakerNames,
         mentioned,
         round
       )
+        .map((name) => members.find((member) => member.name === name))
+        .filter((agent): agent is AgentProfile => agent !== undefined)
+      const transcript = this.roomTranscript(group, byId)
+      const outcomes = await Promise.allSettled(
+        participants.map(async (agent) => ({
+          agent,
+          reply: await this.deps.chat.generateForWorkflow(
+            buildGroupTurnPrompt({
+              self: identity(agent),
+              roomName: group.name,
+              members: identities,
+              transcript,
+            }),
+            undefined,
+            undefined,
+            {
+              useTools: false,
+              agentId: agent.id,
+              signal: controller.signal,
+              usage: { runKind: 'other', refId: group.id },
+            }
+          ),
+        }))
+      )
+      if (controller.signal.aborted) return
       let spoke = false
-      for (const name of participants) {
-        if (controller.signal.aborted || messageCount >= GROUP_MAX_MESSAGES) return
-        const agent = members.find((member) => member.name === name)
-        if (!agent) continue
-        const transcript = this.roomTranscript(group, byId)
-        const prompt = buildGroupTurnPrompt({
-          self: identity(agent),
-          roomName: group.name,
-          members: identities,
-          transcript,
-        })
-        let reply: string
-        try {
-          reply = await this.deps.chat.generateForWorkflow(prompt, undefined, undefined, {
-            useTools: false,
-            agentId: agent.id,
-            signal: controller.signal,
-            usage: { runKind: 'other', refId: group.id },
-          })
-        } catch (e) {
+      for (const outcome of outcomes) {
+        if (messageCount >= limits.groupMaxMessages) break
+        if (outcome.status === 'rejected') {
           // A member's failure is never fatal to the room (Hermes: advisor
-          // failures are captured, not propagated). Aborts end the rounds.
-          if (controller.signal.aborted) return
-          console.error(`[bots] group turn failed for ${agent.name}:`, errorMessageOf(e))
+          // failures are captured, not propagated).
+          console.error('[bots] group turn failed:', errorMessageOf(outcome.reason))
           continue
         }
+        const { agent, reply } = outcome.value
         if (isPassReply(reply) || reply.trim().length === 0) continue
         this.insertMessage(group.conversationId, 'assistant', reply.trim(), agent.id)
         messageCount += 1
@@ -1246,14 +1261,20 @@ export class BotService {
     }
   }
 
+  /** Effective caps from settings (v50), clamped; the Hermes numbers by default. */
+  private limits(): BotModeSettings {
+    return resolveBotModeLimits(this.deps.db.settings.get().botMode)
+  }
+
   private resolveMembers(memberIds: string[]): AgentProfile[] {
     const unique = [...new Set(memberIds)]
     const members = unique
       .map((id) => this.deps.db.agents.getById(id))
       .filter((agent): agent is AgentProfile => agent !== null)
-    if (members.length < GROUP_MIN_MEMBERS || members.length > GROUP_MAX_MEMBERS) {
+    const max = this.limits().groupMaxMembers
+    if (members.length < GROUP_MIN_MEMBERS || members.length > max) {
       throw new Error(
-        `A group chat holds ${GROUP_MIN_MEMBERS}–${GROUP_MAX_MEMBERS} bots (got ${members.length}).`
+        `A group chat holds ${GROUP_MIN_MEMBERS}–${max} bots (got ${members.length}).`
       )
     }
     return members

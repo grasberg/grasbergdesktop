@@ -18,6 +18,7 @@ import {
   mentionsUser,
   parseBotMentions,
   planRoundParticipants,
+  resolveBotModeLimits,
 } from '../../src/main/services/bot-prompts'
 import {
   BotService,
@@ -894,5 +895,99 @@ describe('BotService ensemble rooms (v50)', () => {
     })
     expect(() => service.createGroupFromMoaPreset('preset-2')).toThrow(/at least one advisor/)
     expect(() => service.createGroupFromMoaPreset('nope')).toThrow(/Unknown/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Parallel round-table rounds + configurable caps (v50)
+// ---------------------------------------------------------------------------
+
+describe('BotService round tables: parallel rounds + settings caps (v50)', () => {
+  async function settledRoom(service: BotService, groupId: string): Promise<void> {
+    const active = (service as unknown as { activeGroups: Map<string, unknown> }).activeGroups
+    await vi.waitFor(() => expect(active.has(groupId)).toBe(false), { timeout: 5000 })
+  }
+
+  it('runs the participants of a round in parallel and posts replies in member order', async () => {
+    const alpha = db.agents.create({ name: 'Alpha', systemPrompt: 'p' })
+    const beta = db.agents.create({ name: 'Beta', systemPrompt: 'p' })
+    const pending: Array<{ agentId: string; resolve: (text: string) => void }> = []
+    let inFlight = 0
+    let maxInFlight = 0
+    const chat = makeFakeChat({
+      generateForWorkflow: (_prompt, _p, _m, opts) =>
+        new Promise<string>((resolve) => {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          pending.push({
+            agentId: opts?.agentId ?? '',
+            resolve: (text) => {
+              inFlight -= 1
+              resolve(text)
+            },
+          })
+        }),
+    })
+    const { service } = makeService(chat)
+    const group = service.createGroup({ name: 'Table', memberIds: [alpha.id, beta.id] })
+    service.groupSend(group.id, 'Thoughts?')
+
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    expect(maxInFlight).toBe(2)
+    pending.find((p) => p.agentId === beta.id)!.resolve('Beta first.')
+    pending.find((p) => p.agentId === alpha.id)!.resolve('Alpha second to answer.')
+    // Round 2: both pass → the room settles.
+    await vi.waitFor(() => expect(pending).toHaveLength(4))
+    pending[2].resolve('PASS')
+    pending[3].resolve('PASS')
+    await settledRoom(service, group.id)
+
+    const turns = db.messages
+      .listByConversation(group.conversationId)
+      .filter((m) => m.role === 'assistant')
+    expect(turns.map((m) => m.agentId)).toEqual([alpha.id, beta.id])
+  })
+
+  it('honours settings.botMode: message cap, round cap, hop cap and room size', async () => {
+    db.settings.update({
+      botMode: { groupMaxRounds: 1, groupMaxMessages: 1, maxHops: 1, groupMaxMembers: 8 },
+    })
+    const bots = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((name) =>
+      db.agents.create({ name, systemPrompt: 'p' })
+    )
+    let calls = 0
+    const chat = makeFakeChat({
+      generateForWorkflow: async () => {
+        calls += 1
+        return 'I have thoughts.'
+      },
+    })
+    const { service } = makeService(chat)
+    // Seven members: refused by the default cap of 6, allowed at 8.
+    const room = service.createGroup({ name: 'Big', memberIds: bots.map((bot) => bot.id) })
+    service.groupSend(room.id, 'Everyone?')
+    await settledRoom(service, room.id)
+    const turns = db.messages
+      .listByConversation(room.conversationId)
+      .filter((m) => m.role === 'assistant')
+    expect(turns).toHaveLength(1) // groupMaxMessages 1 stops after the first reply
+    expect(calls).toBe(7) // …but the round itself still ran everyone at once
+
+    // Hop cap 1: a bot mid-turn at hop 1 may not chain further.
+    const aChat = service.ensureBotChat(bots[0].id)
+    ;(service as unknown as { turnHops: Map<string, number> }).turnHops.set(aChat.id, 1)
+    expect(await service.messengerSend(aChat.id, 'B', 'chain')).toContain('too deep')
+  })
+
+  it('resolveBotModeLimits clamps out-of-range values and fills the Hermes defaults', () => {
+    expect(resolveBotModeLimits(undefined)).toEqual({
+      groupMaxRounds: 3,
+      groupMaxMessages: 10,
+      maxHops: 6,
+      groupMaxMembers: 6,
+    })
+    expect(
+      resolveBotModeLimits({ groupMaxRounds: 99, groupMaxMessages: 0, maxHops: 2.7, groupMaxMembers: 1 })
+    ).toEqual({ groupMaxRounds: 10, groupMaxMessages: 1, maxHops: 2, groupMaxMembers: 2 })
   })
 })

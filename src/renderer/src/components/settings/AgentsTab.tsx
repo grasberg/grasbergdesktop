@@ -10,9 +10,58 @@ import AgentProfileForm from '@/components/agents/AgentProfileForm'
 import { BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useEditorState } from '@/hooks/useEditorState'
+import { usePersistSettings } from '@/hooks/usePersistSettings'
+import { useSettingsStore } from '@/stores/settings'
 import { useBotsStore } from '@/stores/bots'
 import { useUiStore } from '@/stores/ui'
 import './settings.css'
+
+/** Bot Mode caps (v50): rounds / messages per room send, hop cap, room size. */
+function BotModeLimitsCard(): ReactElement | null {
+  const settings = useSettingsStore((s) => s.settings)
+  const persist = usePersistSettings()
+  if (!settings) return null
+  const limits = settings.botMode
+  const field = (
+    key: keyof typeof limits,
+    label: string,
+    min: number,
+    max: number,
+    hint: string
+  ): ReactElement => (
+    <label className="field bot-limit-field">
+      <span className="field-label">{label}</span>
+      <input
+        className="input"
+        type="number"
+        min={min}
+        max={max}
+        value={limits[key]}
+        onChange={(e) => {
+          const value = Math.floor(Number(e.target.value))
+          if (!Number.isFinite(value) || value < min || value > max) return
+          void persist({ botMode: { ...limits, [key]: value } })
+        }}
+      />
+      <p className="field-hint">{hint}</p>
+    </label>
+  )
+  return (
+    <div className="card prompt-form">
+      <h5>Bot Mode limits</h5>
+      <p className="field-hint">
+        Caps on what a room or a bot-to-bot chain may do per user message. The defaults are
+        the Hermes numbers; raise them for bigger rooms, lower them to contain spend.
+      </p>
+      <div className="agent-tool-grid">
+        {field('groupMaxRounds', 'Rounds per room send', 1, 10, 'Round-table rooms settle earlier on a silent round.')}
+        {field('groupMaxMessages', 'Bot messages per room send', 1, 50, 'Across all rounds of one user message.')}
+        {field('maxHops', 'Bot-to-bot chain depth', 1, 20, 'A message_agent call past this depth is refused.')}
+        {field('groupMaxMembers', 'Room size', 2, 12, 'Members per room, including observers and the lead.')}
+      </div>
+    </div>
+  )
+}
 
 export default function AgentsTab(): ReactElement {
   const toast = useUiStore((s) => s.toast)
@@ -85,6 +134,8 @@ export default function AgentsTab(): ReactElement {
           ) : null}
         </div>
       </header>
+
+      <BotModeLimitsCard />
 
       {formOpen ? (
         <div className="card">

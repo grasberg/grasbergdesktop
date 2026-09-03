@@ -1119,6 +1119,8 @@ export interface AppSettings {
    * runInBackground is on. Security-sensitive: never imported from a backup.
    */
   launchAtLogin: boolean
+  /** Bot Mode caps (v50). Defaults are the Hermes numbers; see BotModeSettings. */
+  botMode: BotModeSettings
   /**
    * Let a pending tool approval also be answered from the paired Telegram
    * chat, so a background/scheduled run can ask instead of failing while the
@@ -1256,6 +1258,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   desktopNotificationsEnabled: true,
   runInBackground: false,
   launchAtLogin: false,
+  botMode: { groupMaxRounds: 3, groupMaxMessages: 10, maxHops: 6, groupMaxMembers: 6 },
   remoteApprovalsEnabled: false,
   workflowWebhookEnabled: false,
   workflowWebhookPort: 8787,
@@ -2231,6 +2234,22 @@ export interface BotRoster {
  * routine, or a room round; else 'idle'.
  */
 export type BotAttention = 'idle' | 'working' | 'needs_you' | 'unread'
+
+/**
+ * Bot Mode caps (v50), user-tunable in Settings → Agents. The defaults are the
+ * Hermes numbers (3 rounds / 10 messages / 6 hops / 6 members); every value
+ * is clamped at the boundary.
+ */
+export interface BotModeSettings {
+  /** Reply-or-pass rounds per user send in a round-table room (1–10). */
+  groupMaxRounds: number
+  /** Bot messages per user send in a round-table room (1–50). */
+  groupMaxMessages: number
+  /** Bot-to-bot delivery chain depth before a message_agent call is refused (1–20). */
+  maxHops: number
+  /** Room size ceiling (2–12). */
+  groupMaxMembers: number
+}
 
 /** Payload of push:botsChanged. */
 export interface BotsChangedEvent {

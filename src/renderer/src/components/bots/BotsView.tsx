@@ -15,6 +15,7 @@ import Markdown from '@/components/chat/Markdown'
 import { ConfirmButton } from '@/components/common/controls'
 import { relativeTime } from '@/lib/format'
 import { useBotsStore } from '@/stores/bots'
+import { useSettingsStore } from '@/stores/settings'
 import { BotAvatarBadge } from './BotAvatarBadge'
 import { toastError } from '@/stores/ui'
 import './bots.css'
@@ -52,6 +53,7 @@ function GroupForm({
   const [leadAgentId, setLeadAgentId] = useState<string>(editing?.leadAgentId ?? '')
   const createGroup = useBotsStore((s) => s.createGroup)
   const updateGroup = useBotsStore((s) => s.updateGroup)
+  const maxMembers = useSettingsStore((s) => s.settings?.botMode.groupMaxMembers ?? 6)
 
   const toggle = (id: string): void =>
     setMemberIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
@@ -64,7 +66,7 @@ function GroupForm({
   const valid =
     name.trim().length > 0 &&
     memberIds.length >= 2 &&
-    memberIds.length <= 6 &&
+    memberIds.length <= maxMembers &&
     (mode !== 'ensemble' || lead !== null)
 
   const submit = async (): Promise<void> => {
@@ -132,7 +134,7 @@ function GroupForm({
       )}
       <div className="bot-member-pick">
         <span className="bot-form-hint">
-          Members (2–6 bots). Observers read the room but speak only when @mentioned.
+          Members (2–{maxMembers} bots). Observers read the room but speak only when @mentioned.
         </span>
         {bots.map((bot) => (
           <div key={bot.id} className="bot-member-row">
@@ -555,7 +557,8 @@ export default function BotsView(): ReactElement {
             <p>
               Click a bot to open its chat — each bot keeps its own persona, memory, model pin
               and routines, and bots can message each other with <code>message_agent</code>.
-              Open a group room to watch 2–6 bots deliberate in short reply-or-pass rounds.
+              Open a group room to watch bots deliberate in short reply-or-pass rounds — or
+              answer all at once and let a lead synthesize, in an ensemble room.
             </p>
             <p className="bot-empty-hint">
               Routines: schedule a task in the composer's Scheduled Tasks popover and pick the

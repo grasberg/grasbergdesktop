@@ -7,6 +7,8 @@
  * room, @user escalation.
  */
 
+import type { BotModeSettings } from '@shared/types'
+
 export interface BotIdentity {
   name: string
   title: string
@@ -22,6 +24,37 @@ export const GROUP_MIN_MEMBERS = 2
 export const GROUP_MAX_MEMBERS = 6
 /** Bot-to-bot delivery chains stop after this many hops (ping-pong guard). */
 export const MAX_BOT_HOPS = 6
+/** Hard ceiling on room size whatever the setting says (the IPC schema agrees). */
+export const GROUP_MEMBERS_HARD_MAX = 12
+
+/** The Hermes numbers, as the settings default (v50). */
+export const BOT_MODE_DEFAULTS: BotModeSettings = {
+  groupMaxRounds: GROUP_MAX_ROUNDS,
+  groupMaxMessages: GROUP_MAX_MESSAGES,
+  maxHops: MAX_BOT_HOPS,
+  groupMaxMembers: GROUP_MAX_MEMBERS,
+}
+
+/** Settings → effective caps: missing values fall back, every value is clamped. */
+export function resolveBotModeLimits(
+  settings: Partial<BotModeSettings> | null | undefined
+): BotModeSettings {
+  const clamp = (value: unknown, fallback: number, min: number, max: number): number =>
+    typeof value === 'number' && Number.isFinite(value)
+      ? Math.min(max, Math.max(min, Math.floor(value)))
+      : fallback
+  return {
+    groupMaxRounds: clamp(settings?.groupMaxRounds, BOT_MODE_DEFAULTS.groupMaxRounds, 1, 10),
+    groupMaxMessages: clamp(settings?.groupMaxMessages, BOT_MODE_DEFAULTS.groupMaxMessages, 1, 50),
+    maxHops: clamp(settings?.maxHops, BOT_MODE_DEFAULTS.maxHops, 1, 20),
+    groupMaxMembers: clamp(
+      settings?.groupMaxMembers,
+      BOT_MODE_DEFAULTS.groupMaxMembers,
+      GROUP_MIN_MEMBERS,
+      GROUP_MEMBERS_HARD_MAX
+    ),
+  }
+}
 
 const GROUP_TRANSCRIPT_MAX_CHARS = 12_000
 

@@ -485,6 +485,14 @@ export const settingsPatchSchema = z
     desktopNotificationsEnabled: z.boolean(),
     runInBackground: z.boolean(),
     launchAtLogin: z.boolean(),
+    botMode: z
+      .object({
+        groupMaxRounds: z.number().int().min(1).max(10),
+        groupMaxMessages: z.number().int().min(1).max(50),
+        maxHops: z.number().int().min(1).max(20),
+        groupMaxMembers: z.number().int().min(2).max(12),
+      })
+      .strict(),
     remoteApprovalsEnabled: z.boolean(),
     workflowWebhookEnabled: z.boolean(),
     // Unprivileged ports are refused: the endpoint must never need elevation.
