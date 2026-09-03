@@ -212,6 +212,8 @@ export class BotService {
    * id. Queued deliveries live in a2a_outbox (v48), not in memory.
    */
   private readonly inFlight = new Map<string, InFlightDelivery>()
+  /** Chats whose running turn was started by an outside event (v50; the approval gate reads it). */
+  private readonly eventTurns = new Set<string>()
   /** Targets with a pump in progress (single-flight per target). */
   private readonly pumping = new Set<string>()
   /** Targets whose running pump was asked to go another round. */
@@ -560,6 +562,8 @@ export class BotService {
       ? formatIncomingBotMessage(senderName, next.body)
       : formatIncomingEvent(next.body)
     this.turnHops.set(chat.id, next.hop)
+    if (next.fromAgentId === null) this.eventTurns.add(chat.id)
+    else this.eventTurns.delete(chat.id)
     try {
       const result = await this.deps.chat.send({ conversationId: chat.id, content })
       if (!result.assistantMessage) {
@@ -583,6 +587,7 @@ export class BotService {
       return false
     } catch (e) {
       this.turnHops.delete(chat.id)
+      this.eventTurns.delete(chat.id)
       const text = errorMessageOf(e)
       if (text.includes('already streaming')) {
         // Lost the race with a user turn — the row is still queued; the
@@ -620,6 +625,7 @@ export class BotService {
   handleCompletion(conversation: Conversation, message: Message): void {
     if (message.role !== 'assistant' || !conversation.agentId) return
     this.turnHops.delete(conversation.id)
+    this.eventTurns.delete(conversation.id)
     // Heartbeat turns settle first: a quiet NO_REPLY turn is deleted outright
     // (OpenClaw suppresses quiet acknowledgments), an alerting one stays and
     // is delivered per the bot's config.
@@ -724,6 +730,7 @@ export class BotService {
     if (!entry) return
     this.inFlight.delete(conversationId)
     this.turnHops.delete(conversationId)
+    this.eventTurns.delete(conversationId)
     const row = this.deps.db.a2aOutbox.getById(entry.outboxId)
     if (!row) return
     // The turn may have finished as 'complete' with the hook lost — check
@@ -857,6 +864,15 @@ export class BotService {
     for (const target of db.a2aOutbox.queuedTargets()) void this.pump(target)
     if (counts.routed + counts.requeued + counts.failed > 0) this.botsChanged({})
     return counts
+  }
+
+  /**
+   * Why a bot chat's current turn runs (v50): 'event' while a turn started by
+   * an outside event (webhook, watched file) is in progress — the tool
+   * executor asks before such a turn messages a teammate.
+   */
+  turnOrigin(conversationId: string): 'event' | null {
+    return this.eventTurns.has(conversationId) ? 'event' : null
   }
 
   /** Recent deliveries touching a bot, newest first (the editor's Deliveries card). */

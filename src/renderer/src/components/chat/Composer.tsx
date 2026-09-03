@@ -12,6 +12,7 @@ import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
 import { providerUsable as isProviderUsable } from '@/lib/providers'
 import { useChatStore } from '@/stores/chat'
+import { useBotsStore } from '@/stores/bots'
 import { useSettingsStore } from '@/stores/settings'
 import { useProvidersStore } from '@/stores/providers'
 import { usePromptsStore } from '@/stores/prompts'
@@ -366,15 +367,14 @@ export default function Composer(): ReactElement {
       return
     }
     if (botChatAgentId) {
+      // The roster is loaded at boot (v49): no IPC per keystroke.
       const query = mention.query.toLowerCase()
-      void window.uld.agents.list().then((res) => {
-        if (!res.ok) return setMentionItems([])
-        const handles = res.data
-          .filter((agent) => agent.enabled && agent.id !== botChatAgentId)
-          .map((agent) => agent.name.trim().toLowerCase().replace(/\s+/g, '-'))
-          .filter((slug) => slug && slug.includes(query))
-        setMentionItems(handles.slice(0, 8))
-      })
+      const handles = (useBotsStore.getState().roster?.bots ?? [])
+        .map((row) => row.agent)
+        .filter((agent) => agent.enabled && agent.id !== botChatAgentId)
+        .map((agent) => agent.name.trim().toLowerCase().replace(/\s+/g, '-'))
+        .filter((slug) => slug && slug.includes(query))
+      setMentionItems(handles.slice(0, 8))
       return
     }
     const pid = projectId
@@ -1139,7 +1139,7 @@ export default function Composer(): ReactElement {
           <ul
             className="composer-suggest"
             role="listbox"
-            aria-label={slashVisible ? 'Commands' : 'Project files'}
+            aria-label={slashVisible ? 'Commands' : botChatAgentId ? 'Teammates' : 'Project files'}
           >
             {slashVisible
               ? filteredSlash.map((item, i) => (

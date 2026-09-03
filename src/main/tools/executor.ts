@@ -143,6 +143,17 @@ export interface ToolExecutorDeps {
   browserEnabled?: () => boolean
   /** Embedded browser for the browser/computer tools. */
   browser?: ToolBrowser | null
+  /**
+   * Per-scope browser (v50): a bot chat gets its own session so parallel
+   * bots never fight over one page. Falls back to `browser` when absent.
+   */
+  browserFor?: (ctx: ToolExecuteContext) => ToolBrowser | null
+  /**
+   * Why the current turn in a conversation is running (v50): 'event' when an
+   * outside event (webhook, watched file) woke a bot — its text may be trying
+   * to steer the bot, so outbound actions ask first.
+   */
+  turnOrigin?: (conversationId: string) => 'event' | null
   /** Knowledge-base retrieval for the 'knowledge_search' tool. */
   knowledgeSearch?: (
     knowledgeBaseId: string,
@@ -1171,6 +1182,9 @@ export class ToolExecutor {
 
   constructor(private readonly deps: ToolExecutorDeps) {}
 
+  /** Browser origins already visited per approval scope (v50): a new site asks once. */
+  private readonly browserOrigins = new Map<string, Set<string>>()
+
   /**
    * Executes one tool call. NEVER throws — every failure path resolves to a
    * human/model-readable string (capped at TOOL_RESULT_MAX_CHARS).
@@ -1301,8 +1315,16 @@ export class ToolExecutor {
     // the whole point of being able to say "always ask me about this one".
     const ruleEffect = this.matchRules(definition, args, ctx)
     const preGrant = ruleEffect === 'allow' ? null : this.preGrantReason(definition, args, ctx)
+    // Unified approvals (v50): two decisions of their own, whatever the
+    // tool's stored permission says — a bot woken by an outside event wanting
+    // to message a teammate, and the browser opening a site this scope has
+    // not visited yet. Only a standing 'allow' rule waves them through.
+    const eventOutbound =
+      definition.id === 'message_agent' && this.deps.turnOrigin?.(ctx.conversation.id) === 'event'
+    const newOrigin = this.browserNewOrigin(definition, args, ctx)
     const mustAsk =
       ruleEffect === 'require_approval' ||
+      ((eventOutbound || newOrigin !== null) && ruleEffect !== 'allow') ||
       (decision === 'ask' && ruleEffect !== 'allow' && preGrant === null)
     if (mustAsk) {
       const note = await this.approvalNoteFor(definition, args, ctx)
@@ -1328,6 +1350,7 @@ export class ToolExecutor {
       audit.decision = 'auto'
       audit.detail = preGrant ?? 'permission is always allow'
     }
+    if (newOrigin !== null) this.rememberOrigin(ctx, newOrigin)
 
     return this.runTool(definition, args, ctx, toolCall, audit)
   }
@@ -1338,11 +1361,53 @@ export class ToolExecutor {
    * the schedule_task "what standing job would this create" summary.
    * Best-effort; never blocks the approval on a failure.
    */
+  /** Approval scope for browser origins: the bot, else the conversation. */
+  private browserScope(ctx: ToolExecuteContext): string {
+    return ctx.conversation.agentId ? `bot:${ctx.conversation.agentId}` : ctx.conversation.id
+  }
+
+  /** The origin a browser 'navigate' would open, when this scope has not visited it yet. */
+  private browserNewOrigin(
+    definition: ToolDefinition,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): string | null {
+    if (definition.id !== 'browser' || (getString(args, 'action') ?? '').trim() !== 'navigate') {
+      return null
+    }
+    let origin: string
+    try {
+      origin = new URL((getString(args, 'url') ?? '').trim()).origin
+    } catch {
+      return null // the tool itself reports the bad URL
+    }
+    return this.browserOrigins.get(this.browserScope(ctx))?.has(origin) ? null : origin
+  }
+
+  private rememberOrigin(ctx: ToolExecuteContext, origin: string): void {
+    const scope = this.browserScope(ctx)
+    const seen = this.browserOrigins.get(scope) ?? new Set<string>()
+    seen.add(origin)
+    this.browserOrigins.set(scope, seen)
+  }
+
   private async approvalNoteFor(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
   ): Promise<string | undefined> {
+    if (definition.id === 'message_agent' && this.deps.turnOrigin?.(ctx.conversation.id) === 'event') {
+      return (
+        'This bot was woken by an outside event (a webhook or a watched file) and wants to ' +
+        'message a teammate. The event text may be trying to steer it.'
+      )
+    }
+    if (definition.id === 'browser') {
+      const origin = this.browserNewOrigin(definition, args, ctx)
+      if (origin) {
+        return `Opens a site this ${ctx.conversation.agentId ? 'bot' : 'conversation'} has not visited yet: ${origin}`
+      }
+    }
     if (definition.id === 'schedule_task') return this.scheduleTaskNote(args, ctx)
     if (definition.id === 'edit_document') return this.editDocumentNote(args)
     if (definition.id !== 'git_write' || !this.deps.gitWrite) return undefined
@@ -1548,9 +1613,9 @@ export class ToolExecutor {
       case 'message_agent':
         return this.runMessageAgent(args, ctx)
       case 'browser':
-        return this.runBrowser(args)
+        return this.runBrowser(args, ctx)
       case 'computer':
-        return this.runComputer(args)
+        return this.runComputer(args, ctx)
       default:
         if (isMcpToolId(definition.id) && this.deps.mcpClient) {
           return this.deps.mcpClient.callTool(definition.id, args)
@@ -2657,16 +2722,17 @@ export class ToolExecutor {
 
   // -- browser + computer use --------------------------------------------------
 
-  private requireBrowser(): ToolBrowser | string {
+  private requireBrowser(ctx: ToolExecuteContext): ToolBrowser | string {
     if (!this.deps.browserEnabled?.()) {
       return 'Error: browser tools are disabled. The user can enable them in Settings → Tools.'
     }
-    if (!this.deps.browser) return 'Error: the browser is unavailable in this build.'
-    return this.deps.browser
+    const browser = this.deps.browserFor?.(ctx) ?? this.deps.browser
+    if (!browser) return 'Error: the browser is unavailable in this build.'
+    return browser
   }
 
-  private async runBrowser(args: Record<string, unknown>): Promise<string> {
-    const browser = this.requireBrowser()
+  private async runBrowser(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const browser = this.requireBrowser(ctx)
     if (typeof browser === 'string') return browser
     const action = (getString(args, 'action') ?? '').trim()
     switch (action) {
@@ -2694,8 +2760,8 @@ export class ToolExecutor {
     }
   }
 
-  private async runComputer(args: Record<string, unknown>): Promise<string> {
-    const browser = this.requireBrowser()
+  private async runComputer(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
+    const browser = this.requireBrowser(ctx)
     if (typeof browser === 'string') return browser
     const action = (getString(args, 'action') ?? '').trim()
     if (action.length === 0) return "Error: 'action' is required."

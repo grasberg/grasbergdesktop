@@ -862,3 +862,79 @@ describe('use_skill tool', () => {
     expect(result).toMatch(/unknown tool/i)
   })
 })
+
+describe('unified approvals (v50)', () => {
+  const botConv = (): Conversation => ({ ...conv(false), id: 'bot-conv', agentId: 'bot-1' })
+
+  it('asks before a bot woken by an outside event messages a teammate; a user turn stays auto', async () => {
+    const sends: string[] = []
+    const { executor } = createToolSystem(db, null, {
+      botMessenger: {
+        send: async (_conversationId, target) => {
+          sends.push(target)
+          return 'queued'
+        },
+      },
+      turnOrigin: (conversationId) => (conversationId === 'bot-conv' ? 'event' : null),
+    })
+    const approval = vi.fn(async () => DECLINE)
+    const declined = await executor.execute(
+      call('message_agent', { target: 'Editor', message: 'hi' }),
+      { conversation: botConv(), approval }
+    )
+    expect(declined).toBe(USER_DECLINED_RESULT)
+    expect(approval).toHaveBeenCalledWith(
+      expect.objectContaining({ note: expect.stringContaining('outside event') })
+    )
+    expect(sends).toEqual([])
+
+    const { executor: plain } = createToolSystem(db, null, {
+      botMessenger: { send: async () => 'queued' },
+      turnOrigin: () => null,
+    })
+    const untouched = vi.fn(async () => DECLINE)
+    expect(
+      await plain.execute(call('message_agent', { target: 'Editor', message: 'hi' }), {
+        conversation: botConv(),
+        approval: untouched,
+      })
+    ).toBe('queued')
+    expect(untouched).not.toHaveBeenCalled()
+  })
+
+  it('asks once per new site for the browser, even when the tool is always allowed', async () => {
+    db.settings.update({ browserToolsEnabled: true }) // the registry offers 'browser' only when opted in
+    const visited: string[] = []
+    const fakeBrowser = {
+      navigate: async (url: string) => {
+        visited.push(url)
+        return 'ok'
+      },
+      readPage: async () => '',
+      back: async () => '',
+      clickSelector: async () => '',
+      typeText: async () => '',
+      computer: async () => '',
+    }
+    const { executor, registry } = createToolSystem(db, null, {
+      browserEnabled: () => true,
+      browser: fakeBrowser,
+    })
+    registry.setPermission('browser', 'always_allow')
+    const approval = vi.fn<(req: unknown) => Promise<ToolApprovalAnswer>>(async () => APPROVE)
+    const ctxOf = (): { conversation: Conversation; approval: typeof approval } => ({
+      conversation: conv(false),
+      approval,
+    })
+    await executor.execute(call('browser', { action: 'navigate', url: 'https://a.example/x' }), ctxOf())
+    expect(approval).toHaveBeenCalledTimes(1)
+    expect(approval.mock.calls[0][0]).toMatchObject({
+      note: expect.stringContaining('https://a.example'),
+    })
+    await executor.execute(call('browser', { action: 'navigate', url: 'https://a.example/y' }), ctxOf())
+    expect(approval).toHaveBeenCalledTimes(1) // same origin: no second dialog
+    await executor.execute(call('browser', { action: 'navigate', url: 'https://b.example/' }), ctxOf())
+    expect(approval).toHaveBeenCalledTimes(2)
+    expect(visited).toHaveLength(3)
+  })
+})

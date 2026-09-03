@@ -1019,6 +1019,8 @@ describe('BotService wake (v50)', () => {
     ;(service as unknown as { turnHops: Map<string, number> }).turnHops // hop tracked for the turn
     const chatId = db.agents.getById(editor.id)!.chatConversationId!
     expect((service as unknown as { turnHops: Map<string, number> }).turnHops.get(chatId)).toBe(1)
+    // The approval gate can tell this turn was started by an event.
+    expect(service.turnOrigin(chatId)).toBe('event')
 
     const inFlightId = await getInFlightAssistantId(service, chatId)
     service.handleCompletion(db.conversations.getById(chatId)!, {
@@ -1031,6 +1033,7 @@ describe('BotService wake (v50)', () => {
       createdAt: Date.now(),
     })
     expect(db.a2aOutbox.getById(deliveryId)!.status).toBe('replied')
+    expect(service.turnOrigin(chatId)).toBeNull()
     // No reply is routed anywhere (no sender); the user is told instead.
     expect(notifications.some((n) => n.title.includes('handled an event'))).toBe(true)
     expect(db.conversations.list().length).toBe(0) // no stray sender conversation

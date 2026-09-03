@@ -3,7 +3,11 @@
  * `computer` tools. It owns a hidden BrowserWindow (fixed 1280x800 viewport)
  * and controls it with built-in Electron APIs only — no native automation
  * dependency, and no access to the OS desktop. All navigation is http/https,
- * downloads are blocked, and it uses its own isolated session partition.
+ * downloads are blocked, and it uses its own isolated session partition —
+ * one per instance since v50, so a bot's browsing (cookies, history, the
+ * page it is on) never collides with another bot's or the user's. Separate
+ * screens, not a security boundary: every session is the same sandboxed
+ * Chromium with the same posture.
  *
  * - `browser` tool  -> semantic actions (navigate/read/click/type/back).
  * - `computer` tool -> Anthropic-style coordinate actions on the same viewport,
@@ -99,9 +103,12 @@ export class BrowserSession {
   private win: BrowserWindow | null = null
   private pendingScreenshot: string | null = null
 
+  /** `partition` names the isolated Chromium session this instance drives. */
+  constructor(readonly partition: string = PARTITION) {}
+
   private ensureWindow(): BrowserWindow {
     if (this.win && !this.win.isDestroyed()) return this.win
-    const ses = electronSession.fromPartition(PARTITION)
+    const ses = electronSession.fromPartition(this.partition)
     // Block downloads and deny all permission requests in the browsing session.
     // The partition Session is process-global and cached across window (and
     // BrowserSession) recreations, so guard on the session's own listener state
@@ -121,7 +128,7 @@ export class BrowserSession {
         nodeIntegration: false,
         webSecurity: true,
         backgroundThrottling: false,
-        partition: PARTITION,
+        partition: this.partition,
       },
     })
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))

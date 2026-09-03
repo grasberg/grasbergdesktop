@@ -50,7 +50,7 @@ import { WorkflowScheduler } from './workflows/scheduler'
 import { WorkflowTriggerServer } from './workflows/trigger-server'
 import { WorkflowWatcherService } from './workflows/watcher'
 import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
-import { BrowserSession } from './browser/session'
+import { BrowserSessionPool } from './browser/pool'
 import { QuickWindow } from './quick/quick-window'
 import { TerminalService } from './terminal/terminal-service'
 import { VoiceService } from './audio/voice-service'
@@ -110,7 +110,7 @@ let workflowRunnerRef: WorkflowRunner | null = null
  * that one would reveal the sandboxed page the model drives.
  */
 let mainWindow: BrowserWindow | null = null
-let browserSession: BrowserSession | null = null
+let browserPool: BrowserSessionPool | null = null
 let quickWindow: QuickWindow | null = null
 let terminalService: TerminalService | null = null
 let voiceService: VoiceService | null = null
@@ -201,7 +201,7 @@ async function cleanup(): Promise<void> {
   } catch {
     // Teardown conveniences only.
   }
-  browserSession?.close()
+  browserPool?.closeAll()
   quickWindow?.destroy()
   quickWindow = null
   // Kill every user terminal shell we spawned.
@@ -405,7 +405,7 @@ function createWindow(opts: { startHidden?: boolean } = {}): BrowserWindow {
     // The hidden browser-tool window is a BrowserWindow too, so leaving it open
     // would keep 'window-all-closed' from ever firing (the app would live on
     // with no UI). It is recreated on demand by the next browser/computer call.
-    browserSession?.close()
+    browserPool?.closeAll()
     // Same trap for the (possibly hidden) quick-assistant window.
     quickWindow?.destroy()
   })
@@ -600,8 +600,10 @@ function bootstrap(): void {
   // suggestions-only shell) plus the broker that routes per-call approvals
   // through the renderer. The chat service drives the tool loop with it.
   // Secret custom-tool headers are decrypted here (main only) at call time.
-  const browser = new BrowserSession()
-  browserSession = browser
+  // One embedded browser per active bot (v50); the user's chats share the default.
+  const pool = new BrowserSessionPool()
+  browserPool = pool
+  const browser = pool.forScope('default')
   // User-driven Work-view terminal sessions (pipes-based; killed on quit).
   const terminals = new TerminalService({ broadcast })
   terminalService = terminals
@@ -655,6 +657,10 @@ function bootstrap(): void {
     },
     browserEnabled: () => database.settings.get().browserToolsEnabled,
     browser,
+    browserFor: (ctx) => pool.forScope(pool.scopeFor(ctx.conversation.agentId)),
+    // Unified approvals (v50): a turn started by an outside event asks before
+    // messaging a teammate.
+    turnOrigin: (conversationId) => botService?.turnOrigin(conversationId) ?? null,
     // Resolved at call time; chatService (below) is set before any generation.
     delegate: (task, ctx, agentName) =>
       chatService
@@ -748,7 +754,7 @@ function bootstrap(): void {
     onDelegateStarted: (info) => botService?.delegateStarted(info),
     onDelegateFinished: (info) => botService?.delegateFinished(info),
     imageDir: attachmentsDir,
-    browser,
+    browser: { consumePendingScreenshot: (agentId) => pool.consumePendingScreenshot(agentId) },
     getAccessToken: (providerId, signal) => oauth.getAccessToken(providerId, signal),
     // Headless runs (scheduled tasks, workflows) have no dialog to pop. With
     // remote approvals configured they ask the paired chat instead of silently

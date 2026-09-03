@@ -343,7 +343,7 @@ export interface ChatServiceOptions {
   /** Directory holding stored image attachments (for the vision wire payload). */
   imageDir?: string
   /** Embedded browser — a computer-use screenshot is injected after each round. */
-  browser?: { consumePendingScreenshot(): string | null }
+  browser?: { consumePendingScreenshot(agentId?: string | null): string | null }
   /**
    * Asks the user to approve one tool call over a side channel (the paired
    * Telegram chat). Headless runs have no dialog to pop, so without this they
@@ -4012,7 +4012,8 @@ export class ChatService {
             // vision generation in another conversation to pick up. It is only
             // injected as a synthetic user image when this model has vision
             // (OpenAI rejects images in tool messages).
-            const shot = this.options.browser?.consumePendingScreenshot() ?? null
+            const shot =
+              this.options.browser?.consumePendingScreenshot(conversation.agentId ?? null) ?? null
             if (shot && visionEnabled) {
               messages.push({
                 role: 'user',

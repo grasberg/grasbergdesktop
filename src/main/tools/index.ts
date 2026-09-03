@@ -80,6 +80,10 @@ export interface CreateToolSystemOptions {
   browserEnabled?: () => boolean
   /** Embedded browser backing the browser/computer tools. */
   browser?: ToolBrowser
+  /** Per-scope browser (v50): a bot chat gets its own session. */
+  browserFor?: ToolExecutorDeps['browserFor']
+  /** Why a conversation's current turn runs ('event' = an outside event woke a bot). */
+  turnOrigin?: ToolExecutorDeps['turnOrigin']
   /** Knowledge-base retrieval for the 'knowledge_search' tool. */
   knowledgeSearch?: ToolExecutorDeps['knowledgeSearch']
   /** Runs a sub-agent for the 'delegate' tool (wired to ChatService.runDelegate). */
@@ -161,6 +165,8 @@ export function createToolSystem(
     shellBackground: options.shellBackground ?? null,
     browserEnabled: options.browserEnabled,
     browser: options.browser ?? null,
+    browserFor: options.browserFor,
+    turnOrigin: options.turnOrigin,
     knowledgeSearch: options.knowledgeSearch,
     delegate: options.delegate,
     botMessenger: options.botMessenger ?? null,

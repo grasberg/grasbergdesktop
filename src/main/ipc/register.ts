@@ -2711,7 +2711,21 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const agentPackSchema = z.object({
     format: z.literal('grasberg-agent-pack'),
     version: z.literal(1),
-    agents: z.array(agentInputSchema).max(200),
+    // A pack is a TEMPLATE: identity, persona, model pin, toolset — never the
+    // machine-local state (heartbeats, watches, webhook opt-in, allowlists)
+    // an imported file could otherwise arm on this desktop.
+    agents: z
+      .array(
+        agentInputSchema.omit({
+          hidden: true,
+          heartbeat: true,
+          reset: true,
+          messageAllow: true,
+          webhookEnabled: true,
+          watch: true,
+        })
+      )
+      .max(200),
     skills: z.array(z.object({
       name: z.string().min(1).max(200),
       description: z.string().max(2000).optional(),
@@ -2725,8 +2739,22 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     const pack = {
       format: 'grasberg-agent-pack' as const,
       version: 1 as const,
-      agents: db.agents.list().map(({ name, description, systemPrompt, providerId, modelId, toolIds, maxRounds, enabled }) =>
-        ({ name, description, systemPrompt, providerId, modelId, toolIds, maxRounds, enabled })),
+      // Template fields only: no chat, no memories, no tokens, no heartbeat /
+      // watch / webhook / allowlist state (see agentPackSchema).
+      agents: db.agents
+        .list()
+        .map(({ name, description, systemPrompt, providerId, modelId, toolIds, maxRounds, enabled, title, avatar }) => ({
+          name,
+          description,
+          systemPrompt,
+          providerId,
+          modelId,
+          toolIds,
+          maxRounds,
+          enabled,
+          title,
+          avatar,
+        })),
       skills: db.skills.list().map(({ name, description, content, pluginName }) =>
         ({ name, description, content, pluginName })),
       hooks: db.settings.get().projectHooks,
