@@ -39,6 +39,14 @@ export const useScheduledTasksStore = create<ScheduledTasksStoreState>()((set, g
     }
   },
 
+  async update(id, input) {
+    try {
+      const task = await unwrap(window.uld.scheduledTasks.update(id, input))
+      set(state => ({ tasks: sortTasks([task, ...state.tasks.filter(t => t.id !== id)]) }))
+      return task
+    } catch (error) { toastError('Could not save scheduled task', error); return null }
+  },
+
   async setEnabled(id, enabled) {
     try {
       const task = await unwrap(window.uld.scheduledTasks.setEnabled(id, enabled))

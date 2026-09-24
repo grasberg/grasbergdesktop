@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } fr
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
+import { useBotsStore } from '@/stores/bots'
+import { conversationModel } from '@/lib/providers'
 import ModelPickList, { modelPickKey } from './ModelPickList'
 import './chat.css'
 
@@ -10,6 +12,7 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
   const updateConversation = useChatStore((s) => s.updateConversation)
   const providers = useProvidersStore((s) => s.providers)
   const settings = useSettingsStore((s) => s.settings)
+  const agent = useBotsStore((s) => s.roster?.bots.find((row) => row.agent.id === conversation?.agentId)?.agent)
 
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -17,14 +20,8 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
   const triggerRef = useRef<HTMLButtonElement>(null)
 
   const isOverride = !!conversation && (conversation.providerId !== null || conversation.modelId !== null)
-  const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null
-  const effectiveProvider = effectiveProviderId
-    ? (providers.find((p) => p.id === effectiveProviderId) ?? null)
-    : null
-  const effectiveModelId =
-    conversation?.modelId ??
-    settings?.defaultModelId ??
-    (effectiveProvider ? effectiveProvider.defaultModelId : null)
+  const { provider: effectiveProvider, modelId: effectiveModelId } =
+    conversationModel(conversation, settings, providers, agent)
 
   const buttonLabel = effectiveProvider
     ? `${effectiveProvider.label} · ${effectiveModelId || '?'}${isOverride ? '' : ' (default)'}`
@@ -115,7 +112,7 @@ export default function ModelSelector({ placement = 'header' }: { placement?: 'h
             className={`ms-row${!isOverride ? ' ms-row-selected' : ''}`}
             onClick={() => selectModel(null, null)}
           >
-            <span className="ms-row-label">Use global default</span>
+            <span className="ms-row-label">{agent ? 'Use bot defaults' : 'Use global default'}</span>
             {!isOverride && (
               <span className="ms-check" aria-hidden>
                 ✓

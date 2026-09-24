@@ -15,6 +15,7 @@ import type {
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { useMcpStore } from '@/stores/mcp'
 import { rowsFromExisting, SecretRowsEditor, splitRows, type SecretRow } from './SecretRows'
 import './settings.css'
@@ -44,6 +45,8 @@ function McpForm({
   const [url, setUrl] = useState(editing?.url ?? '')
   const [rows, setRows] = useState<SecretRow[]>(initialRows(editing))
   const [busy, run] = useAsyncAction()
+  const [baseline] = useState(() => JSON.stringify([name, transport, command, args, url, rows]))
+  const guard = useUnsavedChanges(baseline !== JSON.stringify([name, transport, command, args, url, rows]), 'settings')
 
   const submit = async (): Promise<void> => {
     const { publicValues: publicMap, setSecrets, deleteSecrets } = splitRows(
@@ -72,7 +75,7 @@ function McpForm({
         }
         await create(input)
       }
-      onDone()
+      guard.markSaved(); onDone()
     })
   }
 
@@ -150,7 +153,7 @@ function McpForm({
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
           {busy ? 'Saving…' : editing ? 'Save changes' : 'Add server'}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>

@@ -57,6 +57,7 @@ export interface ProvidersStoreState {
   types: ProviderTypeMeta[]
   /** Cached model lists per provider id. */
   modelsByProvider: Record<string, ModelInfo[]>
+  modelsUpdatedAt: Record<string, number>
   loaded: boolean
   load(): Promise<void>
   create(input: ProviderConfigInput): Promise<ProviderConfig>
@@ -65,7 +66,7 @@ export interface ProvidersStoreState {
   setKey(id: string, apiKey: string): Promise<void>
   deleteKey(id: string): Promise<void>
   test(id: string): Promise<TestConnectionResult>
-  loadModels(id: string): Promise<ModelInfo[]>
+  loadModels(id: string, force?: boolean): Promise<ModelInfo[]>
   /** Probes localhost for running model servers (Ollama, LM Studio, …). */
   detectLocal(): Promise<LocalServerInfo[]>
   /** Start "Sign in with ChatGPT" (opens the system browser); refreshes state. */
@@ -180,7 +181,7 @@ export interface ChatStoreState {
       /** Run this send as a Deep Research run (the composer toggle). */
       research?: { depth?: ResearchDepth }
     }
-  ): Promise<void>
+  ): Promise<boolean>
   stop(): Promise<void>
   /**
    * Re-runs the last assistant message. `opts.overrides` regenerates with a
@@ -237,12 +238,13 @@ export interface ArtifactPreview {
  * falls back to Home while no conversation is selected. 'bots' is the Bot
  * Mode roster + group rooms surface (v46).
  */
-export type AppView = 'home' | 'conversation' | 'workflows' | 'bots'
+export type AppView = 'home' | 'conversation' | 'workflows' | 'bots' | 'automation'
 
 export interface UiStoreState {
   /** Resolved theme actually applied to <html data-theme>. */
   resolvedTheme: 'light' | 'dark'
   settingsOpen: boolean
+  settingsTab: string
   paletteOpen: boolean
   shortcutsOpen: boolean
   /** The surface currently filling the main area. */
@@ -262,7 +264,7 @@ export interface UiStoreState {
   toasts: Toast[]
   setResolvedTheme(t: 'light' | 'dark'): void
   setView(view: AppView): void
-  openSettings(open: boolean): void
+  openSettings(open: boolean, tab?: string): void
   openPalette(open: boolean): void
   openShortcuts(open: boolean): void
   seedComposer(text: string): void
@@ -301,6 +303,7 @@ export interface ScheduledTasksStoreState {
   loaded: boolean
   load(): Promise<void>
   create(input: ScheduledTaskInput): Promise<ScheduledTask | null>
+  update(id: string, input: ScheduledTaskInput): Promise<ScheduledTask | null>
   setEnabled(id: string, enabled: boolean): Promise<void>
   remove(id: string): Promise<void>
   /** Runs the task now, outside its schedule (v50). */
@@ -352,9 +355,9 @@ export interface BotsStoreState {
       mode?: BotGroupMode
       leadAgentId?: string | null
     }
-  ): Promise<void>
+  ): Promise<boolean>
   deleteGroup(id: string): Promise<void>
-  sendToGroup(groupId: string, content: string): Promise<void>
+  sendToGroup(groupId: string, content: string): Promise<boolean>
   stopGroup(groupId: string): Promise<void>
   setHidden(agentId: string, hidden: boolean): Promise<void>
   setShowHidden(show: boolean): void

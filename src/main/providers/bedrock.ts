@@ -458,8 +458,8 @@ export class BedrockAdapter implements ProviderAdapter {
     yield { type: 'finish', reason: sawToolCalls ? 'tool_calls' : stopReason }
   }
 
-  async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    return PROVIDER_TYPES.bedrock.knownModels
+  async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
+    return ctx.modelCatalog?.knownModels ?? PROVIDER_TYPES.bedrock.knownModels
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {

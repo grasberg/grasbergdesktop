@@ -7,6 +7,8 @@
  * Security: the api key is never logged and is passed to the error redactor.
  */
 
+import { discoverNativeModels } from './model-discovery'
+
 import type {
   ModelInfo,
   ProviderErrorCode,
@@ -363,8 +365,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     return collectStream(this.chatStream({ ...req, stream: false }, ctx), { mergeUsage: true })
   }
 
-  async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    return PROVIDER_TYPES.anthropic.knownModels
+  async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
+    return discoverNativeModels(this.type, ctx)
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {

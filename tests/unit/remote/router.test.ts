@@ -5,6 +5,59 @@ import { createRemoteRouter } from '../../../src/main/remote/router'
 import { currentInvocationPolicy } from '../../../src/main/invocation-context'
 
 describe('remote router allowlist', () => {
+  it('rejects private exports, indirect private resources and private attachments before dispatch', async () => {
+    let calls = 0
+    const channels = [CHANNELS.backupExport, CHANNELS.convExport, CHANNELS.botGroupSend, CHANNELS.codeCheckpointsList, CHANNELS.appSaveAttachmentAs]
+    const handlers: IpcHandlerMap = new Map(channels.map(channel => [channel, () => { calls++; return 'private content' }]))
+    const route = createRemoteRouter(handlers, {
+      accessForDevice: () => 'full', isConversationRemotable: id => id !== 'private',
+      conversationForResource: channel => channel === CHANNELS.botGroupSend ? 'private' : undefined,
+      isAttachmentRemotable: key => key !== 'private-attachment',
+    })
+    for (const [channel, args] of [
+      [CHANNELS.backupExport, [{ includePrivateSpaces: true }]],
+      [CHANNELS.convExport, [{ conversationId: 'private', format: 'markdown' }]],
+      [CHANNELS.botGroupSend, ['group', 'hello']],
+      [CHANNELS.codeCheckpointsList, ['private']],
+      [CHANNELS.appSaveAttachmentAs, [{ storageKey: 'private-attachment' }]],
+    ] as Array<[string, unknown[]]>) expect((await route(channel, args, 'phone')).ok).toBe(false)
+    expect(calls).toBe(0)
+  })
+  it('decodes bounded valid audio chunks and rejects malformed base64 before dispatch', async () => {
+    const chunks: unknown[] = []
+    const handlers: IpcHandlerMap = new Map([[CHANNELS.voiceSttChunk, input => { chunks.push(input); return true }]])
+    const route = createRemoteRouter(handlers, { accessForDevice: () => 'full' })
+    expect((await route(CHANNELS.voiceSttChunk, [{ sessionId: 'voice', chunkBase64: 'AQID' }], 'phone')).ok).toBe(true)
+    expect(chunks).toEqual([{ sessionId: 'voice', chunk: new Uint8Array([1, 2, 3]) }])
+    for (const chunkBase64 of ['@@@=', 'A', 'AQ==noise', 'A'.repeat(512 * 1024 + 4)]) expect((await route(CHANNELS.voiceSttChunk, [{ sessionId: 'voice', chunkBase64 }], 'phone')).ok).toBe(false)
+    expect(chunks).toHaveLength(1)
+  })
+  it('grants full access per device, never grants itself and removes access immediately', async () => {
+    let access: 'full' | 'limited' = 'full'
+    const handlers: IpcHandlerMap = new Map<Parameters<IpcHandlerMap["set"]>[0], Parameters<IpcHandlerMap["set"]>[1]>([
+      [CHANNELS.settingsGet, () => ({ theme: 'dark', appLockHash: 'private-hash', workflowWebhookToken: 'private-token', telegramBridgePairingCode: 'secret-code', outboundWebhookUrl: 'secret-url' })],
+      [CHANNELS.remoteDeviceAccess, () => { throw new Error('Must never run remotely') }],
+    ])
+    const route = createRemoteRouter(handlers, { accessForDevice: id => id === 'trusted' ? access : 'limited' })
+    expect((await route(CHANNELS.settingsGet, [], 'another')).ok).toBe(false)
+    expect((await route(CHANNELS.settingsGet, [], 'trusted'))).toEqual({ ok: true, data: { theme: 'dark', appLockHash: null, workflowWebhookToken: null, telegramBridgePairingCode: null, outboundWebhookUrl: null } })
+    expect((await route(CHANNELS.remoteDeviceAccess, [{ deviceId: 'trusted', access: 'full' }], 'trusted')).ok).toBe(false)
+    expect((await route(CHANNELS.settingsUpdate, [{ remoteRelayUrl: 'https://example.com' }], 'trusted')).ok).toBe(false)
+    access = 'limited'
+    expect((await route(CHANNELS.settingsGet, [], 'trusted')).ok).toBe(false)
+  })
+  it('keeps private conversations and terminals excluded for fully granted devices', async () => {
+    const handlers: IpcHandlerMap = new Map<Parameters<IpcHandlerMap["set"]>[0], Parameters<IpcHandlerMap["set"]>[1]>([
+      [CHANNELS.agentRunsList, () => [{ id: 'run-a', conversationId: 'private', result: 'secret' }, { id: 'run-b', conversationId: 'public', result: 'visible' }]],
+      [CHANNELS.terminalInput, () => true],
+      [CHANNELS.arenaStatus, () => 'secret'],
+    ])
+    const route = createRemoteRouter(handlers, { accessForDevice: () => 'full', isConversationRemotable: id => id !== 'private', conversationForTerminal: id => id === 's-private' ? 'private' : 'public' })
+    expect(await route(CHANNELS.agentRunsList, [], 'phone')).toEqual({ ok: true, data: [{ id: 'run-b', conversationId: 'public', result: 'visible' }] })
+    expect((await route(CHANNELS.arenaStatus, ['private'], 'phone')).ok).toBe(false)
+    expect((await route(CHANNELS.terminalInput, [{ sessionId: 's-private', data: 'dir' }], 'phone')).ok).toBe(false)
+    expect((await route(CHANNELS.terminalInput, [{ sessionId: 's-public', data: 'dir' }], 'phone')).ok).toBe(true)
+  })
   const handlers: IpcHandlerMap = new Map()
   handlers.set(CHANNELS.chatSend, async (req) => ({ echoed: req }))
   handlers.set(CHANNELS.convDelete, () => {

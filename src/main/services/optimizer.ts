@@ -513,7 +513,7 @@ export class OptimizerService {
           testPassed = testRes.ok
         }
 
-        const accepted = decideAccept({
+        let accepted = decideAccept({
           evalExitCode: evalRes.exitCode,
           score,
           testPassed,
@@ -522,14 +522,22 @@ export class OptimizerService {
         })
 
         let commitSha: string | null = null
+        let noChanges = false
         if (accepted) {
           try {
             await this.deps.git.stage(root, ['.'])
+            noChanges = (await this.deps.git.status(root)).staged.length === 0
+            if (noChanges) {
+              // A model can finish without editing a file. Keep the baseline
+              // and count this as a rejected attempt, not a broken run.
+              accepted = false
+            } else {
             const commit = await this.deps.git.commit(
               root,
               `[optimizer v${round}] ${current.goal}\n\nscore: ${score}`
             )
             commitSha = commit.sha
+            }
           } catch (e) {
             // Accepting without a commit would desync the ledger from the tree.
             throw new Error(
@@ -556,7 +564,7 @@ export class OptimizerService {
           seq: round,
           score,
           accepted,
-          summary: agentText.trim().slice(0, SUMMARY_MAX_CHARS),
+          summary: `${noChanges ? 'No file changes produced. ' : ''}${agentText.trim()}`.slice(0, SUMMARY_MAX_CHARS),
           commitSha,
         })
         this.deps.db.experiments.add({

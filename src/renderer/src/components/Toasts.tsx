@@ -6,12 +6,13 @@ const AUTO_DISMISS_MS = 5000
 
 function ToastItem({ toast }: { toast: Toast }): React.JSX.Element {
   useEffect(() => {
+    if (toast.kind === 'error') return
     const timer = setTimeout(() => useUiStore.getState().dismissToast(toast.id), AUTO_DISMISS_MS)
     return () => clearTimeout(timer)
-  }, [toast.id])
+  }, [toast.id, toast.kind])
 
   return (
-    <div className={`toast toast-${toast.kind}`} role="status">
+    <div className={`toast toast-${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'}>
       <span className="toast-message">{toast.message}</span>
       <button
         type="button"

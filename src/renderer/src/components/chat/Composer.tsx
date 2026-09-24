@@ -10,7 +10,7 @@ import {
 import type { Attachment, ChatParams, ResearchDepth, SandboxLevel } from '@shared/types'
 import { modelSupportsVision } from '@shared/catalog'
 import { formatBytes } from '@/lib/format'
-import { providerUsable as isProviderUsable } from '@/lib/providers'
+import { conversationModel, providerUsable as isProviderUsable } from '@/lib/providers'
 import { useChatStore } from '@/stores/chat'
 import { useBotsStore } from '@/stores/bots'
 import { useSettingsStore } from '@/stores/settings'
@@ -21,6 +21,7 @@ import { useUiStore } from '@/stores/ui'
 import { sttReady, useVoiceStore } from '@/stores/voice'
 import { MicDeniedError, VoiceRecorder } from '@/lib/recorder'
 import { toNormalized, unwrap } from '@/api/uld'
+import { getChatDraft, loadChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 import ModelSelector from './ModelSelector'
 import './chat.css'
 
@@ -86,6 +87,7 @@ export default function Composer(): ReactElement {
   const updateConversation = useChatStore((s) => s.updateConversation)
   const settings = useSettingsStore((s) => s.settings)
   const providers = useProvidersStore((s) => s.providers)
+  const agent = useBotsStore((s) => s.roster?.bots.find((row) => row.agent.id === conversation?.agentId)?.agent)
   const openSettings = useUiStore((s) => s.openSettings)
   const toast = useUiStore((s) => s.toast)
 
@@ -95,6 +97,7 @@ export default function Composer(): ReactElement {
   const skillsLoaded = useSkillsStore((s) => s.loaded)
 
   const [value, setValue] = useState('')
+  const [sending, setSending] = useState(false)
   const [compareOn, setCompareOn] = useState(false)
   const [researchOn, setResearchOn] = useState(false)
   // '' = use the settings default depth for this run.
@@ -145,9 +148,9 @@ export default function Composer(): ReactElement {
     textareaRef.current?.focus()
   }, [composerSeed])
 
-  const effectiveProviderId = conversation?.providerId ?? settings?.defaultProviderId ?? null
+  const target = conversationModel(conversation, settings, providers, agent)
   const effectiveProvider =
-    (effectiveProviderId ? providers.find((p) => p.id === effectiveProviderId) : undefined) ??
+    target.provider ??
     providers.find(isProviderUsable) ??
     null
 
@@ -156,8 +159,9 @@ export default function Composer(): ReactElement {
     // A per-conversation override must resolve to an enabled, keyed provider.
     // If it doesn't, don't silently fall back to the global default — the send
     // would fail against the stale override, so surface the banner instead.
-    if (conversation?.providerId) {
-      const p = providers.find((x) => x.id === conversation.providerId)
+    const pinnedProviderId = conversation?.providerId ?? agent?.providerId
+    if (pinnedProviderId) {
+      const p = providers.find((x) => x.id === pinnedProviderId)
       return !!p && isProviderUsable(p)
     }
     if (settings?.defaultProviderId) {
@@ -197,17 +201,37 @@ export default function Composer(): ReactElement {
   // carried into the next conversation (a file confirmed against this
   // provider would otherwise be sent to another one's). Drafts are the one
   // exception — they are kept per conversation and restored on the way back.
-  const drafts = useRef(new Map<string, string>())
   const valueRef = useRef(value)
   valueRef.current = value
+  const attachmentsRef = useRef(attachments)
+  attachmentsRef.current = attachments
+  const draftOwner = useRef<string | undefined>(conversation?.id)
+  const draftReady = useRef(false)
+  const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null)
 
   useEffect(() => {
     const id = conversation?.id
+    draftOwner.current = id
+    draftReady.current = false
+    setLoadedDraftId(null)
+    let active = true
     setCompareOn(false)
     setResearchOn(false)
     setResearchDepth('')
-    setValue(id ? (drafts.current.get(id) ?? '') : '')
-    setAttachments([])
+    setValue(id ? getChatDraft(id).text : '')
+    setAttachments(id ? getChatDraft(id).attachments : [])
+    if (id) void loadChatDraft(id).then(draft => {
+      if (!active || draftOwner.current !== id) return
+      setValue(draft.text)
+      setAttachments(draft.attachments)
+      draftReady.current = true
+      setLoadedDraftId(id)
+    }).catch(e => {
+      if (!active) return
+      toast(`Could not restore draft: ${toNormalized(e).message}`, 'error')
+      draftReady.current = true
+      setLoadedDraftId(id)
+    })
     setPendingFiles(null)
     setExtractingIds(new Set())
     setMention(null)
@@ -221,9 +245,19 @@ export default function Composer(): ReactElement {
     }
     setRecState('idle')
     return () => {
-      if (id) drafts.current.set(id, valueRef.current)
+      active = false
+      if (id && draftReady.current) void saveChatDraft(id, { text: valueRef.current, attachments: attachmentsRef.current }).catch(() => {})
     }
   }, [conversation?.id])
+
+  useEffect(() => {
+    const id = conversation?.id
+    if (!id || !draftReady.current) return
+    const timer = window.setTimeout(() => {
+      void saveChatDraft(id, { text: value, attachments }).catch(e => toast(`Draft could not be saved: ${toNormalized(e).message}`, 'error'))
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [value, attachments, conversation?.id, toast])
 
   // Unmount (Home/Workflows navigation, lock screen): release the mic —
   // otherwise the getUserMedia stream and worklet keep running for up to the
@@ -264,7 +298,7 @@ export default function Composer(): ReactElement {
     }
   }, [recState])
 
-  const effectiveModelId = conversation?.modelId ?? effectiveProvider?.defaultModelId ?? ''
+  const effectiveModelId = target.modelId ?? effectiveProvider?.defaultModelId ?? ''
   // Preset-aware: for the 120+ preset-backed 'openai-compatible' providers
   // (empty family knownModels) the preset catalog is consulted, so
   // vision-capable preset models are recognized.
@@ -483,7 +517,7 @@ export default function Composer(): ReactElement {
   const submit = (): void => {
     const content = value.trim()
     if (!content && attachments.length === 0) return
-    if (disabled) return
+    if (disabled || sending || !draftReady.current) return
     // While a response streams, only PLAIN messages may queue: commands and
     // one-shot overrides (/compact, /research, compare) need an idle turn.
     if (isStreaming && (content.startsWith('/') || researchOn || (compareOn && comparePreset))) {
@@ -512,20 +546,24 @@ export default function Composer(): ReactElement {
       : compareOn && comparePreset
         ? { comparePresetId: comparePreset.id }
         : undefined
-    setValue('')
-    setAttachments([])
+    const owner = conversation?.id
+    if (!owner) return
+    setSending(true)
     setMention(null)
     setMentionItems([])
     void (async () => {
-      await send(content, sentAttachments, sendOpts)
-      // send() sets `error` (without starting a stream) when the send fails —
-      // e.g. a stale provider override. Restore the draft so it isn't lost.
-      const st = useChatStore.getState()
-      if (!st.streaming && st.error) {
-        setValue((cur) => (cur.length > 0 ? cur : content))
-        if (sentAttachments) setAttachments((cur) => (cur.length > 0 ? cur : sentAttachments))
-        textareaRef.current?.focus()
-      }
+      try {
+        await saveChatDraft(owner, { text: value, attachments })
+        if (await send(content, sentAttachments, sendOpts)) {
+          const sameView = draftOwner.current === owner
+          const unchanged = sameView ? valueRef.current.trim() === content && attachmentsRef.current === attachments : getChatDraft(owner).text.trim() === content
+          if (unchanged) {
+            if (sameView) { valueRef.current = ''; attachmentsRef.current = []; setValue(''); setAttachments([]) }
+            await saveChatDraft(owner, { text: '', attachments: [], pendingSend: undefined })
+          } else await saveChatDraft(owner, { pendingSend: undefined })
+        }
+      } catch (e) { toast(toNormalized(e).message, 'error') }
+      finally { setSending(false) }
     })()
   }
 
@@ -967,7 +1005,7 @@ export default function Composer(): ReactElement {
           className="btn-icon composer-attach-button"
           aria-label="Add files or photos"
           title="Add files or photos"
-          disabled={!conversation || isStreaming}
+          disabled={!conversation || loadedDraftId !== conversation.id || isStreaming}
           onClick={() => void handleAttach()}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
@@ -982,7 +1020,7 @@ export default function Composer(): ReactElement {
             title="Choose tools and modes"
             aria-haspopup="menu"
             aria-expanded={plusMenuOpen}
-            disabled={!conversation || isStreaming}
+            disabled={!conversation || loadedDraftId !== conversation.id || isStreaming}
             onClick={() => setPlusMenuOpen((open) => !open)}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -1176,7 +1214,7 @@ export default function Composer(): ReactElement {
             rows={1}
             value={value}
             placeholder={placeholder}
-            disabled={!conversation}
+            disabled={!conversation || loadedDraftId !== conversation.id}
             aria-label="Message"
             onPaste={handlePaste}
             onChange={(e) => {
@@ -1245,7 +1283,7 @@ export default function Composer(): ReactElement {
                   ? 'Transcribing…'
                   : 'Dictate a message (offline)'
             }
-            disabled={!conversation || isStreaming || recState === 'transcribing'}
+            disabled={!conversation || loadedDraftId !== conversation.id || isStreaming || recState === 'transcribing'}
             onClick={() => void toggleRecording()}
           >
             {recState === 'transcribing' ? (
@@ -1279,7 +1317,8 @@ export default function Composer(): ReactElement {
             type="button"
             className="btn btn-primary composer-send"
             aria-label="Send message"
-            disabled={disabled || (!value.trim() && attachments.length === 0)}
+            disabled={sending || disabled || !conversation || loadedDraftId !== conversation.id || (!value.trim() && attachments.length === 0)}
+            aria-busy={sending}
             onClick={submit}
           >
             Send

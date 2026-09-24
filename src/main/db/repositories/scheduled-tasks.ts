@@ -61,6 +61,7 @@ export interface ScheduledTasksRepository {
   list(): ScheduledTask[]
   getById(id: string): ScheduledTask | null
   create(input: ScheduledTaskInput): ScheduledTask
+  update(id: string, input: ScheduledTaskInput): ScheduledTask | null
   setEnabled(id: string, enabled: boolean): ScheduledTask | null
   /** Sets/clears the task's monthly spend cap (USD). */
   setBudget(id: string, budgetUsd: number | null): ScheduledTask | null
@@ -144,6 +145,14 @@ export function createScheduledTasksRepository(driver: SqliteDriver): ScheduledT
         ]
       )
       return task
+    },
+
+    update(id, input) {
+      // Keep identity, pause state, budget and run history intact.
+      driver.run(`UPDATE scheduled_tasks SET title = ?, prompt = ?, recurrence = ?, next_run_at = ?,
+        approved_tools_json = ?, project_id = ?, agent_id = ?, webhook_url = ?, updated_at = ? WHERE id = ?`,
+      [input.title, input.prompt, input.recurrence, input.runAt, JSON.stringify(input.approvedToolIds ?? []), input.projectId ?? null, input.agentId ?? null, input.webhookUrl ?? null, Date.now(), id])
+      return getById(id)
     },
 
     setEnabled(id, enabled) {

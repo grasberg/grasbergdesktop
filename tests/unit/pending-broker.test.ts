@@ -25,11 +25,13 @@ describe('PendingBroker.hasPendingFor', () => {
     })
     expect(broker.hasPendingFor('c1')).toBe(true)
     expect(broker.hasPendingFor('c2')).toBe(false)
+    expect(broker.snapshot()).toEqual([sent[0].payload])
 
     const requestId = (sent[0].payload as { requestId: string }).requestId
     broker.respond(requestId, { approved: true, scope: 'once' })
     expect(await answer).toEqual({ approved: true, scope: 'once' })
     expect(broker.hasPendingFor('c1')).toBe(false)
+    expect(broker.snapshot()).toEqual([])
   })
 
   it('clears on stopAll and never matches a request the window could not receive', async () => {

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { navigateGuarded } from './useUnsavedChanges'
 
 /**
  * Open/closed state for the add-or-edit form of a CRUD list tab: `openAdd`
@@ -15,14 +16,14 @@ export function useEditorState<T>(): {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<T | null>(null)
 
-  const openAdd = (): void => {
+  const openAdd = (): void => navigateGuarded(() => {
     setEditing(null)
     setFormOpen(true)
-  }
-  const openEdit = (item: T): void => {
+  }, 'settings')
+  const openEdit = (item: T): void => navigateGuarded(() => {
     setEditing(item)
     setFormOpen(true)
-  }
+  }, 'settings')
   const closeForm = (): void => {
     setFormOpen(false)
     setEditing(null)

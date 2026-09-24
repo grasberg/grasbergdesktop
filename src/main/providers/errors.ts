@@ -157,20 +157,22 @@ function truncate(text: string, max: number): string {
 }
 
 /** Pulls a human-readable message out of an (OpenAI-ish) error body, if any. */
-function extractProviderMessage(bodyText: string): string | undefined {
+function extractProviderMessage(bodyText: string, secrets?: string[]): string | undefined {
   const trimmed = bodyText.trim()
   if (!trimmed) return undefined
   try {
     const parsed = oaiErrorBodySchema.safeParse(JSON.parse(trimmed))
     if (parsed.success) {
-      const msg = parsed.data.error?.message ?? parsed.data.message
-      if (msg) return truncate(msg, 300)
+      // The ChatGPT Codex backend reports validation failures as { detail: string }.
+      const msg = parsed.data.error?.message ?? parsed.data.message ??
+        (typeof parsed.data.detail === 'string' ? parsed.data.detail : undefined)
+      if (msg) return truncate(redactSecrets(msg, secrets), 300)
     }
     return undefined
   } catch {
     // Non-JSON body: surface short plain text, never HTML error pages.
     if (trimmed.startsWith('<')) return undefined
-    return truncate(trimmed, 200)
+    return truncate(redactSecrets(trimmed, secrets), 200)
   }
 }
 
@@ -189,7 +191,7 @@ export function normalizeHttpError(
   retryAfterSec?: number,
   secrets?: string[]
 ): ProviderError {
-  const raw = extractProviderMessage(bodyText)
+  const raw = extractProviderMessage(bodyText, secrets)
   const detail = raw ? redactSecrets(raw, secrets) : undefined
   const suffix = detail ? ` (${detail})` : ''
 

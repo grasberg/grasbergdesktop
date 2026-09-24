@@ -1,12 +1,14 @@
 import { create } from 'zustand'
 import { toNormalized } from '@/api/uld'
 import type { UiStoreState } from './contracts'
+import { navigateGuarded } from '@/hooks/useUnsavedChanges'
 
 let toastSeq = 0
 
-export const useUiStore = create<UiStoreState>()((set) => ({
+export const useUiStore = create<UiStoreState>()((set, get) => ({
   resolvedTheme: 'dark',
   settingsOpen: false,
+  settingsTab: 'providers',
   paletteOpen: false,
   shortcutsOpen: false,
   // Boot lands on the Home overview; selecting a conversation switches away.
@@ -21,7 +23,7 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   },
 
   setView(view) {
-    set({ view })
+    if (get().view !== view) navigateGuarded(() => set({ view }), 'page')
   },
 
   // The Workflows builder replaces the main area when open; closing it returns
@@ -29,11 +31,15 @@ export const useUiStore = create<UiStoreState>()((set) => ({
   // An optional workflow id deep-links the builder to that workflow (and is
   // cleared by any call without one, so it is consumed exactly once).
   openWorkflows(open, workflowId) {
-    set({ view: open ? 'workflows' : 'conversation', workflowsInitialId: workflowId ?? null })
+    const change = (): void => set({ view: open ? 'workflows' : 'conversation', workflowsInitialId: workflowId ?? null })
+    if (get().view === (open ? 'workflows' : 'conversation')) change()
+    else navigateGuarded(change, 'page')
   },
 
-  openSettings(open) {
-    set({ settingsOpen: open })
+  openSettings(open, tab) {
+    const change = (): void => set({ settingsOpen: open, ...(tab ? { settingsTab: tab } : {}) })
+    if (!open || (tab && tab !== get().settingsTab)) navigateGuarded(change, 'settings')
+    else change()
   },
 
   openPalette(open) {

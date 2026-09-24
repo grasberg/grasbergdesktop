@@ -21,6 +21,7 @@ import TasksTab from './TasksTab'
 import TerminalTab from './TerminalTab'
 import ArenaTab from './ArenaTab'
 import OptimizerTab from './OptimizerTab'
+import { navigateGuarded, useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
 export type WorkTab =
   | 'files'
@@ -134,12 +135,15 @@ function ContextFooter(): ReactElement | null {
   const [pending, setPending] = useState<Attachment[] | null>(null)
   const [busy, setBusy] = useState(false)
 
+  const guard = useUnsavedChanges(formOpen && !!question.trim())
+
   if (selectedPaths.length === 0) return null
 
   const sendNow = async (attachments: Attachment[]): Promise<void> => {
     setBusy(true)
     try {
-      await useChatStore.getState().send(question.trim(), attachments)
+      if (!await useChatStore.getState().send(question.trim(), attachments)) return
+      guard.markSaved()
       setQuestion('')
       setPending(null)
       setFormOpen(false)
@@ -168,7 +172,7 @@ function ContextFooter(): ReactElement | null {
         <span>
           {selectedPaths.length} file{selectedPaths.length === 1 ? '' : 's'} selected
         </span>
-        <button type="button" className="btn-icon" aria-label="Clear selection" onClick={clearSelection}>
+        <button type="button" className="btn-icon" aria-label="Clear selection" onClick={() => guard.discard(clearSelection)}>
           ×
         </button>
       </div>
@@ -209,7 +213,7 @@ function ContextFooter(): ReactElement | null {
             >
               {busy ? 'Reading…' : 'Send'}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setFormOpen(false)}>
+            <button type="button" className="btn btn-ghost" onClick={() => guard.discard(() => { setFormOpen(false); setQuestion('') })}>
               Cancel
             </button>
           </div>
@@ -310,7 +314,7 @@ export default function WorkPanel({
               role="tab"
               aria-selected={active === tab.key}
               className={`work-tab${active === tab.key ? ' active' : ''}`}
-              onClick={() => onTab(tab.key)}
+              onClick={() => { if (active !== tab.key) navigateGuarded(() => onTab(tab.key), 'page') }}
             >
               {tab.label}
               {tab.badge ? <span className="work-tab-badge">{tab.badge}</span> : null}
@@ -323,7 +327,7 @@ export default function WorkPanel({
           aria-label="Hide workspace panel"
           aria-expanded={true}
           title="Hide workspace panel"
-          onClick={onCollapse}
+          onClick={() => navigateGuarded(onCollapse, 'page')}
         >
           »
         </button>

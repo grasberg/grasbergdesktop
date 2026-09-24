@@ -22,6 +22,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _draft = TextEditingController();
   final FocusNode _focus = FocusNode();
   int _lastRenderLength = -1;
+  bool _followBottom = true;
 
   AppStore get store => widget.store;
 
@@ -29,7 +30,16 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     // The send button's enabled state tracks the draft.
-    _draft.addListener(() => setState(() {}));
+    _draft.text = store.drafts[store.currentId] ?? '';
+    _draft.addListener(() {
+      final id = store.currentId;
+      if (id != null) store.setDraft(id, _draft.text);
+      setState(() {});
+    });
+    _scroll.addListener(() {
+      final follow = _scroll.position.maxScrollExtent - _scroll.offset < 100;
+      if (follow != _followBottom) setState(() => _followBottom = follow);
+    });
   }
 
   @override
@@ -48,16 +58,22 @@ class _ChatScreenState extends State<ChatScreen> {
   void _maybeScroll(int renderLength) {
     if (renderLength != _lastRenderLength) {
       _lastRenderLength = renderLength;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      if (_followBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      }
     }
   }
 
-  void _submit() {
+  void _submit() async {
     final text = _draft.text.trim();
-    if (text.isEmpty) return;
-    store.sendMessage(text);
-    _draft.clear();
-    setState(() {});
+    final id = store.currentId;
+    if (text.isEmpty || !store.isConnected || store.sends[id]?.sending == true) {
+      return;
+    }
+    final sent = await store.sendMessage(text);
+    if (mounted && sent && id == store.currentId && _draft.text.trim() == text) {
+      _draft.clear();
+    }
   }
 
   @override
@@ -67,17 +83,21 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (context, _) {
         final currentId = store.currentId ?? '';
         final activeStreams = [
-          ...store.streams.entries.where((e) => e.value.conversationId == currentId),
+          ...store.streams.entries.where(
+            (e) => e.value.conversationId == currentId,
+          ),
         ];
         final streaming = activeStreams.isNotEmpty;
         // The placeholder assistant message of a live stream would render as
         // an empty bubble; show only the live partial instead.
-        final visibleMessages =
-            store.messages.where((m) => !streaming || m.status != 'streaming').toList();
+        final visibleMessages = store.messages
+            .where((m) => !streaming || m.status != 'streaming')
+            .toList();
         final lastAssistant = visibleMessages
             .where((m) => m.role == 'assistant')
             .fold<Message?>(null, (acc, m) => m);
-        final renderLength = visibleMessages.length +
+        final renderLength =
+            visibleMessages.length +
             activeStreams.fold<int>(0, (sum, e) => sum + e.value.text.length);
         _maybeScroll(renderLength);
 
@@ -138,55 +158,96 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
                 const Divider(height: 1, color: Color(0xFF232930)),
+                if (!_followBottom)
+                  TextButton(
+                    onPressed: () {
+                      _followBottom = true;
+                      _scrollToBottom();
+                    },
+                    child: const Text('Jump to latest ↓'),
+                  ),
+                if (!store.isConnected)
+                  const Text('Offline — your draft is saved on this device.'),
+                if (store.sends[currentId]?.error != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      store.sends[currentId]!.error!,
+                      style: const TextStyle(color: Palette.errorColor),
+                    ),
+                  ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-                  child: streaming
-                      ? SizedBox(
+                  child: Column(
+                    children: [
+                      if (streaming)
+                        SizedBox(
                           width: double.infinity,
                           child: OutlinedButton.icon(
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Palette.errorColor,
                             ),
-                            onPressed: () => store.stopStream(activeStreams.first.key),
+                            onPressed: store.isConnected
+                                ? () =>
+                                      store.stopStream(activeStreams.first.key)
+                                : null,
                             icon: const Icon(Icons.stop),
                             label: const Text('Stop generating'),
                           ),
-                        )
-                      : Column(
-                          children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _draft,
-                                    focusNode: _focus,
-                                    minLines: 1,
-                                    maxLines: 5,
-                                    textInputAction: TextInputAction.newline,
-                                    decoration: const InputDecoration(
-                                      hintText: 'Message Grasberg…',
-                                    ),
+                        ),
+                      Column(
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _draft,
+                                  focusNode: _focus,
+                                  minLines: 1,
+                                  maxLines: 5,
+                                  textInputAction: TextInputAction.newline,
+                                  decoration: const InputDecoration(
+                                    hintText: 'Message Grasberg…',
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                IconButton.filled(
-                                  tooltip: 'Send',
-                                  onPressed: _draft.text.trim().isEmpty ? null : _submit,
-                                  icon: const Icon(Icons.arrow_upward),
-                                ),
-                              ],
-                            ),
-                            if (lastAssistant != null)
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: TextButton(
-                                  onPressed: () => store.regenerate(lastAssistant.id),
-                                  child: const Text('Regenerate'),
-                                ),
                               ),
-                          ],
-                        ),
+                              const SizedBox(width: 8),
+                              IconButton.filled(
+                                tooltip: 'Send',
+                                onPressed:
+                                    !store.isConnected ||
+                                        store.sends[currentId]?.sending ==
+                                            true ||
+                                        _draft.text.trim().isEmpty
+                                    ? null
+                                    : _submit,
+                                icon: store.sends[currentId]?.sending == true
+                                    ? const SizedBox(
+                                        width: 20,
+                                        height: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Icon(Icons.arrow_upward),
+                              ),
+                            ],
+                          ),
+                          if (lastAssistant != null && !streaming)
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed: store.isConnected
+                                    ? () => store.regenerate(lastAssistant.id)
+                                    : null,
+                                child: const Text('Regenerate'),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),

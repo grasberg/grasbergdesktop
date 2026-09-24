@@ -19,7 +19,7 @@
  *   into the bot's canonical chat.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { CHANNELS } from '@shared/ipc'
 import type {
   A2aOutboxEntry,
@@ -1054,6 +1054,7 @@ export class BotService {
   }
 
   stopGroup(id: string): void {
+    this.pendingGroupSends.delete(id)
     this.activeGroups.get(id)?.abort()
   }
 
@@ -1064,10 +1065,18 @@ export class BotService {
    * collect semantics): the message joins the live transcript immediately and
    * triggers a fresh round-set once the current one finishes.
    */
-  groupSend(groupId: string, content: string): void {
+  groupSend(groupId: string, content: string, requestId?: string): void {
     const db = this.deps.db
     const group = db.botGroups.getById(groupId)
     if (!group) throw new Error('Unknown group.')
+    const fingerprint = createHash('sha256').update(`group:${content.trim()}`).digest('hex')
+    if (requestId) {
+      const receipt = db.driver.get<{ fingerprint: string }>('SELECT fingerprint FROM chat_send_receipts WHERE conversation_id = ? AND request_id = ?', [group.conversationId, requestId])
+      if (receipt) {
+        if (receipt.fingerprint !== fingerprint) throw new Error('This message identifier was already used. Send the edited message again.')
+        return
+      }
+    }
     const members = group.memberIds
       .map((memberId) => db.agents.getById(memberId))
       .filter((agent): agent is AgentProfile => agent !== null && agent.enabled)
@@ -1076,7 +1085,10 @@ export class BotService {
     }
     const text = content.trim()
     if (!text) throw new Error('Say something first.')
-    this.insertMessage(group.conversationId, 'user', text)
+    db.driver.transaction(() => {
+      const message = this.insertMessage(group.conversationId, 'user', text)
+      if (requestId) db.driver.run('INSERT INTO chat_send_receipts (conversation_id, request_id, fingerprint, message_id) VALUES (?, ?, ?, ?)', [group.conversationId, requestId, fingerprint, message.id])
+    })
     db.botGroups.setNeedsUser(group.id, false)
     db.botGroups.touch(group.id, Date.now())
     this.deps.broadcast(CHANNELS.conversationsChanged, { conversationId: group.conversationId })
@@ -1397,6 +1409,7 @@ export class BotService {
       // A bot delegating to itself is already in that transcript.
       if (info.callerAgentId === info.agentId) return
       const db = this.deps.db
+      if (info.callerSpaceId || db.conversations.getById(info.callerConversationId)?.spaceId) return
       const chat = this.ensureBotChat(info.agentId)
       const caller = info.callerAgentId ? db.agents.getById(info.callerAgentId) : null
       const callerLabel = caller
@@ -1448,6 +1461,7 @@ export class BotService {
       const db = this.deps.db
       const pending = this.pendingDelegates.get(info.delegateKey)
       this.pendingDelegates.delete(info.delegateKey)
+      if (!pending || info.callerSpaceId || db.conversations.getById(info.callerConversationId)?.spaceId) return
       const known = pending ? db.conversations.getById(pending.targetChatId) : null
       const chat = known ?? this.ensureBotChat(info.agentId)
       const status: MessageHandoff['status'] =

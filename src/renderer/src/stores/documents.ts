@@ -18,7 +18,7 @@ export const useDocumentsStore = create<DocumentsStoreState>()((set) => ({
 
   ...createSimpleListActions<NotebookDocSummary, NotebookDocInput, NotebookDocPatch>({
     label: 'notes',
-    api: window.uld.documents,
+    api: () => window.uld.documents,
     onLoaded: (documents) => set({ documents, loaded: true }),
     onLoadFailed: () => set({ loaded: true }),
   }),

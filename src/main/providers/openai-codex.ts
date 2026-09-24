@@ -15,6 +15,8 @@
  * are passed to the error redactor so they can't leak into messages.
  */
 
+import { discoverModels } from './model-discovery'
+
 import { randomUUID } from 'node:crypto'
 import type {
   ModelInfo,
@@ -149,9 +151,10 @@ export function buildResponsesBody(req: AdapterChatRequest, stream: boolean): Re
     store: false,
     parallel_tool_calls: false,
   }
-  if (req.params.maxTokens !== undefined) body.max_output_tokens = req.params.maxTokens
-  if (req.params.temperature !== undefined) body.temperature = req.params.temperature
-  if (req.params.topP !== undefined) body.top_p = req.params.topP
+  // ChatGPT's Codex endpoint rejects the public API's output-token and
+  // sampling controls. In particular, probeConnection supplies maxTokens: 1;
+  // forwarding it makes Test connection fail even for a valid OAuth session.
+  // Keep these parameters out of both probes and ordinary chat requests.
   const tools = toolsToResponses(req.tools)
   if (tools.length > 0) {
     body.tools = tools
@@ -237,18 +240,8 @@ export class OpenAICodexAdapter implements ProviderAdapter {
     return ctx.accountId ? [ctx.apiKey, ctx.accountId] : [ctx.apiKey]
   }
 
-  /**
-   * The ChatGPT sign-in backend only serves the models in
-   * CHATGPT_OAUTH_MODEL_IDS (gpt-5 and the older codex line were retired). Coerce
-   * anything else — e.g. a provider that still has `gpt-5` stored — to the
-   * current signin default so a stale id doesn't hard-fail every request.
-   */
-  private codexModel(modelId: string): string {
-    return CHATGPT_OAUTH_MODEL_IDS.includes(modelId) ? modelId : CHATGPT_OAUTH_DEFAULT_MODEL
-  }
-
   private post(req: AdapterChatRequest, ctx: AdapterContext, stream: boolean): Promise<Response> {
-    const body = buildResponsesBody({ ...req, modelId: this.codexModel(req.modelId) }, stream)
+    const body = buildResponsesBody(req, stream)
     return checkedFetch(CHATGPT_RESPONSES_URL, {
       method: 'POST',
       headers: this.buildHeaders(ctx),
@@ -295,11 +288,9 @@ export class OpenAICodexAdapter implements ProviderAdapter {
     return collectStream(this.chatStream({ ...req, stream: false }, ctx))
   }
 
-  async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    // Which models this backend accepts is catalog data (CHATGPT_OAUTH_MODEL_IDS)
-    // — offering the rest of the platform catalog (gpt-4o etc.) would make
-    // every generation fail. The user can still type any other model id.
-    return PROVIDER_TYPES.openai.knownModels.filter((m) => CHATGPT_OAUTH_MODEL_IDS.includes(m.id))
+  async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
+    const fallback = PROVIDER_TYPES.openai.knownModels.filter((m) => CHATGPT_OAUTH_MODEL_IDS.includes(m.id))
+    return discoverModels('codex', ctx, fallback)
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {

@@ -1,0 +1,44 @@
+.full-remote-app { height: 100dvh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+.remote-topbar { display: flex; align-items: center; gap: 8px; padding: max(6px, env(safe-area-inset-top)) 10px 6px; border-bottom: 1px solid var(--border); background: var(--bg-panel); }
+.remote-topbar > span { flex: 1; font-size: 12px; color: var(--text-muted); }
+.remote-content { flex: 1; min-height: 0; position: relative; }
+.remote-content > .app-layout { height: 100%; }
+.remote-navigation { display: flex; justify-content: space-around; gap: 2px; border-top: 1px solid var(--border); padding: 4px 4px max(4px, env(safe-area-inset-bottom)); background: var(--bg-panel); }
+.remote-navigation .btn { min-height: 44px; min-width: 0; padding: 6px; font-size: 12px; }
+.remote-navigation [aria-current] { background: var(--accent); color: var(--accent-text, white); }
+.remote-drawer-backdrop { position: fixed; inset: 48px 0 54px; background: #0007; z-index: 99; border: 0; }
+.remote-file-dialog { width: 620px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.remote-folder-path { display: flex; gap: 8px; }
+.remote-folder-path input { flex: 1; min-width: 0; }
+.remote-folder-list { max-height: 45dvh; overflow: auto; display: flex; flex-direction: column; align-items: stretch; }
+.remote-folder-list .btn { justify-content: flex-start; min-height: 40px; text-align: left; }
+@media (max-width: 900px) {
+  .full-remote-app .app-layout { display: block; min-width: 0; }
+  .full-remote-app .app-main { width: 100%; height: 100%; min-width: 0; }
+  .full-remote-app .sidebar { display: none; }
+  .full-remote-app.drawer-open .sidebar { display: flex; position: absolute; inset: 0 auto 0 0; width: min(85vw, 330px); z-index: 100; }
+  .full-remote-app .home-grid { grid-template-columns: minmax(0, 1fr); }
+  .full-remote-app .work-view { position: relative; }
+  .full-remote-app .work-center { min-width: 0; width: 100%; }
+  .full-remote-app .work-panel { position: absolute; inset: 0; width: 100%; min-width: 0; z-index: 35; }
+  .full-remote-app .work-tabs { overflow-x: auto; flex-wrap: nowrap; }
+  .full-remote-app .work-tabs button { flex-shrink: 0; }
+  .full-remote-app .work-controls, .full-remote-app .chat-header { flex-wrap: wrap; }
+  .full-remote-app .work-controls select { min-width: 0; max-width: 100%; }
+  .full-remote-app .arena-candidates { grid-template-columns: minmax(0, 1fr); }
+  .full-remote-app .composer { padding: 8px; }
+  .full-remote-app .composer-tools { flex-wrap: wrap; }
+  .full-remote-app .bot-hero, .full-remote-app .bots-header { flex-wrap: wrap; }
+  .full-remote-app .bots-grid { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+  html[data-remote-client] .modal { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; }
+  html[data-remote-client] .modal-backdrop { padding: 8px; }
+  html[data-remote-client] .settings-modal { width: 100%; max-width: 100%; height: calc(100dvh - 16px); }
+  html[data-remote-client] .provider-row { flex-wrap: wrap; }
+  html[data-remote-client] .provider-row-main { min-width: 0; }
+  html[data-remote-client] .input, html[data-remote-client] .textarea, html[data-remote-client] .select { font-size: 16px; }
+  html[data-remote-client] .btn-icon { min-width: 40px; min-height: 40px; }
+  html[data-remote-client] .form-grid { grid-template-columns: minmax(0, 1fr); }
+  html[data-remote-client] .bot-form input, html[data-remote-client] .bot-form textarea { font-size: 16px; }
+  .full-remote-app .composer-inputrow { flex-wrap: wrap; }
+  .full-remote-app .composer-textarea-wrap { flex-basis: 65%; min-width: 0; }
+}

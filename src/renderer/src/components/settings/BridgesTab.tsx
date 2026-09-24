@@ -13,6 +13,8 @@ import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useConversationsStore } from '@/stores/conversations'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
+import { confirmAction } from '@/components/common/ConfirmDialog'
+import { isRemoteClient } from '@/lib/client-platform'
 
 /**
  * A fully valid in-range port, or null. Out-of-range and half-typed input is
@@ -332,6 +334,8 @@ export default function BridgesTab(): ReactElement {
       </label>
 
       <h4 className="section-subhead">Remote access (phone)</h4>
+      {isRemoteClient() && <p className="callout">Pairing, revoking devices and changing access are managed on the desktop. This device can use the permissions granted there.</p>}
+      <fieldset disabled={isRemoteClient()} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <p className="field-hint">
         Use the full app from your phone: conversations, live streaming, approvals. The desktop
         opens no port — it dials out to a relay you host (see relay/ in the repository), and every
@@ -428,6 +432,16 @@ export default function BridgesTab(): ReactElement {
                             : 'Never connected'}
                     </span>
                     {!device.revokedAt ? (
+                      <button type="button" className="btn btn-sm" onClick={() => void runRemote(async () => {
+                        const access = device.access === 'full' ? 'limited' : 'full'
+                        if (access === 'full' && !await confirmAction('Grant full app access?', `Allow “${device.name}” to manage providers, bots, libraries, automation and Work on this desktop, including file changes and terminal commands? Private-space chats and stored credentials stay excluded. You can return this device to limited access here at any time.`, 'Grant full access')) return
+                        const result = await window.uld.remote.setAccess(device.id, access)
+                        if (!result.ok) throw result.error
+                        setRemote(result.data)
+                        toast(access === 'full' ? 'Full access granted to this device.' : 'Device returned to limited access.', 'success')
+                      })}>{device.access === 'full' ? 'Full access · Limit access' : 'Limited · Grant full access'}</button>
+                    ) : null}
+                    {!device.revokedAt ? (
                       <button
                         type="button"
                         className="btn btn-sm"
@@ -446,6 +460,7 @@ export default function BridgesTab(): ReactElement {
         </>
       ) : null}
 
+      </fieldset>
       <h4 className="section-subhead">Trigger endpoint (incoming)</h4>
       <p className="field-hint">
         The other direction: lets an outside event start a workflow — a git hook, a CI job, a

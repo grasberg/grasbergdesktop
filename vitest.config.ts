@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@shared': fileURLToPath(new URL('./src/shared', import.meta.url)),
+      '@': fileURLToPath(new URL('./src/renderer/src', import.meta.url)),
     },
   },
   test: {
@@ -27,7 +28,7 @@ export default defineConfig({
     // flip the run's exit code even though every test passed. A modest ceiling
     // gives each worker enough CPU to stay responsive; lower-core CI runners
     // are under this cap already, so they are unaffected.
-    maxWorkers: 8,
+    maxWorkers: 4,
     minWorkers: 1,
   },
 })

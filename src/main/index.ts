@@ -650,21 +650,21 @@ function bootstrap(): void {
     shellEnabled: () => database.settings.get().shellExecutionEnabled,
     shellAllowlist: () => database.settings.get().shellCommandAllowlist,
     shellBackground: {
-      start: (command, cwd) =>
+      start: (command, cwd, ctx) =>
         chatService
-          ? chatService.startShellBackground(command, cwd)
+          ? chatService.startShellBackground(command, cwd, ctx)
           : 'Error: background shell jobs unavailable.',
     },
     browserEnabled: () => database.settings.get().browserToolsEnabled,
     browser,
-    browserFor: (ctx) => pool.forScope(pool.scopeFor(ctx.conversation.agentId)),
+    browserFor: (ctx) => pool.forScope(pool.scopeFor(ctx.agentId ?? ctx.conversation.agentId)),
     // Unified approvals (v50): a turn started by an outside event asks before
     // messaging a teammate.
     turnOrigin: (conversationId) => botService?.turnOrigin(conversationId) ?? null,
     // Resolved at call time; chatService (below) is set before any generation.
     delegate: (task, ctx, agentName) =>
       chatService
-        ? chatService.runDelegate(task, ctx, undefined, agentName)
+        ? chatService.runDelegate(task, ctx, ctx.signal, agentName)
         : Promise.resolve('Error: delegation unavailable.'),
     // Bot Mode: message_agent deliveries (botService is constructed below).
     botMessenger: {
@@ -704,10 +704,10 @@ function bootstrap(): void {
         chatService
           ? chatService.startDelegateBackground(task, ctx, agentName)
           : 'Error: background tasks unavailable.',
-      output: (taskId) =>
-        chatService ? chatService.delegateTaskOutput(taskId) : 'Error: background tasks unavailable.',
-      stop: (taskId) =>
-        chatService ? chatService.delegateTaskStop(taskId) : 'Error: background tasks unavailable.',
+      output: (taskId, ctx) =>
+        chatService ? chatService.delegateTaskOutput(taskId, ctx) : 'Error: background tasks unavailable.',
+      stop: (taskId, ctx) =>
+        chatService ? chatService.delegateTaskStop(taskId, ctx) : 'Error: background tasks unavailable.',
     },
     // edit_file/write_file: propose + apply through the audited change
     // pipeline (path jail, staleness baseline, Changes-list record).
@@ -1267,6 +1267,7 @@ function bootstrap(): void {
   // until Settings turns it on (sync() re-reads settings, like the trigger
   // endpoint).
   const remote = new RemoteService({
+    conversationForTerminal: id => terminals.conversationForSession(id),
     db: database,
     keystore,
     handlers: ipcHandlers,

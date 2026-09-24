@@ -21,7 +21,7 @@ export const useSkillsStore = create<SkillsStoreState>()((set, get) => ({
 
   ...createSimpleListActions<Skill, SkillInput, SkillPatch>({
     label: 'skills',
-    api: window.uld.skills,
+    api: () => window.uld.skills,
     onLoaded: (skills) => set({ skills, loaded: true }),
     onLoadFailed: () => set({ loaded: true }),
   }),

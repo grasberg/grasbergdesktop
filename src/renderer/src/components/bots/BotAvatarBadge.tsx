@@ -4,8 +4,9 @@
  * identity without pulling in the lazy Bots view chunk.
  */
 
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import type { AgentProfile } from '@shared/types'
+import { isBotAvatarImage } from '@shared/bot-avatar'
 import './bot-avatar.css'
 
 // A small stable palette — the default avatar color is hashed from the name.
@@ -41,13 +42,17 @@ export function BotAvatarBadge({
   size?: number
 }): ReactElement {
   const color = agent.avatar?.color || colorForName(agent.name)
+  const [failedImage, setFailedImage] = useState<string | null>(null)
+  const image = agent.avatar?.imageDataUrl
   return (
     <span
       className="bot-avatar"
       style={{ width: size, height: size, fontSize: size * 0.44, background: color }}
       aria-hidden="true"
     >
-      {agent.avatar?.emoji || initials(agent.name)}
+      {isBotAvatarImage(image) && image !== failedImage
+        ? <img src={image} alt="" onError={() => setFailedImage(image)} />
+        : agent.avatar?.emoji || initials(agent.name)}
     </span>
   )
 }

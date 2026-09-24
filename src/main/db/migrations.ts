@@ -1317,4 +1317,29 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE agents ADD COLUMN watch_json TEXT`,
     ],
   },
+  {
+    version: 51,
+    name: 'acknowledged-chat-sends',
+    statements: [
+      `CREATE TABLE chat_send_receipts (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        request_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        PRIMARY KEY (conversation_id, request_id)
+      )`,
+      `CREATE TABLE conversation_drafts (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        draft_json TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    version: 52,
+    name: 'remote-device-access',
+    statements: [
+      `ALTER TABLE remote_devices ADD COLUMN access_level TEXT NOT NULL DEFAULT 'limited' CHECK(access_level IN ('limited', 'full'))`,
+      `ALTER TABLE remote_devices ADD COLUMN access_granted_at INTEGER`,
+    ],
+  },
 ]

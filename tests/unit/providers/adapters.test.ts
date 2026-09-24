@@ -81,18 +81,18 @@ describe('DeepSeekAdapter', () => {
 })
 
 describe('listModels for providers without a /models endpoint', () => {
-  it('ZhipuAdapter returns catalog knownModels without fetching', async () => {
+  it('ZhipuAdapter falls back to catalog when discovery fails', async () => {
     const mock = makeFetchSequence()
     const models = await new ZhipuAdapter().listModels(ctx(mock))
     expect(models).toEqual(PROVIDER_TYPES.zhipu.knownModels)
-    expect(mock.requests).toHaveLength(0)
+    expect(mock.requests).toHaveLength(1)
   })
 
-  it('MiniMaxAdapter returns catalog knownModels without fetching', async () => {
+  it('MiniMaxAdapter falls back to catalog when discovery fails', async () => {
     const mock = makeFetchSequence()
     const models = await new MiniMaxAdapter().listModels(ctx(mock))
     expect(models).toEqual(PROVIDER_TYPES.minimax.knownModels)
-    expect(mock.requests).toHaveLength(0)
+    expect(mock.requests).toHaveLength(1)
   })
 })
 

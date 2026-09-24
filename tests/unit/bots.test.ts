@@ -394,6 +394,17 @@ describe('BotService group rooms', () => {
     expect(messages[1].content).toBe('I think we should ship.')
   })
 
+  it('acknowledges a retried room send without duplicating its transcript or rounds', async () => {
+    const { service, groupId, conversationId } = makeRoom({ Alpha: ['One answer.', 'PASS'], Beta: ['PASS'] })
+    const id = '11111111-1111-4111-8111-111111111111'
+    service.groupSend(groupId, 'Send once', id)
+    service.groupSend(groupId, 'Send once', id)
+    await settled(service, groupId)
+    service.groupSend(groupId, 'Send once', id)
+    expect(db.messages.listByConversation(conversationId).filter(m => m.role === 'user')).toHaveLength(1)
+    expect(() => service.groupSend(groupId, 'Different message', id)).toThrow('identifier')
+  })
+
   it('scopes round 1 to @mentioned members', async () => {
     const { service, groupId, conversationId } = makeRoom({
       Alpha: ['Only me.', 'PASS'],
@@ -702,7 +713,7 @@ describe('BotService delegate handoffs (v49)', () => {
     expect(db.messages.listByConversation(scoutChat.id)).toHaveLength(before)
   })
 
-  it('finishing an unknown key still mirrors the result', () => {
+  it('does not mirror a completion without an authorized start', () => {
     const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
     const caller = db.conversations.create({ mode: 'chat', title: 'Plain chat' })
     const { service } = makeService(makeFakeChat())
@@ -711,8 +722,7 @@ describe('BotService delegate handoffs (v49)', () => {
       status: 'stopped',
       result: 'halfway',
     })
-    const chatId = db.agents.getById(editor.id)!.chatConversationId!
-    expect(db.messages.listByConversation(chatId).at(-1)!.content).toContain('was stopped: halfway')
+    expect(db.agents.getById(editor.id)!.chatConversationId).toBeNull()
   })
 })
 

@@ -81,7 +81,7 @@ export class KnowledgeService {
   constructor(private readonly deps: KnowledgeServiceDeps) {}
 
   /** Chunks + embeds a document and stores it under the given source name. */
-  async addDocument(kbId: string, source: string, text: string): Promise<{ chunks: number }> {
+  async addDocument(kbId: string, source: string, text: string, progress?: (completed: number, total: number) => void): Promise<{ chunks: number }> {
     const kb = this.deps.db.knowledge.getById(kbId)
     if (!kb) throw new Error('Knowledge base not found.')
     const chunks = chunkText(text)
@@ -92,6 +92,7 @@ export class KnowledgeService {
     const rows: Array<{ source: string; seq: number; content: string; embedding: Float32Array }> =
       []
     for (let offset = 0; offset < chunks.length; offset += EMBED_BATCH_SIZE) {
+      progress?.(offset, chunks.length)
       const batch = chunks.slice(offset, offset + EMBED_BATCH_SIZE)
       const vectors = await this.deps.embed(kb.providerId, kb.modelId, batch)
       for (let i = 0; i < batch.length; i++) {
@@ -111,6 +112,7 @@ export class KnowledgeService {
     // only now that the new version is fully embedded, and atomically (one
     // transaction) so a failure can't strand the source half-replaced.
     this.deps.db.knowledge.replaceSourceChunks(kbId, source, rows)
+    progress?.(chunks.length, chunks.length)
     return { chunks: chunks.length }
   }
 

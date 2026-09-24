@@ -41,6 +41,7 @@ interface PendingEntry<TAnswer> {
 
 export abstract class PendingBroker<TRequest extends { requestId: string }, TAnswer> {
   private readonly pending = new Map<string, PendingEntry<TAnswer>>()
+  private readonly requests = new Map<string, TRequest>()
   private hooks: BrokerHooks<TRequest, TAnswer> = {}
 
   protected constructor(
@@ -91,6 +92,7 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
         signal,
         onAbort,
       })
+      this.requests.set(requestId, fullRequest)
       try {
         broadcast(this.requestChannel, fullRequest)
       } catch {
@@ -128,6 +130,9 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
     return this.pending.has(requestId)
   }
 
+  /** Reconnection snapshot; only still-pending requests are returned. */
+  snapshot(): TRequest[] { return [...this.requests.values()] }
+
   /** True while any request raised from `conversationId` awaits an answer (v49). */
   hasPendingFor(conversationId: string): boolean {
     for (const entry of this.pending.values()) {
@@ -147,6 +152,7 @@ export abstract class PendingBroker<TRequest extends { requestId: string }, TAns
     const entry = this.pending.get(requestId)
     if (!entry) return
     this.pending.delete(requestId)
+    this.requests.delete(requestId)
     clearTimeout(entry.timer)
     if (entry.signal && entry.onAbort) {
       entry.signal.removeEventListener('abort', entry.onAbort)

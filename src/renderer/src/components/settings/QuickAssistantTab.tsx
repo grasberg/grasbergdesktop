@@ -3,104 +3,14 @@ import type { QuickAction } from '@shared/types'
 import { DEFAULT_QUICK_ACTIONS } from '@shared/types'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
-import { useProvidersStore } from '@/stores/providers'
+
+import ShortcutCapture from '@/components/common/ShortcutCapture'
+import ModelField from '@/components/chat/ModelField'
 
 /** Provider + model picker for one quick action (unset = the default chain). */
-function QuickModelPicker({
-  action,
-  onChange,
-}: {
-  action: QuickAction
-  onChange: (patch: Pick<QuickAction, 'providerId' | 'modelId'>) => void
-}): React.JSX.Element {
-  const providers = useProvidersStore((s) => s.providers)
-  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
-  const loadModels = useProvidersStore((s) => s.loadModels)
-
-  const provider = providers.find((p) => p.id === action.providerId) ?? null
-  const enabledProviders = providers.filter((p) => p.enabled)
-  const models = provider ? modelsByProvider[provider.id] ?? [] : []
-  const [modelDraft, setModelDraft] = useState(action.modelId ?? '')
-  const inList = models.some((m) => m.id === action.modelId)
-
-  useEffect(() => setModelDraft(action.modelId ?? ''), [action.modelId])
-
-  useEffect(() => {
-    if (!provider || modelsByProvider[provider.id]) return
-    void loadModels(provider.id).catch(() => {
-      // Best-effort; the custom model input still works.
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider?.id])
-
-  const commitModelDraft = (): void => {
-    const trimmed = modelDraft.trim()
-    onChange({ providerId: action.providerId, modelId: trimmed || undefined })
-  }
-
-  return (
-    <div className="quick-action-model">
-      <select
-        className="select"
-        aria-label={`${action.label || 'Action'} provider`}
-        value={action.providerId ?? ''}
-        onChange={(e) => {
-          const id = e.target.value
-          onChange(id ? { providerId: id, modelId: undefined } : {})
-        }}
-      >
-        <option value="">Default model</option>
-        {enabledProviders.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label}
-          </option>
-        ))}
-        {provider && !provider.enabled ? (
-          <option value={provider.id}>{provider.label} (disabled)</option>
-        ) : null}
-      </select>
-      {provider ? (
-        models.length > 0 && (inList || !action.modelId) ? (
-          <select
-            className="select"
-            aria-label={`${action.label || 'Action'} model`}
-            value={action.modelId ?? ''}
-            onChange={(e) =>
-              onChange({ providerId: action.providerId, modelId: e.target.value || undefined })
-            }
-          >
-            <option value="">
-              Provider default{provider.defaultModelId ? ` (${provider.defaultModelId})` : ''}
-            </option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label ?? m.id}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <input
-            className="input mono"
-            aria-label={`${action.label || 'Action'} custom model id`}
-            value={modelDraft}
-            placeholder="model id"
-            spellCheck={false}
-            onChange={(e) => setModelDraft(e.target.value)}
-            onBlur={commitModelDraft}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                commitModelDraft()
-              }
-            }}
-          />
-        )
-      ) : null}
-    </div>
-  )
+function QuickModelPicker({ action, onChange }: { action: QuickAction; onChange: (patch: Pick<QuickAction, 'providerId' | 'modelId'>) => void }): React.JSX.Element {
+  return <ModelField label={`${action.label || 'Action'} model`} providerId={action.providerId ?? null} modelId={action.modelId ?? null} onChange={(providerId, modelId) => onChange({ providerId: providerId ?? undefined, modelId: modelId ?? undefined })} />
 }
-
-/** One editable quick action (label + prompt + optional model + remove). */
 function QuickActionRow({
   action,
   onChange,
@@ -213,6 +123,7 @@ export default function QuickAssistantTab(): React.JSX.Element {
           Summon shortcut
         </label>
         <div className="quick-shortcut-row">
+          <ShortcutCapture value={shortcut} onChange={setShortcut} />
           <input
             id="quick-shortcut"
             className="input mono"
@@ -230,8 +141,7 @@ export default function QuickAssistantTab(): React.JSX.Element {
           </button>
         </div>
         <span className="field-hint">
-          Electron accelerator, e.g. CommandOrControl+Shift+Space. Leave empty to disable. If
-          another app owns the combo, a notice appears when you save.
+          Record a key combination or edit it directly. Save applies it to the desktop. If another app owns the combination, a notice appears when you save.
         </span>
       </div>
 

@@ -50,6 +50,8 @@ export interface ToolsStoreState {
   permissions: Record<string, ToolPermissionDecision>
   /** FIFO queue of pending requests; the dialog renders the head. */
   approvalQueue: ToolApprovalRequest[]
+  responding: Record<string, boolean>
+  recoverPending(): Promise<void>
   /** Standing approval rules, newest first (Settings -> Tools). */
   rules: ToolRule[]
   loaded: boolean
@@ -94,6 +96,13 @@ export interface ToolsStoreState {
 }
 
 export const useToolsStore = create<ToolsStoreState>()((set, get) => {
+  type Queues = Pick<ToolsStoreState, 'approvalQueue' | 'questionQueue'>
+  let recovering: Promise<void> | null = null
+  let changes: Array<(queues: Queues) => Queues> = []
+  const changeQueues = (change: (queues: Queues) => Queues): void => {
+    if (recovering) changes.push(change)
+    set(change)
+  }
   /** Applies a mutated custom-tool list, then re-syncs the registry. */
   const applyCustomInfos = async (infos: CustomToolInfo[]): Promise<void> => {
     set({ customInfos: infos })
@@ -105,6 +114,15 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
     customInfos: [],
     permissions: {},
     approvalQueue: [],
+    responding: {},
+    recoverPending() {
+      if (recovering) return recovering
+      changes = []
+      recovering = Promise.resolve().then(() => unwrap(window.uld.tools.pending())).then(snapshot => {
+        set(changes.reduce((state, change) => change(state), { approvalQueue: snapshot.approvals, questionQueue: snapshot.questions }))
+      }).catch(e => toastError('Could not restore pending requests', e)).finally(() => { recovering = null; changes = [] })
+      return recovering
+    },
     rules: [],
     loaded: false,
 
@@ -185,64 +203,62 @@ export const useToolsStore = create<ToolsStoreState>()((set, get) => {
     },
 
     setPendingApproval(req) {
-      set((s) =>
+      changeQueues((s) =>
         s.approvalQueue.some((r) => r.requestId === req.requestId)
           ? s
-          : { approvalQueue: [...s.approvalQueue, req] }
+          : { ...s, approvalQueue: [...s.approvalQueue, req] }
       )
     },
 
     async respond(requestId, approved, scope) {
       const pending = get().approvalQueue[0]
-      if (!pending || pending.requestId !== requestId) return
+      if (!pending || pending.requestId !== requestId || get().responding[requestId]) return
       // Dequeue first so the dialog advances to the next request and cannot
       // double-submit; main treats an unknown requestId as already-answered.
-      set((s) => ({
-        approvalQueue: s.approvalQueue.filter((r) => r.requestId !== pending.requestId),
-      }))
+      set(s => ({ responding: { ...s.responding, [requestId]: true } }))
       try {
         await unwrap(window.uld.tools.approvalRespond(pending.requestId, approved, scope))
+        get().settleApproval(requestId)
         // A wider scope persisted a rule main-side; keep the list in step.
         if (scope && scope !== 'once') void get().loadRules()
       } catch (e) {
         toastError('Could not deliver the approval response', e)
-      }
+      } finally { set(s => ({ responding: { ...s.responding, [requestId]: false } })) }
     },
 
     settleApproval(requestId) {
-      set((s) => {
+      changeQueues((s) => {
         const next = s.approvalQueue.filter((r) => r.requestId !== requestId)
-        return next.length === s.approvalQueue.length ? s : { approvalQueue: next }
+        return { ...s, approvalQueue: next }
       })
     },
 
     questionQueue: [],
 
     setPendingQuestion(req) {
-      set((s) =>
+      changeQueues((s) =>
         s.questionQueue.some((r) => r.requestId === req.requestId)
           ? s
-          : { questionQueue: [...s.questionQueue, req] }
+          : { ...s, questionQueue: [...s.questionQueue, req] }
       )
     },
 
     async respondQuestion(requestId, answer) {
       const pending = get().questionQueue[0]
-      if (!pending || pending.requestId !== requestId) return
-      set((s) => ({
-        questionQueue: s.questionQueue.filter((r) => r.requestId !== pending.requestId),
-      }))
+      if (!pending || pending.requestId !== requestId || get().responding[requestId]) return
+      set(s => ({ responding: { ...s.responding, [requestId]: true } }))
       try {
         await unwrap(window.uld.tools.questionRespond(pending.requestId, answer))
+        get().settleQuestion(requestId)
       } catch (e) {
         toastError('Could not deliver the answer', e)
-      }
+      } finally { set(s => ({ responding: { ...s.responding, [requestId]: false } })) }
     },
 
     settleQuestion(requestId) {
-      set((s) => {
+      changeQueues((s) => {
         const next = s.questionQueue.filter((r) => r.requestId !== requestId)
-        return next.length === s.questionQueue.length ? s : { questionQueue: next }
+        return { ...s, questionQueue: next }
       })
     },
   }

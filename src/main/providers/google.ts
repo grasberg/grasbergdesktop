@@ -5,6 +5,8 @@
  * in a log). `?alt=sse` makes the stream ordinary SSE for our parseSSE.
  */
 
+import { discoverNativeModels } from './model-discovery'
+
 import { randomUUID } from 'node:crypto'
 import type { ModelInfo, ProviderType, TestConnectionResult, TokenUsage } from '@shared/types'
 import { PROVIDER_TYPES } from '@shared/catalog'
@@ -412,8 +414,8 @@ export class GoogleAdapter implements ProviderAdapter {
     return images
   }
 
-  async listModels(_ctx: AdapterContext): Promise<ModelInfo[]> {
-    return PROVIDER_TYPES.google.knownModels
+  async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
+    return discoverNativeModels(this.type, ctx)
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {

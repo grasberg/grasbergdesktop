@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { KeyboardEvent } from 'react'
+import ModelField from '../chat/ModelField'
+import { navigateGuarded } from '@/hooks/useUnsavedChanges'
 import type { ConversationMode, ProviderConfig } from '@shared/types'
 import { errorMessage } from '@/api/uld'
 import { TestResult } from '@/components/common/controls'
@@ -40,8 +41,8 @@ function WelcomeStep() {
       </p>
       <ul className="wizard-bullets">
         <li>Conversations and settings are stored locally, never on our servers.</li>
-        <li>API keys are encrypted with your OS keychain and never leave this device.</li>
-        <li>The only network traffic goes to the LLM providers you configure.</li>
+        <li>API keys are encrypted on disk and sent only when authenticating with their configured provider.</li>
+        <li>Model catalogs can refresh from models.dev. Tools, downloads and connections you enable may contact other services.</li>
         <li>No telemetry.</li>
       </ul>
     </div>
@@ -49,107 +50,20 @@ function WelcomeStep() {
 }
 
 function VerifyStep({ provider }: { provider: ProviderConfig }) {
-  const settings = useSettingsStore((s) => s.settings)
-  const updateSettings = useSettingsStore((s) => s.update)
-  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
-  const loadModels = useProvidersStore((s) => s.loadModels)
-  const toast = useUiStore((s) => s.toast)
-
+  const settings = useSettingsStore(s => s.settings)
+  const updateSettings = useSettingsStore(s => s.update)
+  const toast = useUiStore(s => s.toast)
   const { testing, result: testResult, run: runTest } = useTestConnection(provider.id)
-  const [custom, setCustom] = useState('')
-
-  const models = modelsByProvider[provider.id] ?? []
-  const selectedModel =
-    settings && settings.defaultProviderId === provider.id ? settings.defaultModelId : null
-
-  useEffect(() => {
-    if (!modelsByProvider[provider.id]) {
-      void loadModels(provider.id).catch(() => {
-        // Best-effort; the custom model input below still works.
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider.id])
-
-  async function choose(modelId: string) {
-    try {
-      await updateSettings({ defaultProviderId: provider.id, defaultModelId: modelId })
-    } catch (e) {
-      toast(errorMessage(e), 'error')
-    }
-  }
-
-  return (
-    <div className="wizard-step">
-      <h1>Verify &amp; choose a model</h1>
-      <p className="wizard-pitch">
-        Check that <strong>{provider.label}</strong> is reachable, then pick the model new chats
-        should use.
-      </p>
-
-      <div className="wizard-test-row">
-        <button type="button" className="btn" onClick={() => void runTest()} disabled={testing}>
-          Test connection
-        </button>
-        <TestResult testing={testing} result={testResult} />
-      </div>
-
-      {models.length > 0 ? (
-        <div className="wizard-model-list" role="radiogroup" aria-label="Default model">
-          {models.map((m) => (
-            <label key={m.id} className={`wizard-model${selectedModel === m.id ? ' selected' : ''}`}>
-              <input
-                type="radio"
-                name="onb-model"
-                value={m.id}
-                checked={selectedModel === m.id}
-                onChange={() => void choose(m.id)}
-              />
-              <span className="wizard-model-label">{m.label ?? m.id}</span>
-              {m.contextLength ? (
-                <span className="badge">{Math.round(m.contextLength / 1000)}k ctx</span>
-              ) : null}
-              {m.capabilities.reasoning ? <span className="badge">reasoning</span> : null}
-              {m.capabilities.vision ? <span className="badge">vision</span> : null}
-            </label>
-          ))}
-        </div>
-      ) : (
-        <p className="field-hint">No model list available — enter a model id below.</p>
-      )}
-
-      <div className="wizard-custom-model">
-        <input
-          className="input mono"
-          value={custom}
-          onChange={(e) => setCustom(e.target.value)}
-          placeholder="Or type a custom model id…"
-          aria-label="Custom model id"
-          spellCheck={false}
-          onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-            if (e.key === 'Enter' && custom.trim()) {
-              e.preventDefault()
-              void choose(custom.trim())
-            }
-          }}
-        />
-        <button
-          type="button"
-          className="btn"
-          disabled={!custom.trim()}
-          onClick={() => void choose(custom.trim())}
-        >
-          Use this model
-        </button>
-      </div>
-
-      {selectedModel ? (
-        <p className="field-hint" role="status">
-          Default model set to <span className="mono">{selectedModel}</span>.
-        </p>
-      ) : null}
-    </div>
-  )
+  return <div className="wizard-step">
+    <h1>Choose your default model</h1>
+    <p className="wizard-pitch">New chats use this selection. You can change models in any conversation.</p>
+    <ModelField providerId={settings?.defaultProviderId ?? provider.id}
+      modelId={settings?.defaultModelId ?? provider.defaultModelId}
+      allowDefault={false}
+      onChange={(providerId, modelId) => { void updateSettings({ defaultProviderId: providerId, defaultModelId: modelId }).catch(e => toast(errorMessage(e), 'error')) }} />
+    <div className="wizard-test-row"><button type="button" className="btn" onClick={() => void runTest()} disabled={testing}>Test provider again</button><TestResult testing={testing} result={testResult} /></div>
+    <p className="field-hint">The optional connection test uses the provider's default model and may incur a small charge.</p>
+  </div>
 }
 
 const MODE_CARDS: ReadonlyArray<{ id: ConversationMode; title: string; desc: string }> = [
@@ -197,7 +111,7 @@ export default function Onboarding() {
     null
 
   function skip() {
-    void persist({ onboardingCompleted: true })
+    navigateGuarded(() => { void persist({ onboardingCompleted: true }) }, 'settings')
   }
 
   async function startSession(mode: ConversationMode) {
@@ -245,7 +159,7 @@ export default function Onboarding() {
                 setStep(2)
               }}
             />
-            <button type="button" className="btn btn-ghost wizard-later" onClick={() => setStep(3)}>
+            <button type="button" className="btn btn-ghost wizard-later" onClick={() => navigateGuarded(() => setStep(3), 'settings')}>
               I&rsquo;ll do this later
             </button>
           </div>
@@ -288,7 +202,7 @@ export default function Onboarding() {
 
       <footer className="wizard-footer">
         {step > 0 ? (
-          <button type="button" className="btn btn-ghost" onClick={() => setStep(step - 1)}>
+          <button type="button" className="btn btn-ghost" onClick={() => navigateGuarded(() => setStep(step - 1), 'settings')}>
             Back
           </button>
         ) : (

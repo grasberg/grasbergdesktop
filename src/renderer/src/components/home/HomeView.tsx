@@ -7,9 +7,10 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ConversationSummary, Project } from '@shared/types'
-import { unwrap } from '@/api/uld'
+import { errorMessage, unwrap } from '@/api/uld'
 import { modKeyLabel } from '@/lib/platform'
 import { useWorkflowsStore } from '@/stores/workflows'
+import { useProjectsStore } from '@/stores/projects'
 import BriefCard from './BriefCard'
 import GettingStartedCard from './GettingStartedCard'
 import ScheduledCard from './ScheduledCard'
@@ -25,10 +26,13 @@ import './home.css'
 const RECENT_WORK_LIMIT = 10
 
 export default function HomeView(): React.JSX.Element {
-  // Cross-mode lists used only here: fetched per mount, independent of the
-  // (mode-scoped, 300-row) sidebar store.
+  // Keep the cross-mode overview fresh when projects are edited in the sidebar.
+  // Fetch all modes; the sidebar's list itself contains only the selected mode.
+  const sidebarProjects = useProjectsStore((s) => s.projects)
   const [recent, setRecent] = useState<ConversationSummary[] | null>(null)
   const [projects, setProjects] = useState<Project[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -36,25 +40,23 @@ export default function HomeView(): React.JSX.Element {
     void useWorkflowsStore.getState().load()
     void (async () => {
       try {
-        const [recentWork, allProjects] = await Promise.all([
+        const [recentWork, allProjects] = await Promise.allSettled([
           unwrap(window.uld.conversations.list({ limit: RECENT_WORK_LIMIT })),
           unwrap(window.uld.projects.list()),
         ])
         if (cancelled) return
-        setRecent(recentWork)
-        setProjects(allProjects)
-      } catch {
-        // Cards degrade to their empty states; the sidebar already toasts
-        // load failures for conversations.
+        if (recentWork.status === 'fulfilled') setRecent(recentWork.value)
+        if (allProjects.status === 'fulfilled') setProjects(allProjects.value)
+        setLoadError(recentWork.status === 'rejected' ? errorMessage(recentWork.reason) : allProjects.status === 'rejected' ? errorMessage(allProjects.reason) : null)
+      } catch (e) {
         if (cancelled) return
-        setRecent([])
-        setProjects([])
+        setLoadError(errorMessage(e))
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [sidebarProjects, reload])
 
   const projectNameById = useMemo(
     () => new Map((projects ?? []).map((p) => [p.id, p.name])),
@@ -63,12 +65,13 @@ export default function HomeView(): React.JSX.Element {
 
   return (
     <div className="home">
+      {loadError && <div className="callout" role="alert">Could not refresh the overview: {loadError} <button className="btn" onClick={() => setReload(n => n + 1)}>Retry</button></div>}
       <header className="home-header">
         <img src={appIcon} width={40} height={40} alt="" aria-hidden="true" draggable={false} />
         <div className="home-header-text">
           <h1 className="home-title">Grasberg</h1>
           <p className="home-subtitle">
-            One local-first home for DeepSeek, GLM, MiniMax and any OpenAI-compatible model.
+            Your conversations, bots and work — with the models you choose.
           </p>
         </div>
         <span className="home-kbd-hint">
@@ -77,6 +80,7 @@ export default function HomeView(): React.JSX.Element {
         </span>
       </header>
       <div className="home-grid">
+        <QuickActionsCard />
         <BriefCard />
         <GettingStartedCard recent={recent} />
         <ScheduledCard />
@@ -85,7 +89,6 @@ export default function HomeView(): React.JSX.Element {
         <RecentRunsCard />
         <RecentWorkCard items={recent} projectNameById={projectNameById} />
         <ProjectsCard projects={projects} />
-        <QuickActionsCard />
       </div>
     </div>
   )

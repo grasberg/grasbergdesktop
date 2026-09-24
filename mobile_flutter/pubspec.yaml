@@ -39,6 +39,11 @@ dependencies:
   flutter_secure_storage: 9.2.4
   mobile_scanner: ^7.4.0
   markdown_widget: ^2.3.2+8
+  webview_flutter: ^4.14.1
+  webview_flutter_android: ^4.14.1
+  file_picker: 10.3.10
+  url_launcher: ^6.3.2
+  permission_handler: 12.0.3
 
 dev_dependencies:
   flutter_test:
@@ -61,6 +66,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/ui/
+    - assets/ui/assets/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

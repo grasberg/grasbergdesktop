@@ -7,11 +7,14 @@
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useToolsStore } from '@/stores/tools'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
 
 export default function UserQuestionDialog(): ReactElement | null {
   const pending = useToolsStore((s) => s.questionQueue[0] ?? null)
   const [custom, setCustom] = useState('')
   const firstOptionRef = useRef<HTMLButtonElement>(null)
+  const responding = useToolsStore(s => !!(pending && s.responding[pending.requestId]))
+  const modalRef = useModalBehavior(!!pending, () => { if (pending) void useToolsStore.getState().respondQuestion(pending.requestId, null) })
 
   // Reset the custom answer whenever a new question appears.
   useEffect(() => {
@@ -23,20 +26,6 @@ export default function UserQuestionDialog(): ReactElement | null {
   // (stop generation) never sees the event.
   // Every response names the question this dialog rendered — main may settle the
   // head request underneath us, and the answer must not land on the next one.
-  const requestId = pending?.requestId ?? null
-  useEffect(() => {
-    if (!requestId) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        void useToolsStore.getState().respondQuestion(requestId, null)
-      }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [requestId])
-
   if (!pending) return null
 
   const submitCustom = (): void => {
@@ -49,6 +38,7 @@ export default function UserQuestionDialog(): ReactElement | null {
     <div className="modal-backdrop tool-approval-backdrop">
       <div
         className="modal user-question-modal"
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="user-question-title"
@@ -69,6 +59,7 @@ export default function UserQuestionDialog(): ReactElement | null {
                 type="button"
                 ref={index === 0 ? firstOptionRef : undefined}
                 className="btn user-question-option"
+                disabled={responding}
                 onClick={() =>
                   void useToolsStore.getState().respondQuestion(pending.requestId, option)
                 }
@@ -94,7 +85,7 @@ export default function UserQuestionDialog(): ReactElement | null {
           <button
             type="button"
             className="btn btn-primary"
-            disabled={custom.trim().length === 0}
+            disabled={responding || custom.trim().length === 0}
             onClick={submitCustom}
           >
             Answer
@@ -106,6 +97,7 @@ export default function UserQuestionDialog(): ReactElement | null {
           <button
             type="button"
             className="btn btn-ghost"
+            disabled={responding}
             onClick={() => void useToolsStore.getState().respondQuestion(pending.requestId, null)}
           >
             Skip question

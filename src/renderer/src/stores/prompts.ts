@@ -19,7 +19,7 @@ export const usePromptsStore = create<PromptsStoreState>()((set) => ({
 
   ...createSimpleListActions<PromptTemplate, PromptTemplateInput, PromptTemplatePatch>({
     label: 'prompts',
-    api: window.uld.prompts,
+    api: () => window.uld.prompts,
     onLoaded: (templates) => set({ templates, loaded: true }),
     onLoadFailed: () => set({ loaded: true }),
   }),

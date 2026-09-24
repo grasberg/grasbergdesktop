@@ -5,6 +5,7 @@ import type { ChatStoreState } from './contracts'
 import { useConversationsStore } from './conversations'
 import { useSettingsStore } from './settings'
 import { useUiStore } from './ui'
+import { getChatDraft, loadChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 
 /** Guards openConversation against out-of-order responses when switching fast. */
 let openToken = 0
@@ -101,7 +102,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
 
     async send(content, attachments, opts) {
       const { conversation, streaming } = get()
-      if (!conversation) return
+      if (!conversation) return false
       // While a response streams, plain messages queue main-side (v47); the
       // Composer already blocks commands/one-shots in that state.
       const settings = useSettingsStore.getState().settings
@@ -109,7 +110,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
       // "/compact" summarizes older messages now, without sending anything.
       const bare = content.trim()
       if (bare === '/compact') {
-        if (streaming) return
+        if (streaming) return false
         try {
           const result = await unwrap(window.uld.chat.compact(conversation.id))
           useUiStore
@@ -121,10 +122,11 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               'info'
             )
           refreshOpenConversation(conversation.id)
+          return true
         } catch (e) {
           set({ error: toNormalized(e) })
+          return false
         }
-        return
       }
 
       // One-shot Mixture of Agents: "/moa <prompt>" runs a single message through
@@ -158,7 +160,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               retryable: false,
             },
           })
-          return
+          return false
         }
         overrides = { research: depth ? { depth } : {} }
       } else if (slash) {
@@ -172,7 +174,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               retryable: false,
             },
           })
-          return
+          return false
         }
         outgoing = trimmed.slice(slash.length).trim()
         if (!outgoing) {
@@ -183,7 +185,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               retryable: false,
             },
           })
-          return
+          return false
         }
         overrides = { moaPresetId: presetId, ...(slash === '/compare' ? { compare: true } : {}) }
       } else if (opts?.research) {
@@ -206,27 +208,41 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
             retryable: false,
           },
         })
-        return
+        return false
       }
       set({ error: null })
       try {
+        await loadChatDraft(conversation.id)
+        const fingerprintBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ content: outgoing, attachments: attachments ?? [], overrides: overrides ?? {} })))
+        const fingerprint = Array.from(new Uint8Array(fingerprintBytes), b => b.toString(16).padStart(2, '0')).join('')
+        const pending = getChatDraft(conversation.id).pendingSend
+        const clientRequestId = pending?.fingerprint === fingerprint ? pending.id : crypto.randomUUID()
+        await saveChatDraft(conversation.id, { pendingSend: { id: clientRequestId, fingerprint } })
         const result = await unwrap(
           window.uld.chat.send({
+            clientRequestId,
             conversationId: conversation.id,
             content: outgoing,
             attachments,
             ...(overrides ? { overrides } : {}),
           })
         )
+        // Clear the receipt only after acknowledgment, including callers outside Composer.
+        if (getChatDraft(conversation.id).pendingSend?.id === clientRequestId) {
+          await saveChatDraft(conversation.id, { pendingSend: undefined }).catch(e => {
+            useUiStore.getState().toast(`Message accepted; draft update failed: ${toNormalized(e).message}`, 'error')
+          })
+        }
         if ('queued' in result) {
           // Busy conversation: the message is persisted and runs as the next
           // turn after the current response completes. Show it immediately.
           set((s) =>
             s.conversation?.id === conversation.id
-              ? { messages: [...s.messages, result.userMessage] }
+              ? { messages: replaceOrAppend(s.messages, result.userMessage.id, result.userMessage) }
               : {}
           )
-          return
+          if (result.replayed && get().conversation?.id === conversation.id) await get().openConversation(conversation.id)
+          return true
         }
         // main awaits model/token resolution before answering, so another
         // conversation may be open by now — never graft this stream onto it.
@@ -247,7 +263,9 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
         )
       } catch (e) {
         set({ error: toNormalized(e) })
+        return false
       }
+      return true
     },
 
     async stop() {
@@ -282,6 +300,7 @@ export const useChatStore = create<ChatStoreState>()((set, get) => {
               }
             : {}
         )
+        void useConversationsStore.getState().syncSummary(result.conversation.id, result.message.content)
       } catch (e) {
         set({ error: toNormalized(e) })
       }

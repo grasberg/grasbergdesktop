@@ -4,7 +4,6 @@ import { newConversation } from '@/lib/new-conversation'
 import { groupTasks } from '@shared/task-groups'
 import { relativeTime } from '@/lib/format'
 import { modKeyLabel } from '@/lib/platform'
-import ScheduledTasks from '@/components/ScheduledTasks'
 import { botsAttentionSummary, useBotsStore } from '@/stores/bots'
 import { useConversationsStore } from '@/stores/conversations'
 import { useProjectsStore } from '@/stores/projects'
@@ -618,7 +617,7 @@ export default function Sidebar(): React.JSX.Element {
             <path d="M9.5 16.5h5" />
           </svg>
         </button>
-        <ScheduledTasks />
+        <button className="btn-icon sidebar-clock-btn" aria-label="Automation" title="Automation — scheduled tasks, bot routines and workflows" onClick={() => useUiStore.getState().setView('automation')}>◷</button>
       </div>
 
       <div className="sidebar-controls">

@@ -9,6 +9,8 @@ import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
 import { ProviderAddForm, validateBaseUrl } from './ProviderAddForm'
 import LocalServerCard from './LocalServerCard'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import ModelField from '@/components/chat/ModelField'
 
 function ProviderRow({ provider }: { provider: ProviderConfig }) {
   const types = useProvidersStore((s) => s.types)
@@ -35,6 +37,7 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
 
   const [newKey, setNewKey] = useState('')
   const [savingKey, setSavingKey] = useState(false)
+  const edits = useUnsavedChanges(expanded && (label !== provider.label || baseUrl !== provider.baseUrl || modelId !== provider.defaultModelId || newKey.length > 0), 'settings')
 
   function toggleExpanded() {
     if (!expanded) {
@@ -44,7 +47,8 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
       setNewKey('')
       setEditError(null)
     }
-    setExpanded(!expanded)
+    if (expanded) edits.discard(() => setExpanded(false))
+    else setExpanded(true)
   }
 
   async function toggleEnabled(enabled: boolean) {
@@ -222,16 +226,7 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
               />
             </div>
             <div className="settings-field">
-              <label className="field-label" htmlFor={`prov-model-${provider.id}`}>
-                Default model
-              </label>
-              <input
-                id={`prov-model-${provider.id}`}
-                className="input mono"
-                value={modelId}
-                onChange={(e) => setModelId(e.target.value)}
-                spellCheck={false}
-              />
+              <ModelField label="Default model" providerId={provider.id} onlyProviderId={provider.id} modelId={modelId || null} onChange={(_, id) => setModelId(id ?? '')} />
             </div>
             {editError ? (
               <p className="form-error" role="alert">
@@ -356,7 +351,7 @@ export default function ProvidersTab() {
       <header className="tab-header">
         <div>
           <h3>Providers</h3>
-          <p className="field-hint">Configure LLM endpoints and API keys. Keys are encrypted and stay on this device.</p>
+          <p className="field-hint">Connect a provider, verify a model and start chatting. Keys are encrypted on your desktop and sent to the chosen provider to authenticate requests.</p>
         </div>
         {!adding ? (
           <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>

@@ -27,8 +27,14 @@ class ApprovalCards extends StatelessWidget {
         shrinkWrap: true,
         padding: const EdgeInsets.all(12),
         children: [
-          for (final request in store.approvals) _ApprovalCard(store: store, request: request),
-          for (final request in store.questions) _QuestionCard(store: store, request: request),
+          for (final request in store.approvals)
+            _ApprovalCard(store: store, request: request),
+          for (final request in store.questions)
+            _QuestionCard(
+              key: ValueKey(request.requestId),
+              store: store,
+              request: request,
+            ),
         ],
       ),
     );
@@ -50,8 +56,13 @@ class _ApprovalCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Approval needed',
-                style: TextStyle(fontWeight: FontWeight.w600, color: Palette.waiting)),
+            const Text(
+              'Approval needed',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Palette.waiting,
+              ),
+            ),
             const SizedBox(height: 4),
             Text(
               '${request.toolName}${request.risk.isEmpty ? '' : ' (${request.risk})'}',
@@ -70,15 +81,28 @@ class _ApprovalCard extends StatelessWidget {
                 ),
               ),
             const SizedBox(height: 10),
+            ExpansionTile(
+              title: const Text('Review tool arguments'),
+              children: [SelectableText(request.toolArguments)],
+            ),
+            if (!store.isConnected) const Text('Reconnect to respond.'),
             Row(
               children: [
                 FilledButton(
-                  onPressed: () => store.respondApproval(request.requestId, true),
+                  onPressed:
+                      !store.isConnected ||
+                          store.responding.contains(request.requestId)
+                      ? null
+                      : () => store.respondApproval(request.requestId, true),
                   child: const Text('Allow once'),
                 ),
                 const SizedBox(width: 8),
                 OutlinedButton(
-                  onPressed: () => store.respondApproval(request.requestId, false),
+                  onPressed:
+                      !store.isConnected ||
+                          store.responding.contains(request.requestId)
+                      ? null
+                      : () => store.respondApproval(request.requestId, false),
                   child: const Text('Deny'),
                 ),
               ],
@@ -91,7 +115,7 @@ class _ApprovalCard extends StatelessWidget {
 }
 
 class _QuestionCard extends StatefulWidget {
-  const _QuestionCard({required this.store, required this.request});
+  const _QuestionCard({super.key, required this.store, required this.request});
 
   final AppStore store;
   final UserQuestionRequest request;
@@ -120,8 +144,13 @@ class _QuestionCardState extends State<_QuestionCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('The assistant asks',
-                style: TextStyle(fontWeight: FontWeight.w600, color: Palette.accent)),
+            const Text(
+              'The assistant asks',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Palette.accent,
+              ),
+            ),
             const SizedBox(height: 4),
             Text(request.question, style: const TextStyle(color: Palette.text)),
             const SizedBox(height: 8),
@@ -132,7 +161,12 @@ class _QuestionCardState extends State<_QuestionCard> {
                 for (final option in request.options)
                   ActionChip(
                     label: Text(option),
-                    onPressed: () => store.respondQuestion(request.requestId, option),
+                    onPressed:
+                        !store.isConnected ||
+                            store.responding.contains(request.requestId)
+                        ? null
+                        : () =>
+                              store.respondQuestion(request.requestId, option),
                   ),
               ],
             ),
@@ -143,17 +177,25 @@ class _QuestionCardState extends State<_QuestionCard> {
                   child: TextField(
                     controller: _custom,
                     onChanged: (_) => setState(() {}),
-                    decoration: const InputDecoration(hintText: 'Custom answer…'),
+                    decoration: const InputDecoration(
+                      hintText: 'Custom answer…',
+                    ),
                     style: const TextStyle(fontSize: 14),
                   ),
                 ),
                 const SizedBox(width: 8),
                 FilledButton(
-                  onPressed: _custom.text.trim().isEmpty
+                  onPressed:
+                      !store.isConnected ||
+                          store.responding.contains(request.requestId) ||
+                          _custom.text.trim().isEmpty
                       ? null
-                      : () {
-                          store.respondQuestion(request.requestId, _custom.text.trim());
-                          _custom.clear();
+                      : () async {
+                          final ok = await store.respondQuestion(
+                            request.requestId,
+                            _custom.text.trim(),
+                          );
+                          if (ok && mounted) _custom.clear();
                         },
                   child: const Text('Send'),
                 ),

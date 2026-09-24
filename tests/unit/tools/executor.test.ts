@@ -73,6 +73,28 @@ const DECLINE: ToolApprovalAnswer = { approved: false, scope: 'once' }
 const approveAll = vi.fn(async () => APPROVE)
 
 describe('ToolExecutor — resolution and validation', () => {
+  it('enforces a per-run allowlist before approval or filesystem effects', async () => {
+    const { executor } = createToolSystem(db)
+    const approval = vi.fn(async () => APPROVE)
+    const result = await executor.execute(call('write_file', { path: 'blocked.txt', content: 'no' }), {
+      conversation: conv(true), approval, allowedToolIds: new Set(), autoAcceptEdits: true,
+    })
+    expect(result).toContain('not available to this run')
+    expect(approval).not.toHaveBeenCalled()
+    expect(() => readFileSync(join(projectDir, 'blocked.txt'))).toThrow(/ENOENT/)
+  })
+
+  it('does not execute a tool if the run is stopped while its approval is pending', async () => {
+    const { executor } = createToolSystem(db)
+    const controller = new AbortController()
+    const result = await executor.execute(call('write_file', { path: 'cancelled.txt', content: 'no' }), {
+      conversation: conv(true), signal: controller.signal,
+      approval: async () => { controller.abort(); return APPROVE },
+    })
+    expect(result).toContain('stopped')
+    expect(() => readFileSync(join(projectDir, 'cancelled.txt'))).toThrow(/ENOENT/)
+  })
+
   it('returns an error string (never throws) for unknown tools', async () => {
     const { executor } = createToolSystem(db)
     const result = await executor.execute(call('does_not_exist'), {

@@ -39,6 +39,16 @@ async function until(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 }
 
 describe('TerminalService', () => {
+  it('decodes multibyte output split between pipe writes', async () => {
+    const { broadcast, exits } = collectingBroadcast()
+    const service = new TerminalService({ broadcast, shellSpec: () => ({ file: process.execPath, args: ['-e', 'process.stdout.write(Buffer.from([0xf0,0x9f]));setTimeout(()=>{process.stdout.write(Buffer.from([0xa6,0x89]));},80)'] }) })
+    try {
+      service.createOrAttach('unicode', process.cwd())
+      await until(() => exits.length > 0)
+      const output = broadcast.mock.calls.filter(([channel]) => channel === CHANNELS.terminalData).map(([, event]) => (event as TerminalDataEvent).chunk).join('')
+      expect(output).toBe('🦉')
+    } finally { service.disposeAll() }
+  })
   it('spawns one session per conversation, streams output and keeps a backlog', async () => {
     const { broadcast, data } = collectingBroadcast()
     const service = new TerminalService({ broadcast, shellSpec: () => ECHO_SHELL })

@@ -11,6 +11,7 @@ import type { Skill } from '@shared/types'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
 import { toNormalized, unwrap } from '@/api/uld'
@@ -24,6 +25,7 @@ function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => v
   const [description, setDescription] = useState(editing?.description ?? '')
   const [content, setContent] = useState(editing?.content ?? '')
   const [busy, run] = useAsyncAction()
+  const guard = useUnsavedChanges(name !== (editing?.name ?? '') || description !== (editing?.description ?? '') || content !== (editing?.content ?? ''), 'settings')
 
   const submit = async (): Promise<void> => {
     if (name.trim().length === 0) {
@@ -40,7 +42,7 @@ function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => v
       } else {
         await create({ name, description, content })
       }
-      onDone()
+      guard.markSaved(); onDone()
     })
   }
 
@@ -81,7 +83,7 @@ function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => v
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
           {busy ? 'Saving…' : editing ? 'Save changes' : 'Add skill'}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>

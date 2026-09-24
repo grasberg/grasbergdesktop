@@ -9,6 +9,7 @@ import type { PromptTemplate } from '@shared/types'
 import { ConfirmButton } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { usePromptsStore } from '@/stores/prompts'
 import { useUiStore } from '@/stores/ui'
 import './settings.css'
@@ -26,6 +27,7 @@ function PromptForm({
   const [title, setTitle] = useState(editing?.title ?? '')
   const [body, setBody] = useState(editing?.body ?? '')
   const [busy, run] = useAsyncAction()
+  const guard = useUnsavedChanges(title !== (editing?.title ?? '') || body !== (editing?.body ?? ''), 'settings')
 
   const submit = async (): Promise<void> => {
     if (title.trim().length === 0) {
@@ -38,7 +40,7 @@ function PromptForm({
       } else {
         await create({ title, body })
       }
-      onDone()
+      guard.markSaved(); onDone()
     })
   }
 
@@ -69,7 +71,7 @@ function PromptForm({
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
           {busy ? 'Saving…' : editing ? 'Save changes' : 'Add prompt'}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>

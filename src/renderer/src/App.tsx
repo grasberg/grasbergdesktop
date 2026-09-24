@@ -8,10 +8,12 @@ import ArtifactPanel from '@/components/chat/ArtifactPanel'
 import Toasts from '@/components/Toasts'
 import { GLOBAL_SHORTCUT_KEYS, useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useChatStore } from '@/stores/chat'
+import ConfirmDialog from '@/components/common/ConfirmDialog'
 import { useConversationsStore } from '@/stores/conversations'
 import { useLockStore } from '@/stores/lock'
 import { useMcpStore } from '@/stores/mcp'
 import { useProvidersStore } from '@/stores/providers'
+import { providerUsable } from '@/lib/providers'
 import { useSettingsStore } from '@/stores/settings'
 import { useSpacesStore } from '@/stores/spaces'
 import { useToolsStore } from '@/stores/tools'
@@ -29,6 +31,7 @@ const HomeView = lazy(() => import('@/components/home/HomeView'))
 const ChatView = lazy(() => import('@/components/chat/ChatView'))
 const WorkView = lazy(() => import('@/components/work/WorkView'))
 const WorkflowsView = lazy(() => import('@/components/workflows/WorkflowsView'))
+const AutomationView = lazy(() => import('@/components/automation/AutomationView'))
 const BotsView = lazy(() => import('@/components/bots/BotsView'))
 const SettingsPanel = lazy(() => import('@/components/settings/SettingsPanel'))
 const Onboarding = lazy(() => import('@/components/onboarding/Onboarding'))
@@ -122,6 +125,7 @@ export default function App(): React.JSX.Element {
     bootedRef.current = true
     void useSettingsStore.getState().load()
     void useProvidersStore.getState().load()
+    void useToolsStore.getState().recoverPending()
     void useConversationsStore.getState().load()
     // Loaded at boot (not just when Home mounts) so the sidebar's Scheduled
     // section and failure dot work from the first paint.
@@ -139,6 +143,19 @@ export default function App(): React.JSX.Element {
   // engages. On unlock, pushes dropped while locked (stream done/notify events)
   // have left the stores stale — re-sync the list and the open conversation.
   const locked = lockStatus?.locked === true
+  const modelProviders = useProvidersStore((s) => s.providers)
+  useEffect(() => {
+    if (lockStatus === null || locked) return
+    const refresh = (): void => {
+      for (const provider of modelProviders.filter(providerUsable)) {
+        void useProvidersStore.getState().loadModels(provider.id).catch(() => undefined)
+      }
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 5 * 60_000)
+    window.addEventListener('focus', refresh)
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh) }
+  }, [modelProviders, locked, lockStatus === null])
   const prevLockedRef = useRef(false)
   useEffect(() => {
     const wasLocked = prevLockedRef.current
@@ -148,6 +165,7 @@ export default function App(): React.JSX.Element {
       return
     }
     if (!locked && wasLocked && bootedRef.current) {
+      void useToolsStore.getState().recoverPending()
       void useConversationsStore.getState().load()
       const activeConversation = useConversationsStore.getState().activeId
       if (activeConversation) {
@@ -306,6 +324,7 @@ export default function App(): React.JSX.Element {
         <Suspense fallback={<ViewFallback />}>
           <Onboarding />
         </Suspense>
+        <ConfirmDialog />
         <Toasts />
       </>
     )
@@ -320,7 +339,7 @@ export default function App(): React.JSX.Element {
         <main
           className="app-main"
           aria-label={
-            view === 'workflows'
+            view === 'automation' ? 'Automation' : view === 'workflows'
               ? 'Workflows'
               : view === 'bots'
                 ? 'Bots'
@@ -330,7 +349,7 @@ export default function App(): React.JSX.Element {
           }
         >
           <Suspense fallback={<ViewFallback />}>
-            {view === 'workflows' ? (
+            {view === 'automation' ? <AutomationView /> : view === 'workflows' ? (
               <WorkflowsView />
             ) : view === 'bots' ? (
               <BotsView />
@@ -352,6 +371,7 @@ export default function App(): React.JSX.Element {
       <UserQuestionDialog />
       <ArtifactPanel />
       <Toasts />
+      <ConfirmDialog />
     </>
   )
 }

@@ -4,7 +4,7 @@
  * panel, where the owning bot is fixed ("Run as" is implied).
  */
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type {
   AgentProfile,
   CodeProject,
@@ -15,9 +15,10 @@ import { unwrap } from '@/api/uld'
 import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
-function initialDateTime(): string {
-  const date = new Date(Date.now() + 60 * 60_000)
+function initialDateTime(at?: number | null): string {
+  const date = new Date(at ?? Date.now() + 60 * 60_000)
   date.setSeconds(0, 0)
   const offset = date.getTimezoneOffset() * 60_000
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
@@ -25,25 +26,31 @@ function initialDateTime(): string {
 
 export default function ScheduledTaskCreateForm({
   fixedAgentId,
+  editing,
   onCreated,
   onCancel,
 }: {
   /** Pin the owning bot; hides the "Run as" picker. */
   fixedAgentId?: string
+  editing?: ScheduledTask
   onCreated?: (task: ScheduledTask) => void
   onCancel?: () => void
 }): ReactElement {
-  const [title, setTitle] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [runAt, setRunAt] = useState(initialDateTime)
-  const [recurrence, setRecurrence] = useState<ScheduledTaskRecurrence>('daily')
-  const [grantIds, setGrantIds] = useState<string[]>([])
-  const [projectId, setProjectId] = useState('')
+  const [title, setTitle] = useState(editing?.title ?? '')
+  const [prompt, setPrompt] = useState(editing?.prompt ?? '')
+  const [runAt, setRunAt] = useState(() => initialDateTime(editing?.nextRunAt))
+  const [recurrence, setRecurrence] = useState<ScheduledTaskRecurrence>(editing?.recurrence ?? 'daily')
+  const [grantIds, setGrantIds] = useState<string[]>(editing?.approvedToolIds ?? [])
+  const [projectId, setProjectId] = useState(editing?.projectId ?? '')
   const [projects, setProjects] = useState<CodeProject[]>([])
-  const [agentId, setAgentId] = useState(fixedAgentId ?? '')
+  const [agentId, setAgentId] = useState(fixedAgentId ?? editing?.agentId ?? '')
   const [agents, setAgents] = useState<AgentProfile[]>([])
-  const [webhookUrl, setWebhookUrl] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState(editing?.webhookUrl ?? '')
   const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const snapshot = JSON.stringify({ title, prompt, runAt, recurrence, grantIds, projectId, agentId, webhookUrl })
+  const [baseline] = useState(snapshot)
+  const guard = useUnsavedChanges(snapshot !== baseline)
   const tools = useToolsStore((state) => state.tools)
   const permissions = useToolsStore((state) => state.permissions)
   const toolsLoaded = useToolsStore((state) => state.loaded)
@@ -79,28 +86,32 @@ export default function ScheduledTaskCreateForm({
     setGrantIds((ids) => (ids.includes(toolId) ? ids.filter((id) => id !== toolId) : [...ids, toolId]))
 
   const createTask = async (): Promise<void> => {
+    if (savingRef.current) return
     const timestamp = new Date(runAt).getTime()
     if (!title.trim() || !prompt.trim() || !Number.isFinite(timestamp)) {
       useUiStore.getState().toast('Add a title, instructions and a valid time.', 'error')
       return
     }
-    setSaving(true)
-    const created = await useScheduledTasksStore.getState().create({
+    savingRef.current = true; setSaving(true)
+    try {
+    const input = {
       title: title.trim(),
       prompt: prompt.trim(),
       recurrence,
-      runAt: timestamp,
+      runAt: editing?.nextRunAt && runAt === initialDateTime(editing.nextRunAt) ? editing.nextRunAt : timestamp,
       approvedToolIds: grantIds,
-      projectId: grantIds.length > 0 && projectId ? projectId : null,
+      projectId: projectId || null,
       agentId: fixedAgentId ?? (agentId || null),
       webhookUrl: webhookUrl.trim() || null,
-    })
-    setSaving(false)
-    if (created) onCreated?.(created)
+    }
+    const created = editing ? await useScheduledTasksStore.getState().update(editing.id, input) : await useScheduledTasksStore.getState().create(input)
+    if (created) { guard.markSaved(); onCreated?.(created) }
+    } finally { savingRef.current = false; setSaving(false) }
   }
 
   return (
     <div className="sched-create-form">
+      <fieldset disabled={saving} style={{ display: 'contents', border: 0, padding: 0, minWidth: 0 }}>
       <input
         className="input"
         value={title}
@@ -152,9 +163,11 @@ export default function ScheduledTaskCreateForm({
           ))}
         </select>
       ) : null}
+      <details><summary>Advanced: tools and delivery</summary>
       <input
         className="input"
         type="url"
+        aria-label="Webhook URL for results"
         value={webhookUrl}
         onChange={(e) => setWebhookUrl(e.target.value)}
         placeholder="Webhook URL for results (optional, https)"
@@ -192,6 +205,7 @@ export default function ScheduledTaskCreateForm({
           ) : null}
         </div>
       ) : null}
+      </details>
       <div className="sched-create-row">
         <button
           type="button"
@@ -199,14 +213,15 @@ export default function ScheduledTaskCreateForm({
           disabled={saving || !title.trim() || !prompt.trim()}
           onClick={() => void createTask()}
         >
-          {saving ? 'Saving…' : 'Schedule routine'}
+          {saving ? 'Saving…' : editing ? 'Save routine' : 'Schedule routine'}
         </button>
         {onCancel ? (
-          <button type="button" className="btn btn-ghost" onClick={onCancel}>
+          <button type="button" className="btn btn-ghost" disabled={saving} onClick={() => guard.discard(onCancel)}>
             Cancel
           </button>
         ) : null}
       </div>
+      </fieldset>
     </div>
   )
 }

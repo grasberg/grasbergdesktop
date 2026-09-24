@@ -28,6 +28,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>The camera is used only to scan the desktop's pairing QR code.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record dictation when you tap the microphone. Audio is sent through your encrypted connection to your desktop for transcription.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

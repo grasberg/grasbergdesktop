@@ -9,6 +9,7 @@ import type { AgentProfile, Memory } from '@shared/types'
 import { ConfirmButton, Switch } from '@/components/common/controls'
 import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useMemoriesStore } from '@/stores/memories'
 import { useSettingsStore } from '@/stores/settings'
@@ -28,6 +29,7 @@ function MemoryForm({
   const [title, setTitle] = useState(editing?.title ?? '')
   const [content, setContent] = useState(editing?.content ?? '')
   const [busy, run] = useAsyncAction()
+  const guard = useUnsavedChanges(title !== (editing?.title ?? '') || content !== (editing?.content ?? ''), 'settings')
 
   const submit = async (): Promise<void> => {
     if (title.trim().length === 0) {
@@ -40,7 +42,7 @@ function MemoryForm({
       } else {
         await create({ title, content })
       }
-      onDone()
+      guard.markSaved(); onDone()
     })
   }
 
@@ -71,7 +73,7 @@ function MemoryForm({
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
           {busy ? 'Saving…' : editing ? 'Save changes' : 'Add memory'}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>

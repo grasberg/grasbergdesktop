@@ -20,5 +20,6 @@
       "@shared/*": ["src/shared/*"]
     }
   },
-  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts", "relay/**/*.ts", "tests/**/*.ts", "electron.vite.config.ts"]
+  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts", "relay/**/*.ts", "tests/**/*.ts", "electron.vite.config.ts"],
+  "exclude": ["tests/mobile/**/*", "tests/renderer/**/*"]
 }

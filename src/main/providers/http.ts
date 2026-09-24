@@ -96,6 +96,7 @@ function parseRetryAfterSeconds(headerValue: string | null): number | undefined 
 
 export interface CheckedFetchOptions {
   method: 'GET' | 'POST'
+  redirect?: RequestInit['redirect']
   headers: Record<string, string>
   body?: string
   signal?: AbortSignal
@@ -123,6 +124,7 @@ export async function checkedFetch(url: string, opts: CheckedFetchOptions): Prom
   try {
     res = await fetchImpl(url, {
       method: opts.method,
+      ...(opts.redirect ? { redirect: opts.redirect } : {}),
       headers: opts.headers,
       body: opts.body,
       signal: opts.signal,

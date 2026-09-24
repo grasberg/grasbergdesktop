@@ -5,11 +5,13 @@
  * implementation of it.
  */
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '@shared/types'
-import { useMobileStore } from './store'
+import { requestRemote, subscribeRemote, useMobileStore } from './store'
+import { loadIdentity } from './tunnel'
+const FullApp = lazy(() => import('./full/FullApp'))
 
 function StatusDot({ state }: { state: string }): ReactElement {
   const cls =
@@ -30,7 +32,9 @@ function ApprovalCards(): ReactElement | null {
   const questions = useMobileStore((s) => s.questions)
   const respondApproval = useMobileStore((s) => s.respondApproval)
   const respondQuestion = useMobileStore((s) => s.respondQuestion)
-  const [custom, setCustom] = useState('')
+  const [custom, setCustom] = useState<Record<string, string>>({})
+  const responding = useMobileStore((s) => s.responding)
+  const online = useMobileStore((s) => s.tunnelState === 'online')
   if (approvals.length === 0 && questions.length === 0) return null
   return (
     <div className="cards">
@@ -41,15 +45,18 @@ function ApprovalCards(): ReactElement | null {
             {request.toolCall.name} ({request.risk})
           </p>
           {request.note ? <p>{request.note}</p> : null}
+          <details><summary>Review tool arguments</summary><pre>{JSON.stringify(request.toolCall.arguments, null, 2)}</pre></details>
+          {!online ? <p role="status">Reconnect to respond. This request remains on your desktop.</p> : null}
           <div className="card-actions">
             <button
               type="button"
               className="primary"
+              disabled={!online || responding[request.requestId]}
               onClick={() => void respondApproval(request.requestId, true)}
             >
               Allow once
             </button>
-            <button type="button" onClick={() => void respondApproval(request.requestId, false)}>
+            <button type="button" disabled={!online || responding[request.requestId]} onClick={() => void respondApproval(request.requestId, false)}>
               Deny
             </button>
           </div>
@@ -64,6 +71,7 @@ function ApprovalCards(): ReactElement | null {
               key={option}
               type="button"
               className="chip"
+              disabled={!online || responding[request.requestId]}
               onClick={() => void respondQuestion(request.requestId, option)}
             >
               {option}
@@ -71,17 +79,19 @@ function ApprovalCards(): ReactElement | null {
           ))}
           <div className="card-actions">
             <input
-              value={custom}
+              aria-label="Custom answer"
+              value={custom[request.requestId] ?? ''}
               placeholder="Custom answer…"
-              onChange={(e) => setCustom(e.target.value)}
+              onChange={(e) => setCustom(s => ({ ...s, [request.requestId]: e.target.value }))}
             />
             <button
               type="button"
               className="primary"
-              disabled={!custom.trim()}
-              onClick={() => {
-                void respondQuestion(request.requestId, custom.trim())
-                setCustom('')
+              disabled={!online || responding[request.requestId] || !custom[request.requestId]?.trim()}
+              onClick={async () => {
+                if (await respondQuestion(request.requestId, custom[request.requestId].trim())) {
+                  setCustom(s => ({ ...s, [request.requestId]: '' }))
+                }
               }}
             >
               Send
@@ -116,23 +126,27 @@ function ChatView(): ReactElement {
   const stopStream = useMobileStore((s) => s.stopStream)
   const closeConversation = useMobileStore((s) => s.closeConversation)
   const regenerate = useMobileStore((s) => s.regenerate)
-  const [draft, setDraft] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
+  const followBottom = useRef(true)
+  const [showJump, setShowJump] = useState(false)
 
   const currentId = useMobileStore((s) => s.currentId)
+  const draft = useMobileStore((s) => s.currentId ? s.drafts[s.currentId] ?? '' : '')
+  const setDraft = useMobileStore((s) => s.setDraft)
+  const pendingSend = useMobileStore((s) => s.currentId ? s.sends[s.currentId] : undefined)
+  const online = useMobileStore((s) => s.tunnelState === 'online')
   const activeStreams = Object.entries(streams).filter(
     ([, stream]) => stream.conversationId === currentId
   )
   const streaming = activeStreams.length > 0
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (followBottom.current) bottomRef.current?.scrollIntoView({ behavior: 'instant' })
   }, [messages.length, activeStreams.map(([, s]) => s.text.length).join(',')])
 
   const submit = (): void => {
-    if (!draft.trim() || streaming) return
+    if (!draft.trim() || !online || pendingSend?.status === 'sending') return
     void sendMessage(draft)
-    setDraft('')
   }
 
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
@@ -148,8 +162,12 @@ function ChatView(): ReactElement {
           {conversation?.modelId ? <span className="sub">{conversation.modelId}</span> : null}
         </div>
       </header>
-      <div className="history">
-        {messages.map((message) => (
+      <div className="history" onScroll={e => {
+        const el = e.currentTarget
+        followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+        setShowJump(!followBottom.current)
+      }}>
+        {messages.filter(m => !streaming || m.status !== 'streaming').map((message) => (
           <MessageBubble key={message.id} message={message} />
         ))}
         {activeStreams.map(([streamId, stream]) => (
@@ -161,19 +179,23 @@ function ChatView(): ReactElement {
         ))}
         <div ref={bottomRef} />
       </div>
+      {showJump ? <button type="button" onClick={() => { followBottom.current = true; bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }}>Jump to latest ↓</button> : null}
       <ApprovalCards />
       <footer className="composer">
+        {pendingSend?.error ? <p role="alert" className="error">{pendingSend.error} Your draft is kept. Use Send to retry.</p> : null}
+        {!online ? <p role="status">Offline — your draft is saved on this device.</p> : null}
         {streaming ? (
-          <button type="button" className="stop" onClick={() => void stopStream(activeStreams[0][0])}>
+          <button type="button" disabled={!online} className="stop" onClick={() => void stopStream(activeStreams[0][0])}>
             Stop generating
           </button>
-        ) : (
+        ) : null}
           <div className="input-row">
             <textarea
               value={draft}
               rows={1}
-              placeholder="Message Grasberg…"
-              onChange={(e) => setDraft(e.target.value)}
+              aria-label="Message"
+              placeholder={streaming ? 'Queue a follow-up…' : 'Message Grasberg…'}
+              onChange={(e) => { if (currentId) setDraft(currentId, e.target.value) }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
@@ -181,15 +203,15 @@ function ChatView(): ReactElement {
                 }
               }}
             />
-            <button type="button" className="send" disabled={!draft.trim()} onClick={submit}>
-              ↑
+            <button type="button" aria-label="Send message" className="send" disabled={!online || !draft.trim() || pendingSend?.status === 'sending'} onClick={submit}>
+              {pendingSend?.status === 'sending' ? '…' : '↑'}
             </button>
           </div>
-        )}
         {!streaming && lastAssistant ? (
           <button
             type="button"
             className="regen"
+            disabled={!online || pendingSend?.status === 'sending'}
             onClick={() => void regenerate(lastAssistant.id)}
           >
             Regenerate
@@ -205,11 +227,12 @@ function ConversationList(): ReactElement {
   const loading = useMobileStore((s) => s.conversationsLoading)
   const openConversation = useMobileStore((s) => s.openConversation)
   const newConversation = useMobileStore((s) => s.newConversation)
+  const online = useMobileStore((s) => s.tunnelState === 'online')
   return (
     <div className="list">
       <header className="topbar">
         <strong>Grasberg</strong>
-        <button type="button" className="primary" onClick={() => void newConversation()}>
+        <button type="button" className="primary" disabled={!online} onClick={() => void newConversation()}>
           + New
         </button>
       </header>
@@ -233,7 +256,7 @@ function ConversationList(): ReactElement {
   )
 }
 
-function Gate({ children }: { children: ReactElement }): ReactElement {
+function Gate({ children }: { children: ReactNode }): ReactNode {
   const state = useMobileStore((s) => s.tunnelState)
   const error = useMobileStore((s) => s.tunnelError)
   const forgetDevice = useMobileStore((s) => s.forgetDevice)
@@ -266,6 +289,9 @@ function Gate({ children }: { children: ReactElement }): ReactElement {
 }
 
 export default function App(): ReactElement {
+  const capabilities = useMobileStore(s => s.capabilities)
+  const [showCompact, setShowCompact] = useState(false)
+  const host = useMemo(() => ({ request: requestRemote, subscribe: subscribeRemote, capabilities: () => useMobileStore.getState().capabilities!, draftKey: `grasberg.remote-draft.${loadIdentity()?.deviceId ?? 'unpaired'}` }), [])
   const state = useMobileStore((s) => s.tunnelState)
   const currentId = useMobileStore((s) => s.currentId)
   const toast = useMobileStore((s) => s.toast)
@@ -277,16 +303,14 @@ export default function App(): ReactElement {
     void init()
   }, [init])
 
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 4000)
-    return () => clearTimeout(timer)
-  }, [toast, setToast])
+  if (capabilities?.access === 'full' && !showCompact && !['unpaired', 'pairing', 'error'].includes(state)) return <Suspense fallback={<p role="status">Loading full app…</p>}><FullApp host={host} online={state === 'online'} onLeave={() => setShowCompact(true)} /></Suspense>
 
   return (
     <div className="app" data-state={state}>
-      {toast ? <div className="toast">{toast}</div> : null}
+      {toast ? <div className="toast" role="alert">{toast}<button type="button" aria-label="Dismiss notification" onClick={() => setToast(null)}>×</button></div> : null}
       <Gate>
+        {capabilities?.access === 'full' && <button type="button" onClick={() => setShowCompact(false)}>Open full app</button>}
+        {capabilities?.access === 'limited' && <p className="statusbar">Limited access. Enable full access for this device in desktop Settings → Bridges.</p>}
         {currentId ? (
           <ChatView />
         ) : (

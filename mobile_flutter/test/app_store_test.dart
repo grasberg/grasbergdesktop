@@ -3,6 +3,7 @@
 // reduction rules for every push channel the phone acts on.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'dart:async';
 import 'package:grasberg_mobile/models/models.dart';
 import 'package:grasberg_mobile/state/app_store.dart';
 import 'package:grasberg_mobile/state/channels.dart';
@@ -40,6 +41,76 @@ Map<String, Object?> envelopeJson(Map<String, dynamic> event, {String streamId =
     };
 
 void main() {
+  test('failed sends retain drafts and reuse the same id without duplicate clicks', () async {
+    final delivery = Completer<IpcResult<Object?>>();
+    final requests = <List<Object?>>[];
+    final store = AppStore(identityStore: FakeIdentityStore(), requestOverride: (channel, args) async {
+      requests.add(args);
+      return requests.length == 1 ? delivery.future : IpcResult.ok({'queued': true, 'userMessage': {'id': 'u', 'role': 'user'}});
+    });
+    store.currentId = 'c'; store.setDraft('c', 'hello');
+    final first = store.sendMessage('hello');
+    expect(await store.sendMessage('hello'), isFalse);
+    delivery.complete(IpcResult.err(IpcError(code: 'network', message: 'offline', retryable: true)));
+    expect(await first, isFalse);
+    expect(store.drafts['c'], 'hello');
+    expect(await store.sendMessage('hello'), isTrue);
+    expect((requests[0][0] as Map)['clientRequestId'], (requests[1][0] as Map)['clientRequestId']);
+    expect(store.drafts['c'], isNull);
+    store.dispose();
+  });
+
+  test('pending recovery replays settlements and new questions received in flight', () async {
+    final snapshot = Completer<IpcResult<Object?>>();
+    final store = AppStore(identityStore: FakeIdentityStore(), requestOverride: (_, _) => snapshot.future);
+    final recovery = store.syncPending();
+    await Future<void>.delayed(Duration.zero);
+    store.handlePush(Channels.toolApprovalSettled, 'old');
+    store.handlePush(Channels.userQuestionRequest, {'requestId': 'new', 'question': 'Continue?'});
+    snapshot.complete(IpcResult.ok({'approvals': [{'requestId': 'old'}], 'questions': []}));
+    await recovery;
+    expect(store.approvals, isEmpty);
+    expect(store.questions.single.requestId, 'new');
+    store.dispose();
+  });
+
+  test('a terminal event before the send reply never leaves a ghost stream', () {
+    final store = makeStore();
+    store.handlePush(Channels.streamEvent, envelopeJson({'type': 'done'}));
+    store.applySendResult('conv-1', {'streamId': 's1', 'userMessage': {'id': 'u'}, 'assistantMessage': {'id': 'a'}});
+    expect(store.streams, isEmpty);
+    store.dispose();
+  });
+
+  test('queued sends keep one user message and adopt the drained stream', () {
+    final store = makeStore();
+    store.currentId = 'conv-1';
+    final reply = <String, Object?>{'queued': true, 'userMessage': {'id': 'u', 'role': 'user', 'content': 'queued'}};
+    store.applySendResult('conv-1', reply);
+    store.applySendResult('conv-1', reply);
+    expect(store.messages.map((m) => m.id).toList(), ['u']);
+    expect(store.streams, isEmpty);
+    store.handlePush(Channels.streamEvent, envelopeJson({'type': 'text-delta', 'text': 'Reply'}));
+    expect(store.streams['s1']!.text, 'Reply');
+    store.currentId = 'elsewhere';
+    store.messages = [];
+    store.applySendResult('conv-1', reply);
+    expect(store.messages, isEmpty);
+    store.dispose();
+  });
+
+  test('normal send replies deduplicate pushes and preserve early deltas', () {
+    final store = makeStore();
+    store.currentId = 'conv-1';
+    store.handlePush(Channels.streamEvent, envelopeJson({'type': 'text-delta', 'text': 'Early'}));
+    final reply = <String, Object?>{'streamId': 's1', 'userMessage': {'id': 'u'}, 'assistantMessage': {'id': 'a'}};
+    store.applySendResult('conv-1', reply);
+    store.applySendResult('conv-1', reply);
+    expect(store.messages.map((m) => m.id).toList(), ['u', 'a']);
+    expect(store.streams['s1']!.text, 'Early');
+    store.dispose();
+  });
+
   group('AppStore push handling', () {
     test('__hello__ records the desktop version', () {
       final store = makeStore();
@@ -153,7 +224,7 @@ void main() {
       store.dispose();
     });
 
-    test('respondApproval removes the card even when the answer fails to send',
+    test('respondApproval keeps the card when the answer fails to send',
         () async {
       final store = makeStore();
       store.approvals = [
@@ -167,7 +238,7 @@ void main() {
         ),
       ];
       await store.respondApproval('r1', false);
-      expect(store.approvals, isEmpty);
+      expect(store.approvals.single.requestId, 'r1');
       // No tunnel → the respond request failed → user sees why.
       expect(store.toast, isNotNull);
       store.dispose();

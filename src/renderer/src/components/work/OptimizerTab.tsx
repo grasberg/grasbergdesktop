@@ -6,10 +6,11 @@
  * rolled back and logged in the experiment log).
  */
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type { ExperimentEntry, OptimizerRun } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import { useOptimizerStore } from '@/stores/optimizer'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
 function statusBadge(run: OptimizerRun): ReactElement {
   const cls =
@@ -110,6 +111,11 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
   const [allowShell, setAllowShell] = useState(false)
   const [busy, setBusy] = useState(false)
   const [experiments, setExperiments] = useState<ExperimentEntry[]>([])
+  const snapshot = JSON.stringify({ goal, evalCommand, testCommand, maxRounds, direction, allowShell })
+  const latestSnapshot = useRef(snapshot)
+  latestSnapshot.current = snapshot
+  const [baseline, setBaseline] = useState(snapshot)
+  const guard = useUnsavedChanges(snapshot !== baseline)
 
   useEffect(() => {
     if (!loaded) void load()
@@ -154,6 +160,7 @@ export default function OptimizerTab({ projectId }: { projectId: string | null }
       direction,
       allowShell,
     })
+      .then(run => { if (run) { setBaseline(snapshot); if (latestSnapshot.current === snapshot) guard.markSaved() } })
       .finally(() => setBusy(false))
   }
 

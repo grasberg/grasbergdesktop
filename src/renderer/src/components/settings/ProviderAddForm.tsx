@@ -7,6 +7,7 @@ import { presetMeta, presetMetaList } from '@shared/presets'
 import { errorMessage } from '@/api/uld'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
 const CUSTOM = '__custom__'
 
@@ -59,6 +60,11 @@ export function ProviderAddForm(props: {
   const [models, setModels] = useState<ModelInfo[] | null>(null)
   const [loadingModels, setLoadingModels] = useState(false)
   const [customModel, setCustomModel] = useState(false)
+  const [modelSearch, setModelSearch] = useState('')
+  const [createdProvider, setCreatedProvider] = useState<ProviderConfig | null>(null)
+  const [step, setStep] = useState('')
+  const [edited, setEdited] = useState(false)
+  const guard = useUnsavedChanges(edited || !!apiKey || !!createdProvider, 'settings')
 
   const familyMeta = types.find((t) => t.type === type)
   const presetEntry = presetId ? presetMeta(presetId) : undefined
@@ -109,7 +115,7 @@ export function ProviderAddForm(props: {
   async function loadModels(): Promise<void> {
     setLoadingModels(true)
     try {
-      const res = await window.uld.providers.previewModels({
+      const res = createdProvider && !apiKey.trim() ? await window.uld.providers.listModels(createdProvider.id) : await window.uld.providers.previewModels({
         type,
         baseUrl: baseUrl.trim() || undefined,
         apiKey: apiKey.trim() || undefined,
@@ -141,6 +147,7 @@ export function ProviderAddForm(props: {
 
   async function submit(e: FormEvent) {
     e.preventDefault()
+    if (saving) return
     setFormError(null)
     if (!label.trim()) {
       setFormError('Name is required.')
@@ -153,44 +160,53 @@ export function ProviderAddForm(props: {
     }
     setSaving(true)
     try {
-      const created = await create({
+      setStep('Saving provider…')
+      const input = {
         type,
         label: label.trim(),
         baseUrl: baseUrl.trim() || undefined,
         defaultModelId: defaultModelId.trim() || undefined,
         authMode,
         presetId: presetId ?? undefined,
-      })
-      if (isOauth) {
-        toast(`${created.label} added — click "Sign in with ChatGPT" to connect`, 'success')
-        props.onCreated?.(created)
-        return
       }
-      const key = apiKey.trim()
-      setApiKey('')
-      if (key) {
-        try {
-          await setKey(created.id, key)
-        } catch (keyError) {
-          toast(`Provider added, but saving the API key failed: ${errorMessage(keyError)}`, 'error')
+      if (createdProvider) await useProvidersStore.getState().update(createdProvider.id, { label: input.label, baseUrl: input.baseUrl, defaultModelId: input.defaultModelId })
+      const created = createdProvider ? useProvidersStore.getState().providers.find(p => p.id === createdProvider.id)! : await create(input)
+      setCreatedProvider(created)
+      if (isOauth) {
+        if (!created.oauthConnected) {
+          setStep('Complete Sign in with ChatGPT in the browser…')
+          await useProvidersStore.getState().oauthStart(created.id)
         }
       }
-      toast(`${created.label} added`, 'success')
-      props.onCreated?.(created)
+      const key = apiKey.trim()
+      if (key && !isOauth) {
+          await setKey(created.id, key)
+          setApiKey('')
+      }
+      setStep('Testing the selected model…')
+      const test = await useProvidersStore.getState().test(created.id)
+      if (!test.ok) throw new Error(test.message)
+      guard.markSaved()
+      toast(`${created.label} connected — ${test.message}`, 'success')
+      props.onCreated?.(useProvidersStore.getState().providers.find(p => p.id === created.id) ?? created)
     } catch (createError) {
       setFormError(errorMessage(createError))
     } finally {
       setSaving(false)
+      setStep('')
     }
   }
 
   return (
-    <form className="provider-form card" onSubmit={submit}>
+    <form className="provider-form card" onSubmit={submit} onChange={() => setEdited(true)}>
+      <p className="field-hint">1. Choose provider · 2. Enter credentials · 3. Select and test a model. The connection test may incur a small provider charge.</p>
+      <fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'contents' }}>
       <div className="settings-field">
         <label className="field-label" htmlFor="prov-add-type">
           Provider
         </label>
         <select
+          disabled={!!createdProvider}
           id="prov-add-type"
           className="select"
           value={presetId ? `preset:${presetId}` : `family:${type}`}
@@ -225,6 +241,7 @@ export function ProviderAddForm(props: {
           </label>
           <select
             id="prov-add-auth"
+            disabled={!!createdProvider}
             className="select"
             value={authMode}
             onChange={(e) => {
@@ -242,7 +259,7 @@ export function ProviderAddForm(props: {
           {isOauth ? (
             <span className="field-hint">
               Uses your ChatGPT subscription via an unofficial login. It may stop working without
-              notice. You&apos;ll sign in from the provider row after adding it.
+              notice. Connect opens the sign-in window on your desktop.
             </span>
           ) : null}
         </div>
@@ -279,6 +296,7 @@ export function ProviderAddForm(props: {
         <label className="field-label" htmlFor="prov-add-model">
           Default model
         </label>
+        {models && models.length > 0 && <input className="input" type="search" aria-label="Search available models" placeholder="Search available models…" value={modelSearch} onChange={e => setModelSearch(e.target.value)} />}
         {models && models.length > 0 ? (
           <select
             id="prov-add-model-select"
@@ -294,7 +312,7 @@ export function ProviderAddForm(props: {
               setDefaultModelId(e.target.value)
             }}
           >
-            {models.map((m) => (
+            {models.filter(m => m.id === defaultModelId || `${m.id} ${m.label}`.toLowerCase().includes(modelSearch.toLowerCase())).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label ?? m.id}
               </option>
@@ -332,8 +350,7 @@ export function ProviderAddForm(props: {
 
       {isOauth ? (
         <p className="field-hint">
-          No API key needed — after adding this provider, open it and choose{' '}
-          <strong>Sign in with ChatGPT</strong> to connect your subscription.
+          No API key needed. Connect opens <strong>Sign in with ChatGPT</strong> in the browser, then tests your chosen model.
         </p>
       ) : (
         <div className="settings-field">
@@ -361,19 +378,21 @@ export function ProviderAddForm(props: {
         </div>
       )}
 
+      </fieldset>
+      {step && <p role="status">{step}</p>}
       {formError ? (
         <p className="form-error" role="alert">
-          {formError}
+          {formError}{createdProvider && ' The provider is saved. Correct the credentials or model and retry; this will update the same provider.'}
         </p>
       ) : null}
 
       <div className="form-actions">
         <button type="submit" className="btn btn-primary" disabled={saving}>
           {saving ? <span className="spinner" aria-hidden="true" /> : null}
-          {props.submitLabel ?? 'Add provider'}
+          {saving ? 'Connecting…' : createdProvider ? 'Retry connection test' : props.submitLabel ?? 'Connect and test'}
         </button>
         {props.onCancel ? (
-          <button type="button" className="btn btn-ghost" onClick={props.onCancel} disabled={saving}>
+          <button type="button" className="btn btn-ghost" onClick={() => guard.discard(props.onCancel!)} disabled={saving}>
             Cancel
           </button>
         ) : null}

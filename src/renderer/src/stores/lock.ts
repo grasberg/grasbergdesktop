@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { toNormalized, unwrap } from '@/api/uld'
 import type { LockStoreState } from './contracts'
 import { toastError } from './ui'
+import { forgetCachedDrafts } from '@/lib/chat-drafts'
 
 /**
  * App lock (v45). While `status.locked` the App renders only the LockScreen;
@@ -15,6 +16,7 @@ export const useLockStore = create<LockStoreState>()((set, get) => ({
   async load() {
     try {
       const status = await unwrap(window.uld.lock.status())
+      if (status.locked) forgetCachedDrafts()
       set({ status })
     } catch {
       // lock:status is lock-gate-exempt; a failure here means IPC itself is
@@ -36,6 +38,7 @@ export const useLockStore = create<LockStoreState>()((set, get) => ({
   async lockNow() {
     try {
       const status = await unwrap(window.uld.lock.lockNow())
+      if (status.locked) forgetCachedDrafts()
       set({ status })
     } catch (e) {
       toastError('Could not lock', e)
@@ -49,6 +52,7 @@ export const useLockStore = create<LockStoreState>()((set, get) => ({
   },
 
   handleChanged(evt) {
+    if (evt.locked) forgetCachedDrafts()
     const current = get().status
     set({
       status: current

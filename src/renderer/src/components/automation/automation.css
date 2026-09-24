@@ -1,0 +1,14 @@
+.automation-view { height: 100%; overflow: auto; padding: clamp(16px, 3vw, 36px); }
+.automation-header, .automation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.automation-header h1 { margin: 0; }
+.automation-header p, .automation-item p { color: var(--text-muted); margin: 8px 0; }
+.automation-toolbar .input { flex: 1; min-width: 180px; }
+.automation-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.automation-list { display: grid; gap: 12px; }
+.automation-item { padding: 18px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; }
+.automation-item h2 { font-size: 17px; margin: 6px 0; }
+.automation-item > details { width: 100%; }
+.automation-item summary { cursor: pointer; padding: 8px 0; }
+.automation-item pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.automation-view .sched-create-form { max-width: 720px; margin-bottom: 24px; }
+@media (max-width: 640px) { .automation-actions .btn { min-height: 42px; } }

@@ -4,6 +4,13 @@
  * to an IpcResult — errors are normalized, never thrown across the boundary.
  */
 
+import { LiveModelCatalog } from '../providers/live-catalog'
+import { redactSecrets } from '../providers/redact'
+import { publishMainEvent as broadcast } from '../events'
+import { currentInvocationPolicy, withInvocationPolicy } from '../invocation-context'
+import { RemoteTransfers, browseDesktop, localSelection, type RemoteDownload } from '../remote/transfers'
+import { botAvatarSchema } from '@shared/schemas'
+
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import {
@@ -125,7 +132,7 @@ import type { OpenAiOAuthManager } from '../providers/openai-oauth'
 import { ProviderError, toNormalizedError } from '../providers/errors'
 import { toJson, toMarkdown, exportFileBase } from '../services/export'
 import { readSkillsFromFolder } from '../services/skills'
-import { applyBackup, buildBackup } from '../services/backup'
+import { BackupImports, buildBackup } from '../services/backup'
 import type { IpcHandler, IpcHandlerMap } from './handler-map'
 import {
   MAX_IMAGE_BASE64_CHARS,
@@ -137,7 +144,7 @@ import {
 import { extractAttachment } from '../attachments/extract'
 import { setOcrCacheDir } from '../attachments/ocr'
 import { copyFile, readFile, writeFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 
 export interface RegisterIpcDeps {
   db: AppDatabase
@@ -370,6 +377,7 @@ const attachmentSchema = z.object({
 })
 
 const chatSendSchema = z.object({
+  clientRequestId: z.string().uuid().optional(),
   conversationId: z.string().min(1),
   content: z.string().max(1_000_000),
   attachments: z.array(attachmentSchema).max(20).optional(),
@@ -680,6 +688,12 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   // Returning the map lets the remote service (phone tunnel) invoke the exact
   // same functions under its own allowlist — one implementation, two transports.
   const handlers: IpcHandlerMap = new Map()
+  const remoteTransfers = new RemoteTransfers()
+  const remoteOwner = (): string => {
+    const owner = currentInvocationPolicy()?.deviceId
+    if (!owner || db.remoteDevices.getActiveById(owner)?.access !== 'full') throw invalid('Full access must be granted on the desktop first.')
+    return owner
+  }
 
   const register = (channel: ChannelName, fn: IpcHandler): void => {
     // Restore the loud guard the old ipcMain.handle path gave for free: a
@@ -694,7 +708,20 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   const dialogParent = (): BrowserWindow | undefined =>
     BrowserWindow.getFocusedWindow() ?? deps.getWindows()[0]
 
-  const showOpen = (options: OpenDialogOptions): Promise<OpenDialogReturnValue> => {
+  const showOpen = async (options: OpenDialogOptions): Promise<OpenDialogReturnValue> => {
+    const policy = currentInvocationPolicy()
+    if (policy) {
+      remoteOwner()
+      if (!policy.selectedPaths) throw invalid('Choose files or a desktop folder on your device first.')
+      const paths = policy.selectedPaths
+      policy.selectedPaths = undefined
+      if (paths.length > 1 && !options.properties?.includes('multiSelections')) throw invalid('Choose one file or folder.')
+      for (const path of paths) {
+        const isFolder = statSync(path).isDirectory()
+        if (isFolder !== !!options.properties?.includes('openDirectory')) throw invalid('The selected item has the wrong type.')
+      }
+      return { canceled: paths.length === 0, filePaths: paths }
+    }
     const parent = dialogParent()
     return parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options)
   }
@@ -709,7 +736,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     defaultPath: string,
     filters: FileFilter[],
     content: string
-  ): Promise<{ canceled: boolean; path?: string }> => {
+  ): Promise<{ canceled: boolean; path?: string; remoteDownload?: RemoteDownload }> => {
+    if (currentInvocationPolicy()) return { canceled: false, path: basename(defaultPath), remoteDownload: remoteTransfers.offer(remoteOwner(), basename(defaultPath), Buffer.from(content, 'utf8')) }
     const result = await showSave({ defaultPath, filters })
     if (result.canceled || !result.filePath) return { canceled: true }
     await writeFile(result.filePath, content, 'utf8')
@@ -721,6 +749,42 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     if (!provider) throw invalid('Provider not found.')
     return provider
   }
+
+  register(CHANNELS.remoteUploadBegin, input => {
+    const p = parseInput(z.object({ name: z.string().min(1).max(200), size: z.number().int().min(0).max(64 * 1024 * 1024) }).strict(), input)
+    return remoteTransfers.begin(remoteOwner(), p.name, p.size)
+  })
+  register(CHANNELS.remoteUploadChunk, input => {
+    const p = parseInput(z.object({ id: z.string().uuid(), offset: z.number().int().min(0), data: z.string().max(174_764) }).strict(), input)
+    return remoteTransfers.chunk(remoteOwner(), p.id, p.offset, p.data)
+  })
+  register(CHANNELS.remoteUploadFinish, input => {
+    const p = parseInput(z.object({ id: z.string().uuid(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict(), input)
+    return remoteTransfers.finish(remoteOwner(), p.id, p.sha256)
+  })
+  register(CHANNELS.remoteTransferCancel, id => remoteTransfers.cancel(remoteOwner(), parseInput(z.string().uuid(), id)))
+  register(CHANNELS.remoteDownloadRead, input => {
+    const p = parseInput(z.object({ id: z.string().uuid(), offset: z.number().int().min(0) }).strict(), input)
+    return remoteTransfers.read(remoteOwner(), p.id, p.offset)
+  })
+  register(CHANNELS.remoteBrowse, input => {
+    remoteOwner()
+    const p = parseInput(z.object({ path: z.string().max(2000).optional(), includeFiles: z.boolean().optional() }).strict(), input ?? {})
+    return browseDesktop(p.path, p.includeFiles)
+  })
+  const fileDialogChannels = new Set<ChannelName>([CHANNELS.appPickFolder, CHANNELS.appPickFiles, CHANNELS.backupPreview, CHANNELS.agentPackImport, CHANNELS.kbImportFiles, CHANNELS.voicePickBinary])
+  register(CHANNELS.remoteFileInvoke, async input => {
+    const owner = remoteOwner()
+    const p = parseInput(z.object({ channel: z.string(), args: z.array(z.unknown()).max(3), uploadIds: z.array(z.string().uuid()).max(20).optional(), paths: z.array(z.string().max(2000)).max(20).optional() }).strict(), input)
+    const channel = p.channel as ChannelName
+    if (!fileDialogChannels.has(channel) || (!!p.uploadIds === !!p.paths)) throw invalid('Unsupported file operation.')
+    if (p.uploadIds && (channel === CHANNELS.appPickFolder || channel === CHANNELS.voicePickBinary)) throw invalid('Select an existing desktop path for this action.')
+    const run = async (paths: string[]) => {
+      remoteOwner() // The grant may have changed while files were being prepared.
+      return withInvocationPolicy({ ...currentInvocationPolicy()!, selectedPaths: paths }, async () => handlers.get(channel)!(...p.args))
+    }
+    return p.uploadIds ? remoteTransfers.withFiles(owner, p.uploadIds, run) : run(await Promise.all(p.paths!.map(localSelection)))
+  })
 
   // -- app --------------------------------------------------------------------
 
@@ -778,6 +842,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       parsed.suggestedName && /^[^\\/:*?"<>|]+$/.test(parsed.suggestedName)
         ? parsed.suggestedName
         : parsed.storageKey
+    if (currentInvocationPolicy()) return { canceled: false, path: defaultName, remoteDownload: remoteTransfers.offer(remoteOwner(), defaultName, await readFile(join(deps.attachmentsDir, parsed.storageKey))) }
     const result = await showSave({
       defaultPath: defaultName,
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
@@ -928,36 +993,22 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     }
   })
 
+  const liveModelCatalog = new LiveModelCatalog(join(app.getPath('userData'), 'models-catalog.json'))
+
   register(CHANNELS.providersListModels, async (id) => {
     const provider = requireProvider(id)
-    const modelCatalog = resolveModelCatalog(provider)
     if (provider.authMode === 'chatgpt_oauth') {
-      // Model list is static for the ChatGPT backend; no key needed.
+      // OAuth model visibility is account-specific; never mix in the API-key catalog.
+      let token: { accessToken: string; accountId?: string | null } | undefined
+      try { token = await oauthManager.getAccessToken(provider.id) } catch { /* Signed out: offline fallback. */ }
       return resolveAdapter(provider.type, provider.authMode).listModels({
-        apiKey: '',
-        baseUrl: provider.baseUrl,
-        modelCatalog,
+        apiKey: token?.accessToken ?? '', accountId: token?.accountId, baseUrl: provider.baseUrl,
       })
     }
     const encrypted = db.providers.getEncryptedKey(provider.id)
-    // No key yet: loopback servers (Ollama, LM Studio, …) list models keyless;
-    // everything else falls back to the catalog (family or preset) instead of
-    // failing.
-    if (!encrypted) {
-      if (provider.type === 'openai-compatible' && isLoopbackBaseUrl(provider.baseUrl)) {
-        try {
-          return await getAdapter(provider.type).listModels({
-            apiKey: KEYLESS_API_KEY,
-            baseUrl: provider.baseUrl,
-            modelCatalog,
-          })
-        } catch {
-          return modelCatalog.knownModels
-        }
-      }
-      return modelCatalog.knownModels
-    }
-    const apiKey = keystore.decryptKey(encrypted)
+    const apiKey = encrypted ? keystore.decryptKey(encrypted)
+      : provider.type === 'openai-compatible' && isLoopbackBaseUrl(provider.baseUrl) ? KEYLESS_API_KEY : ''
+    const modelCatalog = await liveModelCatalog.resolve(provider)
     return getAdapter(provider.type).listModels({ apiKey, baseUrl: provider.baseUrl, modelCatalog })
   })
 
@@ -965,22 +1016,15 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     const parsed = parseInput(previewModelsSchema, req)
     const meta = PROVIDER_TYPES[parsed.type]
     const authMode = parsed.authMode ?? 'api_key'
-    const modelCatalog = resolveModelCatalog({ type: parsed.type, presetId: parsed.presetId ?? null })
     const baseUrl = parsed.baseUrl?.trim() || meta.defaultBaseUrl
-    // Never send the key to a plaintext remote endpoint.
     if (baseUrl && !isAllowedHttpUrl(baseUrl)) {
       throw invalid('Base URL must use https:// (http:// is only allowed for localhost).')
     }
-    const apiKey = parsed.apiKey?.trim() ?? ''
-    try {
-      // OAuth returns its static Codex list (no key); listing families fetch
-      // /models with the ad-hoc key; the rest return their static catalog.
-      return await resolveAdapter(parsed.type, authMode).listModels({ apiKey, baseUrl, modelCatalog })
-    } catch {
-      // Bad key / unreachable / no /models: fall back to the known catalog so the
-      // user can still pick a model (or type a custom id).
-      return modelCatalog.knownModels
-    }
+    const modelCatalog = authMode === 'chatgpt_oauth' ? undefined
+      : await liveModelCatalog.resolve({ type: parsed.type, presetId: parsed.presetId ?? null })
+    // Preview never treats an API-key form value as a ChatGPT access token.
+    const apiKey = authMode === 'chatgpt_oauth' ? '' : parsed.apiKey?.trim() ?? ''
+    return resolveAdapter(parsed.type, authMode).listModels({ apiKey, baseUrl, modelCatalog })
   })
 
   // Read-only loopback probe (Ollama/LM Studio/Jan/llama.cpp) for the
@@ -1057,6 +1101,19 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   register(CHANNELS.convMessages, (conversationId) =>
     db.messages.listByConversation(requireString(conversationId, 'Conversation id'))
   )
+
+  const draftSchema = z.object({ text: z.string().max(1_000_000), attachments: z.array(attachmentSchema).max(20), pendingSend: z.object({ id: z.string().uuid(), fingerprint: z.string().max(2_000_000) }).optional() })
+  register(CHANNELS.convDraftGet, (id) => {
+    const conversationId = requireString(id, 'Conversation id')
+    found(db.conversations.getById(conversationId), 'Conversation')
+    const row = db.driver.get<{ draft_json: string }>('SELECT draft_json FROM conversation_drafts WHERE conversation_id = ?', [conversationId])
+    return row ? parseInput(draftSchema, JSON.parse(row.draft_json)) : null
+  })
+  register(CHANNELS.convDraftSave, (input) => {
+    const { conversationId, draft } = parseInput(z.object({ conversationId: z.string().min(1), draft: draftSchema }), input)
+    found(db.conversations.getById(conversationId), 'Conversation')
+    db.driver.run('INSERT INTO conversation_drafts (conversation_id, draft_json) VALUES (?, ?) ON CONFLICT(conversation_id) DO UPDATE SET draft_json = excluded.draft_json', [conversationId, JSON.stringify(draft)])
+  })
 
   register(CHANNELS.convExport, async (req) => {
     const parsed = parseInput(convExportSchema, req)
@@ -1277,7 +1334,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     }
     // queueIfBusy (v47): a send into a busy conversation persists + queues the
     // message instead of erroring; one coalesced turn drains after completion.
-    return chatService.send({ ...parsed, content }, { queueIfBusy: true })
+    return chatService.sendIdempotent({ ...parsed, content })
   })
 
   register(CHANNELS.chatStop, (streamId) => {
@@ -1762,6 +1819,10 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   // expired requestIds are ignored by the broker (still resolves ok). Scope
   // 'conversation' additionally auto-approves the tool's future calls in the
   // same conversation (in-memory, this app session only).
+  register(CHANNELS.toolsPending, () => ({
+    approvals: approvalBroker.snapshot(), questions: questionBroker.snapshot(),
+  }))
+
   register(CHANNELS.toolsApprovalRespond, (requestId, approved, scope) => {
     approvalBroker.respond(requireString(requestId, 'Request id'), {
       approved: requireBoolean(approved, 'approved'),
@@ -2016,29 +2077,33 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
       `grasberg-backup-${date}.json`,
       [{ name: 'JSON', extensions: ['json'] }],
       JSON.stringify(
-        buildBackup(db, { includePrivateSpaces: parsed?.includePrivateSpaces === true }),
+        buildBackup(db, { includePrivateSpaces: !currentInvocationPolicy() && parsed?.includePrivateSpaces === true }),
         null,
         2
       )
     )
   })
 
-  register(CHANNELS.backupImport, async () => {
+  const backupImports = new BackupImports(db)
+  const prepareBackupImport = async () => {
     const result = await showOpen({
       properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }],
     })
-    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
-    let raw: unknown
-    try {
-      raw = JSON.parse(await readFile(result.filePaths[0], 'utf8'))
-    } catch {
-      throw invalid('The selected file is not valid JSON.')
-    }
-    return asInvalid(
-      () => ({ canceled: false, ...applyBackup(db, raw) }),
-      'Could not import the backup.'
-    )
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true as const }
+    const path = result.filePaths[0]
+    if (statSync(path).size > 64 * 1024 * 1024) throw invalid('Backups must be 64 MB or smaller.')
+    const json = await readFile(path, 'utf8')
+    return asInvalid(() => ({ canceled: false as const, ...backupImports.prepare(json, basename(path), currentInvocationPolicy()?.deviceId ?? 'desktop') }), 'Could not preview the backup.')
+  }
+  register(CHANNELS.backupPreview, prepareBackupImport)
+  register(CHANNELS.backupCommit, (id) => asInvalid(() => backupImports.commit(parseInput(z.string().uuid(), id), currentInvocationPolicy()?.deviceId ?? 'desktop'), 'Could not import the backup.'))
+  register(CHANNELS.backupImport, async () => {
+    const preview = await prepareBackupImport()
+    if (preview.canceled) return preview
+    const answer = await dialog.showMessageBox({ type: 'question', title: 'Review backup import', message: `Import ${preview.filename}?`, detail: `${preview.counts.conversationsImported} new conversations, ${preview.counts.memoriesImported} memories, ${preview.counts.skillsImported} skills, ${preview.counts.promptsImported} prompts, ${preview.counts.workflowsImported} workflows and ${preview.counts.settingsApplied} settings. Named memories and skills may be replaced. Keys and security settings are excluded.`, buttons: ['Cancel', 'Import'], defaultId: 0, cancelId: 0 })
+    if (answer.response !== 1) return { canceled: true }
+    return { canceled: false, ...backupImports.commit(preview.id) }
   })
 
   // -- MCP servers ------------------------------------------------------------
@@ -2120,6 +2185,11 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   })
 
   register(CHANNELS.remoteStatus, () => remote().status())
+  register(CHANNELS.remoteDeviceAccess, input => {
+    if (currentInvocationPolicy()) throw invalid('Device access can only be granted on the desktop.')
+    const parsed = parseInput(z.object({ deviceId: z.string().uuid(), access: z.enum(['limited', 'full']) }).strict(), input)
+    return remote().setDeviceAccess(parsed.deviceId, parsed.access)
+  })
 
   register(CHANNELS.remoteSetConfig, (input) =>
     remote().setConfig(parseInput(remoteSetConfigSchema, input))
@@ -2415,11 +2485,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   }
 
   const signalScheduledTasksChanged = (event: ScheduledTasksChangedEvent): void => {
-    for (const win of deps.getWindows()) {
-      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-        win.webContents.send(CHANNELS.scheduledTasksChanged, event)
-      }
-    }
+    broadcast(CHANNELS.scheduledTasksChanged, event)
   }
 
   register(CHANNELS.scheduledTasksList, () => db.scheduledTasks.list())
@@ -2486,13 +2552,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     enabled: z.boolean().optional(),
     // Bot Mode (v46): role title, roster avatar, display-only hidden flag.
     title: z.string().max(200).optional(),
-    avatar: z
-      .object({
-        emoji: z.string().max(16).nullable().optional(),
-        color: z.string().max(32).nullable().optional(),
-      })
-      .nullable()
-      .optional(),
+    avatar: botAvatarSchema.nullable().optional(),
     hidden: z.boolean().optional(),
     // Bot gateway (v47): heartbeat, auto-compact policy, messaging allowlist.
     heartbeat: z
@@ -2639,10 +2699,11 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     requireBots().deleteGroup(requireString(id, 'Group id'))
     return undefined
   })
-  register(CHANNELS.botGroupSend, (groupId, content) => {
+  register(CHANNELS.botGroupSend, (groupId, content, requestId) => {
     requireBots().groupSend(
       requireString(groupId, 'Group id'),
-      requireString(content, 'Message')
+      requireString(content, 'Message'),
+      parseInput(z.string().uuid().optional(), requestId)
     )
     return undefined
   })
@@ -2797,7 +2858,26 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   })
 
   register(CHANNELS.kbList, () => db.knowledge.list())
-  register(CHANNELS.kbCreate, (input) => db.knowledge.create(parseInput(kbInputSchema, input)))
+  register(CHANNELS.kbProviders, () => db.providers.list().filter(p => p.enabled && !!resolveAdapter(p.type, p.authMode).embed).map(p => ({ id: p.id, label: p.label })))
+  register(CHANNELS.kbCreate, async (input) => {
+    const parsed = parseInput(kbInputSchema, input)
+    // Verify the chosen model before any documents or half-working base are saved.
+    const probe = await chatService.embedTexts(parsed.providerId, parsed.modelId, ['Connection test'])
+    if (probe.length !== 1 || !probe[0]?.length || !probe[0].every(Number.isFinite)) throw invalid('This model did not return a valid embedding. Choose an embedding model, not a chat model.')
+    return db.knowledge.create(parsed)
+  })
+  register(CHANNELS.scheduledTasksUpdate, (id, input) => {
+    const taskId = requireString(id, 'Scheduled task id')
+    const existing = found(db.scheduledTasks.getById(taskId), 'Scheduled task')
+    if (existing.lastStatus === 'running') throw invalid('Wait for this task to finish before editing it.')
+    const parsed = parseInput(scheduledTaskInputSchema, input)
+    if (parsed.runAt !== existing.nextRunAt && parsed.runAt < Date.now() - 60_000) throw invalid('The next run time cannot be in the past.')
+    validateScheduledTaskGrants(parsed)
+    const task = found(db.scheduledTasks.update(taskId, parsed), 'Scheduled task')
+    signalScheduledTasksChanged({ type: 'upsert', task })
+    deps.wakeScheduledTaskScheduler?.()
+    return task
+  })
   register(CHANNELS.kbDelete, (id) => {
     const kbId = requireString(id, 'Knowledge base id')
     db.knowledge.remove(kbId) // chunks cascade
@@ -2817,28 +2897,46 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   // Import: pick files, extract their text (same pipeline as attachments),
   // chunk + embed + store. Images and unreadable files are counted as skipped.
+  const activeKnowledgeImports = new Set<string>()
   register(CHANNELS.kbImportFiles, async (id) => {
     const kbId = requireString(id, 'Knowledge base id')
+    if (activeKnowledgeImports.has(kbId)) throw invalid('An import is already running for this knowledge base.')
+    activeKnowledgeImports.add(kbId)
+    try {
     const result = await showOpen({ properties: ['openFile', 'multiSelections'] })
     if (result.canceled) return { canceled: true, imported: 0, chunks: 0, skipped: 0 }
     let imported = 0
     let chunks = 0
     let skipped = 0
+    const failures: Array<{ source: string; error: string }> = []
+    let file = 0
     for (const filePath of result.filePaths) {
+      file++
+      const progress = (completed: number, total: number) => broadcast(CHANNELS.kbProgress, { kbId, source: basename(filePath), file, totalFiles: result.filePaths.length, completed, total, status: 'embedding' })
+      progress(0, 0)
       // No imageDir: KB import must not copy picked images into the
       // attachments store as a side effect. textContent presence is the
       // "this is readable text" signal (images/binaries never set it).
+      try {
       const attachment = await readAttachment(filePath)
       const text = attachment?.textContent ?? ''
       if (!attachment || !text.trim()) {
         skipped += 1
         continue
       }
-      const added = await deps.knowledgeService.addDocument(kbId, attachment.name, text)
+      const added = await deps.knowledgeService.addDocument(kbId, attachment.name, text, progress)
       imported += 1
       chunks += added.chunks
+      } catch (e) {
+        skipped++
+        failures.push({ source: basename(filePath), error: redactSecrets(e instanceof Error ? e.message : 'Document import failed.') })
+      }
     }
-    return { canceled: false, imported, chunks, skipped }
+    return { canceled: false, imported, chunks, skipped, failures }
+    } finally {
+      activeKnowledgeImports.delete(kbId)
+      broadcast(CHANNELS.kbProgress, { kbId, source: '', file: 0, totalFiles: 0, completed: 0, total: 0, status: 'done' })
+    }
   })
 
   // While the app is locked, the renderer transport serves nothing but the

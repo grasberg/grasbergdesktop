@@ -114,6 +114,7 @@ function makeDeps(
 ) {
   let round = -1
   let commandStep = 0
+  let changed = false
   type StatusResult = {
     isRepo: boolean
     branch: string | null
@@ -128,7 +129,7 @@ function makeDeps(
       status: async (): Promise<StatusResult> => ({
         isRepo: true,
         branch: 'main',
-        staged: [],
+        staged: changed ? [{ path: 'fixture.ts' }] : [],
         unstaged: [],
         untracked: [],
       }),
@@ -137,10 +138,12 @@ function makeDeps(
         return {}
       },
       commit: async (_root: string, message: string) => {
+        changed = false
         gitLog.commits.push(message)
         return { sha: `sha-${gitLog.commits.length}`, branch: 'main' }
       },
       discardAllChanges: async () => {
+        changed = false
         gitLog.discards += 1
       },
       revision: async () => 'base-sha',
@@ -153,6 +156,7 @@ function makeDeps(
       fastForwardWorktree: async () => undefined,
     },
     generate: async () => {
+      changed = true
       round += 1
       return scripted[round]?.output ? `round ${round + 1} summary` : `round ${round + 1} summary`
     },
@@ -172,6 +176,18 @@ function makeDeps(
 }
 
 describe('OptimizerService loop', () => {
+  it('keeps the measured baseline when a model produces no changes', async () => {
+    const project = db!.code.projectUpsertByPath(dir, 'no-op optimizer')
+    const gitLog = { commits: [] as string[], discards: 0, stages: 0 }
+    const deps = makeDeps(Array.from({ length: 4 }, () => ({ exitCode: 0, output: '1' })), gitLog)
+    deps.generate = async () => 'No changes needed.'
+    const service = new OptimizerService(deps)
+    const run = await service.start({ projectId: project.id, goal: 'Check baseline', evalCommand: 'bench', maxRounds: 3 })
+    await vi.waitFor(() => expect(deps.db.optimizer.getById(run.id)?.status).toBe('done'))
+    expect(gitLog.commits).toHaveLength(0)
+    expect(deps.db.optimizer.getById(run.id)).toMatchObject({ bestScore: 1, bestVersion: 0, roundsDone: 3, lastError: null })
+    expect(service.versions(run.id).filter(version => version.seq > 0).every(version => !version.accepted && version.summary.startsWith('No file changes produced.'))).toBe(true)
+  })
   it('commits accepted rounds, rolls back rejected ones, updates the ledger', async () => {
     const project = db!.code.projectUpsertByPath(dir, 'optimizer')
     const gitLog = { commits: [], discards: 0, stages: 0 }

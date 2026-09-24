@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AdapterMessage } from '../../../src/main/providers/adapter'
 import {
   OpenAICodexAdapter,
@@ -63,7 +63,7 @@ describe('toolsToResponses + buildResponsesBody', () => {
       {
         modelId: 'gpt-5',
         messages: [{ role: 'user', content: 'hi' }],
-        params: { maxTokens: 42, temperature: 0.5 },
+        params: { maxTokens: 42, temperature: 0.5, topP: 0.9 },
         tools: [{ name: 'get', description: 'd', parameters: { type: 'object' } }],
         stream: true,
       },
@@ -73,11 +73,38 @@ describe('toolsToResponses + buildResponsesBody', () => {
       model: 'gpt-5',
       stream: true,
       store: false,
-      max_output_tokens: 42,
-      temperature: 0.5,
       tool_choice: 'auto',
     })
     expect(Array.isArray(body.input)).toBe(true)
+    expect(body).not.toHaveProperty('max_output_tokens')
+    expect(body).not.toHaveProperty('temperature')
+    expect(body).not.toHaveProperty('top_p')
+  })
+})
+
+describe('Codex connection probe', () => {
+  it('passes a backend that rejects unsupported parameters and requires streaming', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      const unsupported = ['max_output_tokens', 'temperature', 'top_p'].find((key) => key in body)
+      if (unsupported) {
+        return new Response(JSON.stringify({ detail: `Unsupported parameter: ${unsupported}` }), { status: 400 })
+      }
+      if (body.stream !== true || body.store !== false) {
+        return new Response(JSON.stringify({ detail: 'Streaming without storage is required' }), { status: 400 })
+      }
+      return new Response(
+        'data: {"type":"response.output_text.delta","delta":"pong"}\n\n' +
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } }
+      )
+    })
+    const result = await new OpenAICodexAdapter().testConnection({
+      apiKey: 'test-oauth-token', accountId: 'test-account', baseUrl: 'https://api.openai.com/v1', fetchImpl,
+    })
+    expect(result.ok).toBe(true)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://chatgpt.com/backend-api/codex/responses')
   })
 })
 

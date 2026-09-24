@@ -31,7 +31,7 @@ export interface SimpleListActions<Input, Patch> {
 export function createSimpleListActions<Item, Input, Patch>(opts: {
   /** Entity plural for the load-failure toast, e.g. 'prompts'. */
   label: string
-  api: SimpleListApi<Item, Input, Patch>
+  api: () => SimpleListApi<Item, Input, Patch>
   /** Commits a loaded list to the store's state key (and marks it loaded). */
   onLoaded: (items: Item[]) => void
   /** Marks the store loaded after a failed load (the toast is shared). */
@@ -40,7 +40,7 @@ export function createSimpleListActions<Item, Input, Patch>(opts: {
   const actions: SimpleListActions<Input, Patch> = {
     async load() {
       try {
-        const items = await unwrap(opts.api.list())
+        const items = await unwrap(opts.api().list())
         opts.onLoaded(items)
       } catch (e) {
         opts.onLoadFailed()
@@ -49,17 +49,17 @@ export function createSimpleListActions<Item, Input, Patch>(opts: {
     },
 
     async create(input) {
-      await unwrap(opts.api.create(input))
+      await unwrap(opts.api().create(input))
       await actions.load()
     },
 
     async update(id, patch) {
-      await unwrap(opts.api.update(id, patch))
+      await unwrap(opts.api().update(id, patch))
       await actions.load()
     },
 
     async remove(id) {
-      await unwrap(opts.api.delete(id))
+      await unwrap(opts.api().delete(id))
       await actions.load()
     },
   }

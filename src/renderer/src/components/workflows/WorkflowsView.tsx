@@ -6,7 +6,7 @@
  * true/false branch (click the edge to flip it).
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import {
   ReactFlow,
   Background,
@@ -38,6 +38,8 @@ import { scheduleLabel } from '@shared/workflow-status'
 import { dateTime } from '@/lib/format'
 import { Switch } from '@/components/common/controls'
 import { useUiStore } from '@/stores/ui'
+import { canLeave, navigateGuarded, useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import { confirmAction } from '@/components/common/ConfirmDialog'
 import './workflows.css'
 
 interface NodeData {
@@ -128,7 +130,11 @@ export default function WorkflowsView(): ReactElement {
   const [nodes, setNodes] = useState<FlowNode[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [mobilePanel, setMobilePanel] = useState<'palette' | 'canvas' | 'inspector'>('canvas')
+  useEffect(() => { if (selectedId) setMobilePanel('inspector') }, [selectedId])
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  const [connectTarget, setConnectTarget] = useState('')
+  useEffect(() => { setConnectTarget('') }, [selectedId])
   const [result, setResult] = useState<WorkflowRunResult | null>(null)
   const [running, setRunning] = useState(false)
   const [wasDryRun, setWasDryRun] = useState(false)
@@ -150,6 +156,18 @@ export default function WorkflowsView(): ReactElement {
   const [budgetUsd, setBudgetUsd] = useState('')
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [agents, setAgents] = useState<AgentProfile[]>([])
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const [loading, setLoading] = useState(false)
+  const loadRevision = useRef(0)
+  useEffect(() => () => { loadRevision.current++ }, [])
+  const snapshot = JSON.stringify({ name, graph: toGraph(nodes, edges), scheduleEnabled, everyMinutes, scheduleKind, scheduleTime, scheduleDays, webhookEnabled, watchEnabled, watchFolder, watchGlob, watchEvent, watchDebounceMs, budgetUsd })
+  const latestSnapshot = useRef(snapshot)
+  latestSnapshot.current = snapshot
+  const [baseline, setBaseline] = useState(snapshot)
+  const [resetRevision, setResetRevision] = useState(0)
+  const { markSaved } = useUnsavedChanges(snapshot !== baseline)
+  useEffect(() => { setBaseline(latestSnapshot.current) }, [resetRevision])
 
   const loadList = useCallback(async () => {
     const res = await window.uld.workflows.list()
@@ -221,6 +239,7 @@ export default function WorkflowsView(): ReactElement {
 
   const addNode = (kind: WorkflowNodeKind, label: string): void => {
     const id = nextId()
+    setSelectedId(id)
     setNodes((ns) => [
       ...ns,
       {
@@ -279,7 +298,8 @@ export default function WorkflowsView(): ReactElement {
     )
   }
 
-  const newWorkflow = (): void => {
+  const newWorkflow = (): void => { if (savingRef.current || running || loading) return; navigateGuarded(() => {
+    loadRevision.current++
     setWorkflowId(null)
     setName('Untitled workflow')
     setNodes([])
@@ -303,10 +323,17 @@ export default function WorkflowsView(): ReactElement {
     setWatchStatus(null)
     setBudgetUsd('')
     setRuns([])
-  }
+    setResetRevision(n => n + 1)
+  }, 'page') }
 
   const openWorkflow = async (id: string): Promise<void> => {
+    if (savingRef.current || running || loading) return
+    if (!(await canLeave('page'))) return
+    const revision = ++loadRevision.current
+    setLoading(true)
+    try {
     const res = await window.uld.workflows.get(id)
+    if (revision !== loadRevision.current) return
     if (res.ok && res.data) {
       const flow = toFlow(res.data.graph)
       setWorkflowId(res.data.id)
@@ -329,12 +356,19 @@ export default function WorkflowsView(): ReactElement {
       setEveryMinutes(String(saved?.kind === 'interval' ? saved.everyMinutes : 60))
       setScheduleTime(saved?.kind === 'calendar' ? saved.time : '08:00')
       setScheduleDays(saved?.kind === 'calendar' ? saved.days : [])
+      setResetRevision(n => n + 1)
       await loadRuns(res.data.id)
-    }
+    } else toast(res.ok ? 'This workflow no longer exists.' : res.error.message, 'error')
+    } catch { toast('Could not open this workflow. Your current editor is still available.', 'error') }
+    finally { if (revision === loadRevision.current) setLoading(false) }
   }
 
   /** Persists the workflow; returns its id (null on failure). */
   const save = async (silent = false): Promise<string | null> => {
+    if (savingRef.current) return null
+    savingRef.current = true
+    setSaving(true)
+    try {
     const minutes = Math.floor(Number(everyMinutes))
     const schedule: WorkflowSchedule | null =
       scheduleKind === 'calendar'
@@ -364,6 +398,8 @@ export default function WorkflowsView(): ReactElement {
       : await window.uld.workflows.create(input)
     if (res.ok) {
       setWorkflowId(res.data.id)
+      setBaseline(snapshot)
+      if (latestSnapshot.current === snapshot) markSaved()
       await loadList()
       void refreshWatchStatus(res.data.id, watchEnabled)
       if (!silent) {
@@ -381,19 +417,24 @@ export default function WorkflowsView(): ReactElement {
     }
     toast(res.error.message, 'error')
     return null
+    } catch { toast('Could not save the workflow. Your changes remain in the editor.', 'error'); return null }
+    finally { savingRef.current = false; setSaving(false) }
   }
 
   const remove = async (): Promise<void> => {
     if (!workflowId) return
+    if (!(await confirmAction('Delete workflow?', `Delete “${name}” and its run history? This cannot be undone.`, 'Delete workflow'))) return
     const res = await window.uld.workflows.delete(workflowId)
     if (res.ok) {
+      markSaved()
       newWorkflow()
       await loadList()
-    }
+    } else toast(res.error.message, 'error')
   }
 
   /** Save & run: executes the saved workflow so the run lands in the history. */
   const run = async (): Promise<void> => {
+    if (running || saving || nodes.length === 0 || issues.some(i => i.level === 'error')) return
     setRunning(true)
     setResult(null)
     setWasDryRun(false)
@@ -415,6 +456,7 @@ export default function WorkflowsView(): ReactElement {
    * to the economy model. Nothing is saved and no run history is recorded.
    */
   const dryRun = async (): Promise<void> => {
+    if (running || saving || nodes.length === 0 || issues.some(i => i.level === 'error')) return
     setRunning(true)
     setResult(null)
     setWasDryRun(true)
@@ -422,7 +464,7 @@ export default function WorkflowsView(): ReactElement {
       const res = await window.uld.workflows.run(toGraph(nodes, edges), { dryRun: true })
       if (res.ok) {
         setResult(res.data)
-        toast('Dry run finished — nothing was sent or delivered.', 'success')
+        toast('Dry run finished. HTTP and notification actions were simulated; AI nodes used the economy model and may incur charges.', 'success')
       } else {
         toast(res.error.message, 'error')
       }
@@ -443,10 +485,10 @@ export default function WorkflowsView(): ReactElement {
   }
 
   return (
-    <div className="workflows">
+    <div className={`workflows workflow-mobile-${mobilePanel}`} aria-busy={loading} inert={loading}>
       <header className="workflows-header">
         <div className="workflows-header-left">
-          <button type="button" className="btn-icon" aria-label="Back" onClick={() => openWorkflows(false)}>
+          <button type="button" className="btn-icon" aria-label="Back" disabled={saving || loading} onClick={() => openWorkflows(false)}>
             ←
           </button>
           <input
@@ -460,6 +502,7 @@ export default function WorkflowsView(): ReactElement {
             value={workflowId ?? ''}
             onChange={(e) => (e.target.value ? void openWorkflow(e.target.value) : newWorkflow())}
             aria-label="Open workflow"
+            disabled={saving || running || loading}
           >
             <option value="">New workflow…</option>
             {saved.map((w) => (
@@ -471,30 +514,34 @@ export default function WorkflowsView(): ReactElement {
           </select>
         </div>
         <div className="workflows-header-actions">
-          <button type="button" className="btn" onClick={() => void save()}>
-            Save
+          <button type="button" className="btn" disabled={saving || running} onClick={() => void save()}>
+            {loading ? 'Opening…' : saving ? 'Saving…' : 'Save'}
           </button>
           {workflowId ? (
-            <button type="button" className="btn btn-ghost" onClick={() => void remove()}>
+            <button type="button" className="btn btn-ghost" disabled={saving || running} onClick={() => void remove()}>
               Delete
             </button>
           ) : null}
           <button
             type="button"
             className="btn"
-            disabled={running || nodes.length === 0}
-            title="Test the workflow without side effects: HTTP requests report what they would send, notifications are swallowed, AI uses the economy model."
+            disabled={running || saving || nodes.length === 0 || issues.some(i => i.level === 'error')}
+            title="Simulate HTTP and notifications. AI nodes call the economy model and may incur charges."
             onClick={() => void dryRun()}
           >
             {running && wasDryRun ? 'Dry running…' : 'Dry run'}
           </button>
-          <button type="button" className="btn btn-primary" disabled={running} onClick={() => void run()}>
+          <button type="button" className="btn btn-primary" disabled={running || saving || nodes.length === 0 || issues.some(i => i.level === 'error')} onClick={() => void run()}>
             {running && !wasDryRun ? 'Running…' : 'Save & run'}
           </button>
         </div>
       </header>
+      {issues.some(i => i.level === 'error') && <div className="workflows-check-summary" role="status">Fix before running: {issues.filter(i => i.level === 'error').map((issue, index) => <button type="button" className="btn-link" key={index} onClick={() => setSelectedId(issue.nodeId ?? null)}>{issue.message}</button>)}</div>}
 
       <div className="workflows-body">
+        <nav className="workflows-mobile-tabs" aria-label="Workflow panels">{(['palette', 'canvas', 'inspector'] as const).map(panel => <button type="button" className="btn" key={panel} aria-pressed={mobilePanel === panel} onClick={() => { setMobilePanel(panel); if (panel === 'inspector') { setSelectedId(null); setSelectedEdgeId(null) } }}>{panel === 'palette' ? 'Add steps' : panel === 'canvas' ? 'Canvas' : 'Details & schedule'}</button>)}
+          {!!nodes.length && <select className="select" aria-label="Edit workflow step" value={selectedId ?? ''} onChange={e => { setSelectedId(e.target.value || null); setSelectedEdgeId(null); setMobilePanel('inspector') }}><option value="">Choose a step to edit…</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.data.label}</option>)}</select>}
+        </nav>
         <aside className="workflows-palette">
           <h4 className="section-subhead">Add node</h4>
           {PALETTE.map((p) => (
@@ -567,6 +614,12 @@ export default function WorkflowsView(): ReactElement {
           {selected ? (
             <>
               <h4 className="section-subhead">{selected.data.kind}</h4>
+              <details className="field"><summary>Connections and removal</summary>
+                {edges.filter(edge => edge.source === selected.id).map(edge => <div className="field" key={edge.id}><span>→ {labelOfNode(edge.target)}{edge.sourceHandle ? ` (${edge.sourceHandle})` : ''}</span><button className="btn btn-ghost" onClick={() => setEdges(current => current.filter(item => item.id !== edge.id))}>Remove connection</button></div>)}
+                <label className="field"><span className="field-label">Send output to</span><select className="select" value={connectTarget} onChange={e => setConnectTarget(e.target.value)}><option value="">Choose next step…</option>{nodes.filter(node => node.id !== selected.id && !edges.some(edge => edge.source === selected.id && edge.target === node.id)).map(node => <option key={node.id} value={node.id}>{node.data.label}</option>)}</select></label>
+                <button className="btn" disabled={!connectTarget} onClick={() => { setEdges(current => [...current, { id: nextId(), source: selected.id, target: connectTarget, ...(selected.data.kind === 'condition' ? { sourceHandle: 'true', label: 'true' } : {}) }]); setConnectTarget('') }}>Add connection</button>
+                <button className="btn btn-danger" onClick={() => { setNodes(current => current.filter(node => node.id !== selected.id)); setEdges(current => current.filter(edge => edge.source !== selected.id && edge.target !== selected.id)); setSelectedId(null) }}>Remove step</button>
+              </details>
               <label className="field">
                 <span className="field-label">Label</span>
                 <input

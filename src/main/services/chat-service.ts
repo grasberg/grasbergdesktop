@@ -6,7 +6,7 @@
  * leaves this module.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type {
@@ -96,7 +96,12 @@ import type { ToolExecuteContext } from '../tools/executor'
 import { HEADLESS_CONVERSATION_ID, USER_DECLINED_RESULT } from '../tools/executor'
 import { runShell } from '../tools/shell'
 import { redactSecrets } from '../providers/redact'
-import { currentInvocationPolicy } from '../invocation-context'
+import {
+  currentInvocationPolicy,
+  mergeInvocationPolicies,
+  withInvocationPolicy,
+  type InvocationPolicy,
+} from '../invocation-context'
 import { KEYLESS_API_KEY, isLoopbackBaseUrl, isValidStorageKey } from '@shared/schemas'
 import { formatSourcesSection } from '@shared/citations'
 import { MAX_RAW_ATTACH_BYTES, storeGeneratedImage } from '../ipc/attachments'
@@ -278,6 +283,8 @@ const SHELL_BACKGROUND_TIMEOUT_MS = 30 * 60_000
 const IMAGE_GENERATION_TIMEOUT_MS = 180_000
 
 interface BackgroundTask {
+  /** Private results remain accessible only from the originating conversation. */
+  privateConversationId?: string
   status: 'running' | 'done' | 'error' | 'stopped'
   result: string
   controller: AbortController
@@ -417,6 +424,7 @@ interface ResearchRunRequest {
 
 /** How the tool system participates in one generation. */
 interface ToolPlan {
+  allowedToolIds?: ReadonlySet<string>
   /** Definitions offered to the model; undefined = no tools on the wire. */
   adapterTools?: AdapterToolDef[]
   /** Mode-prompt options (manual-instructions fallback when unsupported). */
@@ -618,6 +626,7 @@ const COMPACTION_INSTRUCTION =
   'can rely on to continue. Output only the summary.'
 
 interface HistoryBuildOptions {
+  allowedToolIds?: ReadonlySet<string>
   settings: AppSettings
   promptOpts: ModePromptOptions
   visionEnabled: boolean
@@ -747,6 +756,8 @@ export class ChatService {
    * error drains nothing — the messages simply wait for the next turn.
    */
   private readonly queuedSends = new Map<string, number>()
+  private readonly acknowledgedSends = new Map<string, { fingerprint: string; result: Promise<ChatSendResult> }>()
+  private readonly queuedPolicies = new Map<string, InvocationPolicy>()
   private readonly queueDrainTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(
@@ -754,6 +765,36 @@ export class ChatService {
     private readonly broadcast: Broadcast,
     private readonly options: ChatServiceOptions = {}
   ) {}
+
+  /** A lost network reply must never cause a second user message or model run. */
+  async sendIdempotent(req: ChatSendRequest): Promise<ChatSendResult> {
+    if (!req.clientRequestId) return this.send(req, { queueIfBusy: true })
+    this.requireConversation(req.conversationId)
+    const fingerprint = this.sendFingerprint(req)
+    const key = `${req.conversationId}:${req.clientRequestId}`
+    const pending = this.acknowledgedSends.get(key)
+    const receipt = this.db.driver.get<{ fingerprint: string; message_id: string }>(
+      'SELECT fingerprint, message_id FROM chat_send_receipts WHERE conversation_id = ? AND request_id = ?',
+      [req.conversationId, req.clientRequestId]
+    )
+    if ((pending && pending.fingerprint !== fingerprint) || (receipt && receipt.fingerprint !== fingerprint)) {
+      throw new ProviderError('invalid_request', 'This send identifier was already used for another message.')
+    }
+    if (pending) return pending.result
+    if (receipt) {
+      const userMessage = this.db.messages.getById(receipt.message_id)
+      if (userMessage) return { queued: true, userMessage, replayed: true }
+    }
+    const result = this.send(req, { queueIfBusy: true })
+    this.acknowledgedSends.set(key, { fingerprint, result })
+    try { return await result } finally { this.acknowledgedSends.delete(key) }
+  }
+
+  private sendFingerprint(req: ChatSendRequest): string {
+    return createHash('sha256').update(JSON.stringify({
+      content: req.content, attachments: req.attachments ?? [], overrides: req.overrides ?? {},
+    })).digest('hex')
+  }
 
   // Without queueIfBusy a busy conversation still throws, so plain callers
   // (tests, BotService deliveries) keep the precise StartStreamResult type.
@@ -802,7 +843,7 @@ export class ChatService {
               settings,
               moa ? this.aggregatorOverrides(moa, req.overrides) : req.overrides
             )
-      const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
+      const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments, req)
       return this.start(conversation, settings, resolved, userMessage, moa, compare, research)
     })
   }
@@ -1089,7 +1130,10 @@ export class ChatService {
     const conversation = this.requireConversation(conversationId)
     this.reserve(conversation.id)
     try {
-      return await fn(conversation)
+      const policy = mergeInvocationPolicies(
+        currentInvocationPolicy(), this.queuedPolicies.get(conversationId)
+      )
+      return await (policy ? withInvocationPolicy(policy, () => fn(conversation)) : fn(conversation))
     } catch (e) {
       this.releaseReservation(conversation.id)
       throw e
@@ -1414,7 +1458,8 @@ export class ChatService {
   private insertUserMessage(
     conversationId: string,
     content: string,
-    attachments?: Message['attachments']
+    attachments?: Message['attachments'],
+    request?: ChatSendRequest
   ): Message {
     const userMessage: Message = {
       id: randomUUID(),
@@ -1426,7 +1471,15 @@ export class ChatService {
       seq: this.db.messages.nextSeq(conversationId),
       createdAt: Date.now(),
     }
-    this.db.messages.insert(userMessage)
+    this.db.driver.transaction(() => {
+      this.db.messages.insert(userMessage)
+      if (request?.clientRequestId) {
+        this.db.driver.run(
+          'INSERT INTO chat_send_receipts (conversation_id, request_id, fingerprint, message_id) VALUES (?, ?, ?, ?)',
+          [conversationId, request.clientRequestId, this.sendFingerprint(request), userMessage.id]
+        )
+      }
+    })
     return userMessage
   }
 
@@ -1445,8 +1498,12 @@ export class ChatService {
         `The queue for this conversation is full (${SEND_QUEUE_CAP} waiting) — let the current response finish.`
       )
     }
-    const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments)
+    const userMessage = this.insertUserMessage(conversation.id, req.content, req.attachments, req)
     this.queuedSends.set(conversation.id, queued + 1)
+    const policy = mergeInvocationPolicies(
+      this.queuedPolicies.get(conversation.id), currentInvocationPolicy()
+    )
+    if (policy) this.queuedPolicies.set(conversation.id, policy)
     this.broadcast(CHANNELS.conversationsChanged, { conversationId: conversation.id })
     return { queued: true, userMessage }
   }
@@ -1454,6 +1511,7 @@ export class ChatService {
   /** Any starting turn covers the whole history — queued messages included. */
   private clearSendQueue(conversationId: string): void {
     this.queuedSends.delete(conversationId)
+    this.queuedPolicies.delete(conversationId)
     const timer = this.queueDrainTimers.get(conversationId)
     if (timer) clearTimeout(timer)
     this.queueDrainTimers.delete(conversationId)
@@ -1515,6 +1573,32 @@ export class ChatService {
     compare = false,
     research: ResearchRunRequest | null = null
   ): StartStreamResult {
+    // A send/regenerate may beat the drain timer, and more messages may queue
+    // while target resolution awaits OAuth. Re-check at the shared dispatch.
+    const policy = mergeInvocationPolicies(
+      currentInvocationPolicy(), this.queuedPolicies.get(conversation.id)
+    )
+    if (policy) {
+      const restricted = {
+        ...resolved,
+        params: { ...resolved.params, autoAcceptEdits: false, sandboxLevel: policy.sandboxLevel },
+      }
+      return withInvocationPolicy(policy, () =>
+        this.startStream(conversation, settings, restricted, userMessage, moa, compare, research)
+      )
+    }
+    return this.startStream(conversation, settings, resolved, userMessage, moa, compare, research)
+  }
+
+  private startStream(
+    conversation: Conversation,
+    settings: AppSettings,
+    resolved: ResolvedTarget,
+    userMessage: Message | null,
+    moa?: MoaPreset | null,
+    compare = false,
+    research: ResearchRunRequest | null = null
+  ): StartStreamResult {
     // Whatever was queued is covered by this turn's history replay.
     this.clearSendQueue(conversation.id)
     const assistantMessage: Message = {
@@ -1545,6 +1629,7 @@ export class ChatService {
     const buildOpts: HistoryBuildOptions = {
       settings,
       promptOpts: toolPlan.promptOpts,
+      allowedToolIds: toolPlan.allowedToolIds,
       visionEnabled,
     }
 
@@ -1632,6 +1717,7 @@ export class ChatService {
     }
     return {
       adapterTools: enabled.map(toAdapterToolDef),
+      allowedToolIds: new Set(enabled.map((def) => def.id)),
       promptOpts: { toolsAvailable: true, toolNames },
     }
   }
@@ -1648,7 +1734,8 @@ export class ChatService {
      * requested — replayed tool_use turns would force thinking off there
      * (see anthropic.ts), which is the worse trade.
      */
-    replayToolCalls = false
+    replayToolCalls = false,
+    maxSeq = Infinity
   ): AdapterMessage[] {
     const history: AdapterMessage[] = []
     // Effective system prompt = mode base prompt + the user's extras (the
@@ -1769,6 +1856,8 @@ export class ChatService {
       })
     }
     for (const message of this.db.messages.listByConversation(conversation.id)) {
+      // Busy sends belong to the next turn, even across compaction/failover awaits.
+      if (message.seq > maxSeq) continue
       if (message.role !== 'user' && message.role !== 'assistant') continue
       if (message.status !== 'complete' && message.status !== 'stopped') continue
       if (message.seq <= throughSeq) continue
@@ -1813,11 +1902,12 @@ export class ChatService {
     conversation: Conversation,
     resolved: ResolvedTarget,
     settings: AppSettings,
-    signal: AbortSignal
+    signal: AbortSignal,
+    maxSeq = Infinity
   ): Promise<void> {
     if (!settings.compactionEnabled) return
     try {
-      await this.compact(conversation, resolved, settings, signal, false)
+      await this.compact(conversation, resolved, settings, signal, false, maxSeq)
     } catch {
       // Auto-compaction is best-effort: fall back to the full history.
     }
@@ -1850,7 +1940,8 @@ export class ChatService {
     resolved: ResolvedTarget,
     settings: AppSettings,
     signal: AbortSignal | undefined,
-    force: boolean
+    force: boolean,
+    maxSeq = Infinity
   ): Promise<boolean> {
     const contextLength =
       resolveModelInfo(resolved.provider, resolved.modelId)?.contextLength ??
@@ -1864,7 +1955,7 @@ export class ChatService {
         (m) =>
           (m.role === 'user' || m.role === 'assistant') &&
           (m.status === 'complete' || m.status === 'stopped') &&
-          m.seq > throughSeq
+          m.seq > throughSeq && m.seq <= maxSeq
       )
 
     if (!force) {
@@ -2143,6 +2234,7 @@ export class ChatService {
         'The agent profile selected for this node is missing or disabled.'
       )
     }
+    stub.agentId = agent?.id ?? null
     const economy =
       opts?.economy === true && !providerId && !modelId && !agent && settings.economyProviderId
         ? {
@@ -2188,12 +2280,13 @@ export class ChatService {
     // custom tools) while a call arrives under its WIRE name, so the name has to
     // be mapped back to an id before the membership test below.
     const enabledDefs = opts?.useTools && tools ? tools.registry.listEnabledDefinitions() : []
-    const toolDefs: AdapterToolDef[] = enabledDefs
+    const allowedDefs = enabledDefs
       // message_agent lives ONLY in canonical bot chats (v46) — a headless
       // one-shot has no chat for a teammate's reply to land in.
       .filter((d) => d.id !== 'message_agent')
       .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
-      .map(toAdapterToolDef)
+    const allowedToolIds = new Set(allowedDefs.map((d) => d.id))
+    const toolDefs: AdapterToolDef[] = allowedDefs.map(toAdapterToolDef)
     const paramsFor = (t: ResolvedTarget): ChatParams => ({
       ...t.params,
       ...(opts?.json ? { responseFormat: 'json' as const } : {}),
@@ -2274,8 +2367,16 @@ export class ChatService {
           messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
           toolExecuted = true
           for (const call of result.toolCalls) {
+            if (opts?.signal?.aborted) throw new ProviderError('aborted', 'The workflow run was cancelled.')
+            const definition = enabledDefs.find((d) => d.id === call.name) ?? enabledDefs.find((d) => d.name === call.name)
+            if (!definition || !allowedToolIds.has(definition.id)) {
+              messages.push({ role: 'tool', content: `Tool '${call.name}' is not available to this run.`, toolCallId: call.id })
+              continue
+            }
             const out = await tools.executor.execute(call, {
               conversation: stub,
+              allowedToolIds,
+              agentId: agent?.id ?? null,
               approval: async (req) => {
                 const def = enabledDefs.find(
                   (d) => d.id === req.toolCall.name || d.name === req.toolCall.name
@@ -2300,6 +2401,7 @@ export class ChatService {
             })
             messages.push({ role: 'tool', content: out, toolCallId: call.id })
           }
+          this.appendComputerScreenshot(messages, agent?.id ?? null, modelSupportsVision(target.provider, target.modelId))
         }
         // Empty-reply heuristic: one retry when the whole run produced nothing
         // (no text AND no reasoning) and no tool ran.
@@ -2841,6 +2943,8 @@ export class ChatService {
       result: '',
       controller,
       runId: persisted.id,
+      privateConversationId: (ctx.conversation.spaceId || this.db.conversations.getById(ctx.conversation.id)?.spaceId)
+        ? ctx.conversation.id : undefined,
     }
     this.backgroundTasks.set(taskId, record)
     void this.runDelegate(task, ctx, controller.signal, agentName, {
@@ -2898,7 +3002,7 @@ export class ChatService {
    * shares the delegate background-task registry, so task_output/task_stop
    * work on it; task_output additionally shows its output so far.
    */
-  startShellBackground(command: string, cwd: string): string {
+  startShellBackground(command: string, cwd: string, ctx?: ToolExecuteContext): string {
     this.pruneTerminalBackgroundTasks()
     const running = [...this.backgroundTasks.values()].filter(
       (t) => t.status === 'running'
@@ -2915,6 +3019,8 @@ export class ChatService {
       result: '',
       controller,
       getPartial: () => output,
+      privateConversationId: ctx && (ctx.conversation.spaceId || this.db.conversations.getById(ctx.conversation.id)?.spaceId)
+        ? ctx.conversation.id : undefined,
     }
     this.backgroundTasks.set(taskId, record)
     void runShell(command, cwd, SHELL_BACKGROUND_TIMEOUT_MS, controller.signal, (chunk) => {
@@ -2948,9 +3054,11 @@ export class ChatService {
   }
 
   /** Status/result of a background task, as a model-readable string. */
-  delegateTaskOutput(taskId: string): string {
+  delegateTaskOutput(taskId: string, ctx?: ToolExecuteContext): string {
     const record = this.backgroundTasks.get(taskId)
-    if (!record) return `Error: unknown task id '${taskId}'.`
+    if (!record || (record.privateConversationId && record.privateConversationId !== ctx?.conversation.id)) {
+      return `Error: unknown task id '${taskId}'.`
+    }
     switch (record.status) {
       case 'running':
         return record.getPartial
@@ -2970,9 +3078,15 @@ export class ChatService {
   }
 
   /** Stops a running background task; its final output is recorded once the loop unwinds. */
-  delegateTaskStop(taskId: string): string {
+  delegateTaskStop(taskId: string, ctx?: ToolExecuteContext): string {
     const record = this.backgroundTasks.get(taskId)
-    if (!record) return `Error: unknown task id '${taskId}'.`
+    if (!record || (record.privateConversationId && record.privateConversationId !== ctx?.conversation.id)) {
+      return `Error: unknown task id '${taskId}'.`
+    }
+    return this.stopBackgroundTask(taskId, record)
+  }
+
+  private stopBackgroundTask(taskId: string, record: BackgroundTask): string {
     if (record.status !== 'running') {
       return `Task '${taskId}' already finished (${record.status}).`
     }
@@ -2986,7 +3100,7 @@ export class ChatService {
   stopAgentRun(runId: string): boolean {
     for (const [taskId, record] of this.backgroundTasks) {
       if (record.runId !== runId || record.status !== 'running') continue
-      this.delegateTaskStop(taskId)
+      this.stopBackgroundTask(taskId, record)
       return true
     }
     return false
@@ -3008,10 +3122,12 @@ export class ChatService {
     agentName?: string,
     meta?: { runId?: string | null; background?: boolean }
   ): Promise<string> {
+    signal ??= ctx.signal
     let profile: AgentProfile | null = null
     let handoff: DelegateHandoffInfo | null = null
     let status: DelegateFinishedInfo['status'] = 'done'
     let outcome = ''
+    let recordUsage: (() => void) | undefined
     try {
       const parent = this.db.conversations.getById(ctx.conversation.id) ?? ctx.conversation
       const settings = this.db.settings.get()
@@ -3054,6 +3170,7 @@ export class ChatService {
           agentId: profile.id,
           agentName: profile.name,
           callerConversationId: parent.id,
+          callerSpaceId: ctx.conversation.spaceId ?? parent.spaceId,
           callerAgentId: parent.agentId ?? null,
           callerTitle: parent.title,
           task,
@@ -3067,13 +3184,14 @@ export class ChatService {
         }
       }
 
+      if (signal?.aborted) throw new ProviderError('aborted', 'The task was stopped.')
       const resolved = await this.resolveTarget(parent, settings, overrides)
       const adapter = this.adapterFor(resolved)
       const tools = this.options.tools
       let usageTotal: TokenUsage | undefined
       // Spend attributed to the bot (v49) — before, delegate runs were the
       // one generation path with no ledger row at all.
-      const record = (): void => {
+      recordUsage = (): void => {
         if (!usageTotal) return
         recordHeadlessUsage(
           this.db,
@@ -3102,7 +3220,6 @@ export class ChatService {
         if (signal?.aborted) {
           status = 'stopped'
           outcome = 'The task was stopped.'
-          record()
           return outcome
         }
         const result = await adapter.chat(
@@ -3116,18 +3233,22 @@ export class ChatService {
           this.adapterCtx(resolved, signal)
         )
         if (result.usage) usageTotal = addUsage(usageTotal, result.usage)
+        if (signal?.aborted) throw new ProviderError('aborted', 'The task was stopped.')
         if (result.text.trim()) final = result.text
         if (result.finishReason !== 'tool_calls' || result.toolCalls.length === 0 || !tools) break
         messages.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls })
         for (const call of result.toolCalls) {
+          if (signal?.aborted) throw new ProviderError('aborted', 'The task was stopped.')
           // Resolve the wire name back to a definition id, then gate on the id
           // — otherwise a custom tool (id 'custom:<uuid>', name '<userName>')
           // is offered above but wrongly denied here.
-          const def = enabledDefs.find((d) => d.id === call.name || d.name === call.name)
+          const def = enabledDefs.find((d) => d.id === call.name) ?? enabledDefs.find((d) => d.name === call.name)
           const out =
             def && allowedToolIds.has(def.id)
               ? await tools.executor.execute(call, {
                   conversation: parent,
+                  agentId: profile?.id ?? ctx.agentId ?? parent.agentId ?? null,
+                  allowedToolIds,
                   streamId: ctx.streamId,
                   approval: ctx.approval,
                   // Inherit the parent's mode gates: plan mode still blocks
@@ -3145,19 +3266,27 @@ export class ChatService {
               : `Tool '${call.name}' is not available to the sub-agent.`
           messages.push({ role: 'tool', content: out, toolCallId: call.id })
         }
+        this.appendComputerScreenshot(
+          messages,
+          profile?.id ?? ctx.agentId ?? parent.agentId ?? null,
+          modelSupportsVision(resolved.provider, resolved.modelId)
+        )
       }
-      record()
-      if (profile && final.trim()) this.persistAgentMemories(profile.id, final)
+      if (profile && final.trim() && !parent.spaceId && !ctx.conversation.spaceId) {
+        this.persistAgentMemories(profile.id, final)
+      }
       outcome =
         final.trim().length > 0
           ? `Sub-agent result:\n${final.trim()}`
           : 'The sub-agent produced no result.'
       return outcome
     } catch (e) {
-      status = 'error'
-      outcome = `Delegation failed: ${toNormalizedError(e).message}`
+      const normalized = toNormalizedError(e)
+      status = signal?.aborted || normalized.code === 'aborted' ? 'stopped' : 'error'
+      outcome = status === 'stopped' ? 'The task was stopped.' : `Delegation failed: ${normalized.message}`
       return outcome
     } finally {
+      recordUsage?.()
       if (handoff) {
         try {
           this.options.onDelegateFinished?.({ ...handoff, status, result: outcome })
@@ -3165,6 +3294,21 @@ export class ChatService {
           // Mirroring is a courtesy, never a failure path.
         }
       }
+    }
+  }
+
+  private appendComputerScreenshot(
+    messages: AdapterMessage[], agentId: string | null, visionEnabled: boolean
+  ): void {
+    const shot = this.options.browser?.consumePendingScreenshot(agentId) ?? null
+    if (shot && visionEnabled) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Screenshot after the computer action:' },
+          { type: 'image_url', image_url: { url: shot } },
+        ],
+      })
     }
   }
 
@@ -3212,7 +3356,9 @@ export class ChatService {
         conversation,
         settings,
         {},
-        buildOpts.visionEnabled
+        buildOpts.visionEnabled,
+        false,
+        placeholder.seq
       ).filter((m) => m.role !== 'system')
 
       for (const ref of references) emit({ type: 'moa-reference', reference: { ...ref } })
@@ -3817,7 +3963,7 @@ export class ChatService {
       // next chain entry; a completed-but-empty reply retries once.
       attempt: for (;;) {
         try {
-          await this.maybeCompact(conversation, target, buildOpts.settings, controller.signal)
+          await this.maybeCompact(conversation, target, buildOpts.settings, controller.signal, placeholder.seq)
           // Per-model capabilities, recomputed for each attempt (identical to
           // the caller-computed buildOpts/adapterTools values on attempt 0).
           const visionEnabled = modelSupportsVision(target.provider, target.modelId)
@@ -3829,10 +3975,13 @@ export class ChatService {
             buildOpts.settings,
             buildOpts.promptOpts,
             visionEnabled,
-            this.shouldReplayToolCalls(target)
+            this.shouldReplayToolCalls(target),
+            placeholder.seq
           )
           const adapter = this.adapterFor(target)
           const tools = this.options.tools
+          const enabledDefs = tools?.registry.listEnabledDefinitions() ?? []
+          const allowedToolIds = attemptTools ? (buildOpts.allowedToolIds ?? new Set<string>()) : new Set<string>()
           const messages: AdapterMessage[] = [...history]
           // MoA/research: fold the injected context into the latest user turn.
           if (extraOpts?.injectedContext) {
@@ -3960,8 +4109,10 @@ export class ChatService {
                 throw new ProviderError('aborted', 'Generation stopped.')
               }
               emit({ type: 'tool-call', toolCall: { ...call } }) // status 'proposed'
-              const result = await tools.executor.execute(call, {
+              const definition = enabledDefs.find((d) => d.id === call.name) ?? enabledDefs.find((d) => d.name === call.name)
+              const result = definition && allowedToolIds.has(definition.id) ? await tools.executor.execute(call, {
                 conversation,
+                allowedToolIds,
                 streamId,
                 approval,
                 ...(askUser ? { askUser } : {}),
@@ -3971,7 +4122,7 @@ export class ChatService {
                 onToolOutput,
                 onAttachment,
                 signal: controller.signal,
-              })
+              }) : `Tool '${call.name}' is not available to this run.`
               call.result = result
               call.status = toolCallStatus(result)
               // Recorded as it settles, not after the round: a Stop between two
@@ -4012,17 +4163,7 @@ export class ChatService {
             // vision generation in another conversation to pick up. It is only
             // injected as a synthetic user image when this model has vision
             // (OpenAI rejects images in tool messages).
-            const shot =
-              this.options.browser?.consumePendingScreenshot(conversation.agentId ?? null) ?? null
-            if (shot && visionEnabled) {
-              messages.push({
-                role: 'user',
-                content: [
-                  { type: 'text', text: 'Screenshot after the computer action:' },
-                  { type: 'image_url', image_url: { url: shot } },
-                ],
-              })
-            }
+            this.appendComputerScreenshot(messages, conversation.agentId ?? null, visionEnabled)
 
             if (controller.signal.aborted) {
               throw new ProviderError('aborted', 'Generation stopped.')

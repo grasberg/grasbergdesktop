@@ -12,16 +12,23 @@ import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useProvidersStore } from '@/stores/providers'
 import { useUiStore } from '@/stores/ui'
 import { providerUsable } from '@/lib/providers'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import { confirmAction } from '@/components/common/ConfirmDialog'
+import { toNormalized } from '@/api/uld'
 import './settings.css'
 
 function CreateForm({ onDone }: { onDone: () => void }): ReactElement {
   const providers = useProvidersStore((s) => s.providers)
   const toast = useUiStore((s) => s.toast)
-  const usable = providers.filter(providerUsable)
+  const [compatible, setCompatible] = useState<string[]>([])
+  useEffect(() => { void window.uld.knowledge.providers().then(r => { if (r.ok) setCompatible(r.data.map(p => p.id)); else toast(r.error.message, 'error') }) }, [toast])
+  const usable = providers.filter(p => providerUsable(p) && compatible.includes(p.id))
   const [name, setName] = useState('')
   const [providerId, setProviderId] = useState(usable[0]?.id ?? '')
   const [modelId, setModelId] = useState('')
   const [busy, run] = useAsyncAction()
+  const guard = useUnsavedChanges(!!name || !!modelId, 'settings')
+  useEffect(() => { if (!usable.some(p => p.id === providerId)) setProviderId(usable[0]?.id ?? '') }, [compatible, providers])
 
   const submit = async (): Promise<void> => {
     if (!name.trim() || !providerId || !modelId.trim()) {
@@ -38,7 +45,7 @@ function CreateForm({ onDone }: { onDone: () => void }): ReactElement {
         toast(res.error.message, 'error')
         return
       }
-      onDone()
+      guard.markSaved(); onDone()
     })
   }
 
@@ -65,8 +72,7 @@ function CreateForm({ onDone }: { onDone: () => void }): ReactElement {
           ))}
         </select>
         <p className="field-hint">
-          Needs an OpenAI-compatible /embeddings endpoint (OpenAI, most presets, or a local
-          Ollama/LM Studio server).
+          Only providers with an embeddings adapter are listed. Creating the base sends a small test to the chosen embedding model and may incur a provider charge.
         </p>
       </label>
       <label className="field">
@@ -79,10 +85,10 @@ function CreateForm({ onDone }: { onDone: () => void }): ReactElement {
         />
       </label>
       <div className="prompt-form-actions">
-        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? 'Creating…' : 'Create'}
+        <button type="button" className="btn btn-primary" disabled={busy || !name.trim() || !providerId || !modelId.trim()} onClick={() => void submit()}>
+          {busy ? 'Testing embeddings…' : 'Test and create'}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDone}>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>
@@ -94,6 +100,13 @@ function BaseCard({ base, onChanged }: { base: KnowledgeBase; onChanged: () => v
   const toast = useUiStore((s) => s.toast)
   const [sources, setSources] = useState<Array<{ source: string; chunks: number }>>([])
   const [importing, setImporting] = useState(false)
+  const [progress, setProgress] = useState('')
+  const [failures, setFailures] = useState<Array<{ source: string; error: string }>>([])
+  useEffect(() => window.uld.knowledge.onProgress(e => {
+    if (e.kbId !== base.id) return
+    setImporting(e.status !== 'done')
+    setProgress(e.status === 'done' ? '' : `Document ${e.file}/${e.totalFiles}: ${e.source} · ${e.completed}/${e.total || '?'} chunks`)
+  }), [base.id])
 
   const loadSources = useCallback(async () => {
     const res = await window.uld.knowledge.sources(base.id)
@@ -113,6 +126,7 @@ function BaseCard({ base, onChanged }: { base: KnowledgeBase; onChanged: () => v
         return
       }
       if (res.data.canceled) return
+      setFailures(res.data.failures ?? [])
       const skipped = res.data.skipped > 0 ? ` (${res.data.skipped} files skipped)` : ''
       toast(
         `Imported ${res.data.imported} documents as ${res.data.chunks} chunks${skipped}.`,
@@ -120,12 +134,13 @@ function BaseCard({ base, onChanged }: { base: KnowledgeBase; onChanged: () => v
       )
       await loadSources()
       onChanged()
-    } finally {
+    } catch (e) { toast(toNormalized(e).message, 'error') } finally {
       setImporting(false)
     }
   }
 
   const removeSource = async (source: string): Promise<void> => {
+    if (!await confirmAction('Remove document?', `Remove “${source}” from this knowledge base? The original file is kept.`, 'Remove document')) return
     const res = await window.uld.knowledge.removeSource(base.id, source)
     if (!res.ok) toast(res.error.message, 'error')
     await loadSources()
@@ -141,6 +156,8 @@ function BaseCard({ base, onChanged }: { base: KnowledgeBase; onChanged: () => v
   return (
     <li className="prompt-item card">
       <div className="prompt-item-main">
+        {progress && <p role="status">{progress}</p>}
+        {failures.length > 0 && <div role="alert" className="form-error">Some documents could not be imported. Successful documents were kept. Select the failed files again to retry.{failures.map(f => <p key={f.source}>{f.source}: {f.error}</p>)}</div>}
         <strong className="prompt-item-title">{base.name}</strong>
         <p className="prompt-item-body">
           {base.chunkCount} chunks · embeddings: <span className="mono">{base.modelId}</span>

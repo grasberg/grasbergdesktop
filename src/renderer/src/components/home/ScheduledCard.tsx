@@ -46,9 +46,9 @@ export default function ScheduledCard(): React.JSX.Element {
         <button
           type="button"
           className="btn btn-ghost home-card-action"
-          onClick={() => useUiStore.getState().openWorkflows(true)}
+          onClick={() => useUiStore.getState().setView('automation')}
         >
-          Open workflows
+          Open Automation
         </button>
       </div>
 

@@ -11,6 +11,7 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && npm run build:mobile && npm run build:relay && electron-vite build",
     "build:mobile": "vite build --config vite.mobile.config.ts",
+    "build:native-ui": "npm run build:mobile && node scripts/build-native-ui.mjs",
     "build:relay": "esbuild relay/src/index.ts --bundle --platform=node --format=esm --target=node22 --alias:@shared=./src/shared --outfile=relay/relay.mjs",
     "dev:mobile": "vite build --watch --config vite.mobile.config.ts",
     "start": "electron-vite preview",

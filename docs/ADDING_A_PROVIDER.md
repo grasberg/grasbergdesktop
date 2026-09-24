@@ -158,3 +158,26 @@ The Settings UI picks up the new type automatically from the catalog
       tool-call delta assembly, each error class, abort behavior, and a
       redaction test proving a leaked key never appears in thrown errors.
 - [ ] `npm run typecheck` and `npm test` pass.
+
+## Automatic model discovery
+
+Configured OpenAI-compatible providers now attempt `GET /models`, including
+presets and families whose endpoint support was unknown at release time.
+Anthropic and Gemini use their native paginated model APIs. ChatGPT OAuth uses
+the authenticated Codex model list; selected model IDs pass through unchanged.
+`model-discovery.ts` bounds requests and responses, scopes cached results to the
+credentials and endpoint, and retains the last successful list on failure.
+
+`LiveModelCatalog` refreshes the public models.dev metadata every six hours and
+persists it in `userData/models-catalog.json` for offline use. It supplies fallback
+models for all mapped families (including Bedrock) and presets. Coding plans use
+their own catalog IDs. Credentials and configured base URLs never come from this
+public catalog, and no credentials are sent to it. The bundled catalog remains
+the final fallback. Catalog entries are suggestions; provider/account access and
+the supported chat API still determine whether a model can run.
+
+The desktop refreshes usable providers on startup, focus, and every five minutes.
+Opening the shared model picker refreshes expired lists; **Refresh models** forces
+an immediate provider lookup. The public fallback catalog retains its six-hour
+cache. Provider/account/key changes invalidate renderer caches. Existing model
+defaults and conversation selections are preserved.

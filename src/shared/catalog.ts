@@ -219,14 +219,7 @@ export function providerAuthModes(type: ProviderType): AuthMode[] {
  */
 export const CHATGPT_OAUTH_DEFAULT_MODEL = 'gpt-5.5'
 
-/**
- * Models the ChatGPT-OAuth Codex backend currently serves for ChatGPT sign-in.
- * It rejects the rest of the platform-API catalog (gpt-4o etc.) AND models it
- * has retired: gpt-5 (and the gpt-5.1/5.2/5.3-codex line) were removed from
- * ChatGPT sign-in in April 2026. The Codex adapter offers only these ids and
- * coerces any other (e.g. a stale stored `gpt-5`) to CHATGPT_OAUTH_DEFAULT_MODEL
- * so requests don't hard-fail. Grow this list when a new signin model ships.
- */
+/** Offline fallback only. Signed-in users discover models from the Codex backend. */
 export const CHATGPT_OAUTH_MODEL_IDS: readonly string[] = [CHATGPT_OAUTH_DEFAULT_MODEL]
 
 // ---------------------------------------------------------------------------

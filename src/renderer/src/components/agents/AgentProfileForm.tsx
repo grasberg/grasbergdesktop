@@ -19,11 +19,14 @@ import { unwrap } from '@/api/uld'
 import BindingCard from '@/components/bots/BindingCard'
 import BotRoutinesPanel from '@/components/bots/BotRoutinesPanel'
 import { AVATAR_COLORS, BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
+import BotAvatarPicker from './BotAvatarPicker'
 import DeliveriesCard from '@/components/bots/DeliveriesCard'
 import { useBotsStore } from '@/stores/bots'
 import { useProvidersStore } from '@/stores/providers'
 import { useToolsStore } from '@/stores/tools'
 import { toastError, useUiStore } from '@/stores/ui'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import ModelField from '@/components/chat/ModelField'
 import './agent-form.css'
 
 export interface AgentProfileFormProps {
@@ -44,6 +47,7 @@ interface FormState {
   providerId: string
   modelId: string
   emoji: string
+  imageDataUrl: string | null
   color: string
   restrictTools: boolean
   toolIds: string[]
@@ -76,6 +80,7 @@ function emptyForm(): FormState {
     providerId: '',
     modelId: '',
     emoji: '',
+    imageDataUrl: null,
     color: '',
     restrictTools: false,
     toolIds: [],
@@ -104,6 +109,7 @@ function formFrom(agent: AgentProfile): FormState {
     providerId: agent.providerId ?? '',
     modelId: agent.modelId ?? '',
     emoji: agent.avatar?.emoji ?? '',
+    imageDataUrl: agent.avatar?.imageDataUrl ?? null,
     color: agent.avatar?.color ?? '',
     restrictTools: agent.toolIds !== null,
     toolIds: agent.toolIds ?? [],
@@ -144,8 +150,8 @@ function toInput(form: FormState): AgentProfileInput {
     maxRounds: Number.isFinite(rounds) && rounds >= 1 ? Math.min(rounds, 40) : null,
     enabled: form.enabled,
     avatar:
-      form.emoji.trim() || form.color
-        ? { emoji: form.emoji.trim() || null, color: form.color || null }
+      form.emoji.trim() || form.color || form.imageDataUrl
+        ? { emoji: form.emoji.trim() || null, color: form.color || null, imageDataUrl: form.imageDataUrl }
         : null,
     heartbeat: form.heartbeatEvery
       ? { everyMinutes: Number.parseInt(form.heartbeatEvery, 10), deliver: form.heartbeatDeliver }
@@ -268,13 +274,15 @@ export default function AgentProfileForm({
   onCancel,
 }: AgentProfileFormProps): ReactElement {
   const [form, setForm] = useState<FormState>(editing ? formFrom(editing) : emptyForm())
+  const [baseline] = useState(() => JSON.stringify(editing ? formFrom(editing) : emptyForm()))
+  const { markSaved, discard } = useUnsavedChanges(JSON.stringify(form) !== baseline, variant === 'settings' ? 'settings' : 'page')
   const [saving, setSaving] = useState(false)
+  const [loadingAvatar, setLoadingAvatar] = useState(false)
   const [dreaming, setDreaming] = useState(false)
   const providers = useProvidersStore((s) => s.providers)
   const loadProviders = useProvidersStore((s) => s.load)
   const toolDefs = useToolsStore((s) => s.tools)
   const toolsLoaded = useToolsStore((s) => s.loaded)
-  const enabledProviders = providers.filter((p) => p.enabled)
 
   useEffect(() => {
     if (providers.length === 0) void loadProviders()
@@ -288,7 +296,7 @@ export default function AgentProfileForm({
   const valid = form.name.trim().length > 0 && form.systemPrompt.trim().length > 0
 
   const submit = async (): Promise<void> => {
-    if (!valid || saving) return
+    if (!valid || saving || loadingAvatar) return
     setSaving(true)
     try {
       const input = toInput(form)
@@ -296,6 +304,7 @@ export default function AgentProfileForm({
         ? await unwrap(window.uld.agents.update(editing.id, input))
         : await unwrap(window.uld.agents.create(input))
       await useBotsStore.getState().load()
+      markSaved()
       onSaved(saved)
     } catch (e) {
       toastError(editing ? 'Failed to save the bot' : 'Failed to create the bot', e)
@@ -321,10 +330,10 @@ export default function AgentProfileForm({
     }
   }
 
-  const preview = { name: form.name.trim() || 'Bot', avatar: { emoji: form.emoji.trim() || null, color: form.color || null } }
+  const preview = { name: form.name.trim() || 'Bot', avatar: { emoji: form.emoji.trim() || null, color: form.color || null, imageDataUrl: form.imageDataUrl } }
 
   return (
-    <div className="bot-form">
+    <div className="bot-form" inert={saving} aria-busy={saving}>
       <h3>
         <BotAvatarBadge agent={preview} size={28} />{' '}
         {editing ? `Edit ${editing.name}` : variant === 'settings' ? 'New agent' : 'New bot'}
@@ -351,15 +360,11 @@ export default function AgentProfileForm({
               maxLength={200}
             />
           </label>
-          <label>
-            Emoji (avatar)
-            <input
-              value={form.emoji}
-              onChange={(e) => set({ emoji: e.target.value })}
-              placeholder="🔎"
-              maxLength={4}
-            />
-          </label>
+          <BotAvatarPicker name={preview.name} avatar={preview.avatar} disabled={saving}
+            onBusyChange={setLoadingAvatar} onChange={(patch) => set({
+              ...(patch.emoji !== undefined ? { emoji: patch.emoji ?? '' } : {}),
+              ...(patch.imageDataUrl !== undefined ? { imageDataUrl: patch.imageDataUrl } : {}),
+            })} />
           <label>
             Color
             <div className="bot-color-row">
@@ -402,30 +407,10 @@ export default function AgentProfileForm({
             placeholder="You are a meticulous researcher…"
           />
         </label>
-        <div className="bot-form-grid">
-          <label>
-            Provider (optional pin)
-            <select value={form.providerId} onChange={(e) => set({ providerId: e.target.value })}>
-              <option value="">Default provider</option>
-              {enabledProviders.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Model id (optional pin)
-            <input
-              value={form.modelId}
-              onChange={(e) => set({ modelId: e.target.value })}
-              placeholder="Provider default"
-              maxLength={200}
-            />
-          </label>
-        </div>
+        <ModelField providerId={form.providerId || null} modelId={form.modelId || null} onChange={(providerId, modelId) => set({ providerId: providerId ?? '', modelId: modelId ?? '' })} />
       </fieldset>
 
+      <details className="bot-advanced"><summary>Advanced settings · tools, routines, messaging &amp; events</summary>
       <fieldset className="bot-form-section">
         <legend>Capabilities</legend>
         <label className="bot-form-inline">
@@ -642,17 +627,18 @@ export default function AgentProfileForm({
       {editing ? <BindingCard agent={editing} /> : null}
       {editing ? <DeliveriesCard agent={editing} /> : null}
       {editing ? <BotSpendCard agent={editing} /> : null}
+      </details>
 
       <div className="bot-form-actions">
         <button
           type="button"
           className="primary"
-          disabled={!valid || saving}
+          disabled={!valid || saving || loadingAvatar}
           onClick={() => void submit()}
         >
           {saving ? 'Saving…' : editing ? 'Save' : variant === 'settings' ? 'Add agent' : 'Create bot'}
         </button>
-        <button type="button" onClick={onCancel}>
+        <button type="button" disabled={saving} onClick={() => discard(onCancel)}>
           Cancel
         </button>
         {editing ? (

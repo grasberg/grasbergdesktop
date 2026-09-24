@@ -6,6 +6,7 @@ import { useProvidersStore } from '@/stores/providers'
 import { useBotsStore } from '@/stores/bots'
 import { useUiStore } from '@/stores/ui'
 import { providerUsable } from '@/lib/providers'
+import ModelField from '@/components/chat/ModelField'
 
 /** Providers that can actually be called (enabled + key, or connected OAuth). */
 function usableProviders(providers: ProviderConfig[]): ProviderConfig[] {
@@ -18,88 +19,11 @@ function defaultModelFor(provider: ProviderConfig | undefined): string {
 }
 
 /** Provider select + model input for one advisor/aggregator reference. */
-function ModelRefEditor({
-  value,
-  onChange,
-  ariaPrefix,
-}: {
-  value: MoaModelRef
-  onChange: (next: MoaModelRef) => void
-  ariaPrefix: string
-}): ReactElement {
-  const providers = useProvidersStore((s) => s.providers)
-  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
-  const loadModels = useProvidersStore((s) => s.loadModels)
-
-  const enabled = usableProviders(providers)
-  const provider = providers.find((p) => p.id === value.providerId)
-  const models = provider ? modelsByProvider[provider.id] ?? [] : []
-  const listId = `moa-models-${value.providerId}`
-
-  const [model, setModel] = useState(value.modelId)
-  useEffect(() => setModel(value.modelId), [value.modelId])
-
-  // Best-effort model list for the datalist (the input still accepts any id).
-  useEffect(() => {
-    if (!provider || modelsByProvider[provider.id]) return
-    void loadModels(provider.id).catch(() => {})
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider?.id])
-
-  const onProvider = (id: string): void => {
-    const p = providers.find((x) => x.id === id)
-    onChange({ providerId: id, modelId: defaultModelFor(p) })
-  }
-
-  const commitModel = (): void => {
-    const next = model.trim() || defaultModelFor(provider)
-    setModel(next)
-    if (next !== value.modelId) onChange({ providerId: value.providerId, modelId: next })
-  }
-
-  return (
-    <div className="moa-ref-row">
-      <select
-        className="select"
-        aria-label={`${ariaPrefix} provider`}
-        value={value.providerId}
-        onChange={(e) => onProvider(e.target.value)}
-      >
-        {enabled.length === 0 && <option value={value.providerId}>No usable providers</option>}
-        {enabled.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label}
-          </option>
-        ))}
-        {provider && !usableProviders(providers).some((p) => p.id === provider.id) && (
-          <option value={provider.id}>{provider.label} (unavailable)</option>
-        )}
-      </select>
-      <input
-        className="input mono"
-        aria-label={`${ariaPrefix} model id`}
-        list={listId}
-        value={model}
-        placeholder="model id"
-        spellCheck={false}
-        onChange={(e) => setModel(e.target.value)}
-        onBlur={commitModel}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault()
-            commitModel()
-          }
-        }}
-      />
-      {models.length > 0 && (
-        <datalist id={listId}>
-          {models.map((m) => (
-            <option key={m.id} value={m.id} />
-          ))}
-        </datalist>
-      )}
-    </div>
-  )
+function ModelRefEditor({ value, onChange, ariaPrefix }: { value: MoaModelRef; onChange: (next: MoaModelRef) => void; ariaPrefix: string }): ReactElement {
+  const providers = useProvidersStore(s => s.providers)
+  return <ModelField label={ariaPrefix} providerId={value.providerId} modelId={value.modelId} allowDefault={false} onChange={(providerId, modelId) => {
+    if (providerId) onChange({ providerId, modelId: modelId || defaultModelFor(providers.find(p => p.id === providerId)) })
+  }} />
 }
 
 /** Optional numeric tuning field (blank = provider/conversation default). */

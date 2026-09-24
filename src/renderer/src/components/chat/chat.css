@@ -389,7 +389,7 @@
 
 /* Opens UPWARD: the message list sits scrolled to the bottom, so a downward
    menu on the last message would render below the fold and look dead. */
-.msg-regen-popover {
+.ms-popover.msg-regen-popover {
   top: auto;
   bottom: calc(100% + 4px);
   left: 0;
@@ -1402,6 +1402,19 @@
    Model selector
    -------------------------------------------------------------------------- */
 
+.model-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.model-field-trigger { text-align: left; white-space: normal; overflow-wrap: anywhere; justify-content: space-between; }
+.modal.model-field-dialog { width: min(680px, calc(100vw - 24px)); max-height: min(760px, calc(100dvh - 24px)); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.model-field-list { min-height: 0; overflow: auto; padding: 12px; }
+.ms-model-choice { display: flex; min-width: 0; }
+.ms-model-choice .ms-row { flex: 1; min-width: 0; }
+.ms-favorite { flex-shrink: 0; width: 36px; }
+.ms-favorite[aria-pressed="true"] { color: var(--accent); }
+.ms-search { position: sticky; top: 0; z-index: 1; background: var(--bg-panel, var(--bg)); padding-bottom: 8px; }
+.ms-search > input { width: 100%; }
+.ms-filters { display: flex; flex-wrap: wrap; gap: 2px; padding-top: 4px; }
+.ms-filters [aria-pressed="true"] { color: var(--accent); background: var(--bg-active); }
+.ms-source { margin-left: 6px; color: var(--text-muted); font-weight: normal; }
 .model-selector {
   position: relative;
 }

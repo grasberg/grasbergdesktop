@@ -12,6 +12,8 @@ import { toNormalized, unwrap } from '@/api/uld'
 import { useUiStore } from '@/stores/ui'
 import { useChatStore } from '@/stores/chat'
 import { useProvidersStore } from '@/stores/providers'
+import ModelField from '@/components/chat/ModelField'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
 const MAX_CANDIDATES = 4
 
@@ -26,54 +28,9 @@ function CandidateRow({
   onRemove: () => void
   removable: boolean
 }): ReactElement {
-  const providers = useProvidersStore((s) => s.providers)
-  const modelsByProvider = useProvidersStore((s) => s.modelsByProvider)
-  const loadModels = useProvidersStore((s) => s.loadModels)
-  const enabled = providers.filter((p) => p.enabled)
-  const models = modelsByProvider[value.providerId] ?? []
-
-  useEffect(() => {
-    if (value.providerId) void loadModels(value.providerId).catch(() => undefined)
-  }, [value.providerId, loadModels])
-
   return (
     <div className="arena-candidate-row">
-      <select
-        className="select arena-select"
-        aria-label="Provider"
-        value={value.providerId}
-        onChange={(e) => onChange({ providerId: e.target.value, modelId: '' })}
-      >
-        <option value="">Provider…</option>
-        {enabled.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label}
-          </option>
-        ))}
-      </select>
-      {models.length > 0 ? (
-        <select
-          className="select arena-select"
-          aria-label="Model"
-          value={value.modelId}
-          onChange={(e) => onChange({ ...value, modelId: e.target.value })}
-        >
-          <option value="">Model…</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label ?? m.id}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          className="input arena-select mono"
-          aria-label="Model id"
-          placeholder="model id"
-          value={value.modelId}
-          onChange={(e) => onChange({ ...value, modelId: e.target.value })}
-        />
-      )}
+      <ModelField label="Candidate model" providerId={value.providerId || null} modelId={value.modelId || null} allowDefault={false} onChange={(providerId, modelId) => onChange({ providerId: providerId ?? '', modelId: modelId ?? '' })} />
       {removable ? (
         <button type="button" className="btn-icon" aria-label="Remove candidate" onClick={onRemove}>
           ×
@@ -108,6 +65,9 @@ export default function ArenaTab(): ReactElement {
     { providerId: '', modelId: '' },
   ])
   const [busy, setBusy] = useState(false)
+  const snapshot = JSON.stringify({ task, rounds, rows })
+  const [baseline, setBaseline] = useState(snapshot)
+  const guard = useUnsavedChanges(!arena && snapshot !== baseline)
 
   useEffect(() => {
     if (!conversationId) return
@@ -148,6 +108,7 @@ export default function ArenaTab(): ReactElement {
         })
       )
       setArena(state)
+      setBaseline(snapshot); guard.markSaved()
     } catch (e) {
       useUiStore.getState().toast(`Could not start the arena: ${toNormalized(e).message}`, 'error')
     } finally {
@@ -188,7 +149,7 @@ export default function ArenaTab(): ReactElement {
 
   if (!arena || arena.status === 'discarded') {
     return (
-      <div className="arena-setup">
+      <div className="arena-setup" inert={busy} aria-busy={busy}>
         <p className="field-hint">
           Race the same task on several models — each in an isolated copy of this folder — then
           compare the diffs and apply one. The folder must be a git repository.
@@ -196,6 +157,7 @@ export default function ArenaTab(): ReactElement {
         <textarea
           className="textarea arena-task"
           rows={4}
+          aria-label="Arena task"
           placeholder="Describe the task, e.g. 'Fix the race condition in the retry queue and add a regression test.'"
           value={task}
           onChange={(e) => setTask(e.target.value)}
@@ -209,7 +171,7 @@ export default function ArenaTab(): ReactElement {
             onRemove={() => setRows((prev) => prev.filter((_, i) => i !== index))}
           />
         ))}
-        <div className="arena-candidate-row">
+        <div className="arena-rounds-row">
           <label className="field-hint" htmlFor="arena-rounds">
             Evolutionary rounds — after each round an LLM judge picks the winning diff and every
             candidate of the next round starts from it:
@@ -217,7 +179,6 @@ export default function ArenaTab(): ReactElement {
           <select
             id="arena-rounds"
             className="select arena-select"
-            style={{ flex: '0 0 auto' }}
             value={rounds}
             onChange={(e) => setRounds(Number(e.target.value))}
           >

@@ -663,3 +663,23 @@ so an event queues behind a busy chat and survives a restart — whose body is t
 label plus the payload wrapped in untrusted-content markers. The bot's turn runs
 with its normal interactive tools and approvals; with no sender to route to, the
 reply stays in the bot's chat and the user is notified instead.
+
+# Acknowledged sends and drafts (v51)
+
+`chat_send_receipts` has the composite primary key `(conversation_id, request_id)`.
+`fingerprint` identifies the exact content; `message_id` references the persisted user
+message. Retries reuse the receipt. Reusing an ID with different content is rejected.
+Conversation/message foreign keys cascade on deletion. Group-room sends use the same
+mechanism.
+
+`conversation_drafts` stores one `draft_json` per conversation, with a cascading
+conversation foreign key. It contains text, attachments and a pending request ID.
+Desktop drafts stay in SQLite. Browser and Flutter clients retain their own local
+drafts; Flutter uses secure storage.
+
+# Per-device access (v52)
+
+`remote_devices.access_level` is `limited` or `full`, defaulting to `limited` for
+existing devices. `access_granted_at` records the latest full grant (nullable).
+Only desktop can change the grant. Revocation/access are checked for each request
+and again before returning an in-flight response.

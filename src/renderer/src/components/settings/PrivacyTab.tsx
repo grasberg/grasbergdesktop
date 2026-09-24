@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Space } from '@shared/types'
+import type { BackupPreview, BackupSummary, Space } from '@shared/types'
 import { Switch } from '@/components/common/controls'
 import { usePersistSettings } from '@/hooks/usePersistSettings'
 import { useSettingsStore } from '@/stores/settings'
@@ -12,17 +12,24 @@ import { useSkillsStore } from '@/stores/skills'
 import { useSpacesStore } from '@/stores/spaces'
 import { useUiStore } from '@/stores/ui'
 import { toNormalized, unwrap } from '@/api/uld'
+import { useWorkflowsStore } from '@/stores/workflows'
+import { usePromptsStore } from '@/stores/prompts'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
+import { isRemoteClient } from '@/lib/client-platform'
 
 function BackupSection() {
   const toast = useUiStore((s) => s.toast)
   const [busy, setBusy] = useState(false)
   const [includePrivate, setIncludePrivate] = useState(false)
+  const [preview, setPreview] = useState<BackupPreview | null>(null)
+  const [summary, setSummary] = useState<BackupSummary | null>(null)
+  const previewRef = useModalBehavior(!!preview, () => { if (!busy) setPreview(null) })
 
   const runExport = async (): Promise<void> => {
     setBusy(true)
     try {
       const result = await unwrap(
-        window.uld.backup.export(includePrivate ? { includePrivateSpaces: true } : undefined)
+        window.uld.backup.export(includePrivate && !isRemoteClient() ? { includePrivateSpaces: true } : undefined)
       )
       if (!result.canceled) toast(`Backup saved to ${result.path}`, 'success')
     } catch (e) {
@@ -35,8 +42,19 @@ function BackupSection() {
   const runImport = async (): Promise<void> => {
     setBusy(true)
     try {
-      const result = await unwrap(window.uld.backup.import())
+      const result = await unwrap(window.uld.backup.preview())
       if (result.canceled) return
+      setPreview(result)
+    } catch (e) { toast(toNormalized(e).message, 'error') }
+    finally { setBusy(false) }
+  }
+  const commitImport = async (): Promise<void> => {
+    if (!preview || busy) return
+    setBusy(true)
+    try {
+      const result = await unwrap(window.uld.backup.commit(preview.id))
+      setPreview(null)
+      setSummary(result)
       const parts = [
         `${result.conversationsImported} conversations`,
         `${result.memoriesImported} memories`,
@@ -53,6 +71,9 @@ function BackupSection() {
         useMemoriesStore.getState().load(),
         useSkillsStore.getState().load(),
         useConversationsStore.getState().load(),
+        useWorkflowsStore.getState().load(),
+        usePromptsStore.getState().load(),
+        useSpacesStore.getState().load(),
       ])
     } catch (e) {
       toast(toNormalized(e).message, 'error')
@@ -63,13 +84,21 @@ function BackupSection() {
 
   return (
     <>
+      {summary && <div className="callout" role="status">Import complete: {summary.conversationsImported} conversations, {summary.memoriesImported} memories, {summary.skillsImported} skills, {summary.promptsImported} prompts, {summary.workflowsImported} workflows and {summary.settingsApplied} settings. {summary.skippedItems} invalid or duplicate entries skipped. <button className="btn btn-ghost" onClick={() => setSummary(null)}>Dismiss</button></div>}
+      {preview && <div className="modal-backdrop" style={{ zIndex: 950 }}><div className="modal" ref={previewRef} role="dialog" aria-modal="true" aria-labelledby="backup-preview-title">
+        <h3 id="backup-preview-title">Review backup import</h3><p>{preview.filename} · version {preview.version}{preview.exportedAt ? ` · ${new Date(preview.exportedAt).toLocaleString()}` : ''}</p>
+        <p>Eligible entries: {preview.counts.conversationsImported} conversations, {preview.counts.memoriesImported} memories, {preview.counts.skillsImported} skills, {preview.counts.promptsImported} prompts, {preview.counts.workflowsImported} workflows and {preview.counts.settingsApplied} settings.</p>
+        <p>{preview.counts.skippedItems} invalid or duplicate entries will be skipped. Final counts can change if data changes before import.</p>
+        <p>Matching memories and skills are updated. Existing conversations, prompts and workflows are kept. Keys and security settings are excluded. Import cannot be undone automatically; export a backup first if you need to restore your current version.</p>
+        <div className="prompt-form-actions"><button data-autofocus className="btn" disabled={busy} onClick={() => setPreview(null)}>Cancel</button><button className="btn btn-primary" disabled={busy} onClick={() => void commitImport()}>{busy ? 'Importing…' : 'Import backup'}</button></div>
+      </div></div>}
       <div className="toggle-row">
         <div className="toggle-row-text">
           <span className="toggle-row-title">Backup</span>
           <span className="field-hint">
-            Export or import your settings, memories and skills as a JSON file. API keys and other
-            secrets are never included. Importing merges: existing entries with the same name are
-            updated, nothing is duplicated.
+            Export conversations, prompts, workflows, settings, memories and skills as JSON. Stored
+            API keys and OAuth tokens are excluded; text you wrote may still contain sensitive data.
+            Import merges named entries and skips conversation IDs that already exist.
           </span>
         </div>
         <div className="prompt-form-actions">
@@ -81,7 +110,7 @@ function BackupSection() {
           </button>
         </div>
       </div>
-      <div className="toggle-row">
+      {!isRemoteClient() && <div className="toggle-row">
         <div className="toggle-row-text">
           <span className="toggle-row-title">Include private spaces in export</span>
           <span className="field-hint">
@@ -94,7 +123,7 @@ function BackupSection() {
           onChange={setIncludePrivate}
           label="Include private spaces in export"
         />
-      </div>
+      </div>}
     </>
   )
 }
@@ -468,8 +497,11 @@ export default function PrivacyTab() {
 
       <div className="callout">
         <p>
-          Local-first: conversations, settings and keys stay on this device. The only network calls
-          are to LLM providers you configure.
+          Conversations and settings are stored on your desktop. Sending a message shares its
+          context and selected attachments with the chosen provider; credentials authenticate those
+          requests. Model lists can refresh from models.dev. Enabled tools, voice downloads, MCP
+          servers and bridges may contact their configured services. Paired phones receive app data
+          through the encrypted tunnel.
         </p>
       </div>
 
@@ -502,9 +534,7 @@ export default function PrivacyTab() {
       </div>
 
       <BackupSection />
-      <DeleteAllSection />
-      <AppLockSection />
-      <PrivateSpacesSection />
+      {isRemoteClient() ? <div className="callout">Private spaces, the desktop passphrase and bulk deletion are managed on your desktop. Private-space conversations are excluded from this device, including exports.</div> : <><DeleteAllSection /><AppLockSection /><PrivateSpacesSection /></>}
     </section>
   )
 }

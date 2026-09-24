@@ -138,7 +138,7 @@ export interface ToolExecutorDeps {
    * returns a model-readable note with the task id, pollable via task_output
    * and stoppable via task_stop. Absent => background runs are refused.
    */
-  shellBackground?: { start(command: string, cwd: string): string } | null
+  shellBackground?: { start(command: string, cwd: string, ctx: ToolExecuteContext): string } | null
   /** Whether the browser/computer tools may run (user opt-in). */
   browserEnabled?: () => boolean
   /** Embedded browser for the browser/computer tools. */
@@ -204,8 +204,8 @@ export interface ToolExecutorDeps {
   /** Background sub-agent tasks (delegate background=true + task_output/task_stop). */
   delegateBackground?: {
     start(task: string, ctx: ToolExecuteContext, agentName?: string): string
-    output(taskId: string): string
-    stop(taskId: string): string
+    output(taskId: string, ctx: ToolExecuteContext): string
+    stop(taskId: string, ctx: ToolExecuteContext): string
   } | null
   /**
    * Approval-gated project writes for edit_file/write_file. propose() records
@@ -293,6 +293,10 @@ export interface ToolExecutorDeps {
 
 export interface ToolExecuteContext {
   conversation: Conversation
+  /** Acting profile, independent of the conversation that owns approvals/files. */
+  agentId?: string | null
+  /** Main-computed run toolset; aliases cannot expand it. */
+  allowedToolIds?: ReadonlySet<string>
   /** Stream this call belongs to (forwarded into the approval request). */
   streamId?: string
   /**
@@ -1255,6 +1259,13 @@ export class ToolExecutor {
     audit.definition = definition
     audit.rawArguments = toolCall.arguments
 
+    if (ctx.allowedToolIds && !ctx.allowedToolIds.has(definition.id)) {
+      audit.decision = 'blocked'
+      audit.detail = 'tool outside the run toolset'
+      return `Tool '${definition.name}' is not available to this run.`
+    }
+    if (ctx.signal?.aborted) return 'The task was stopped.'
+
     if (!definition.enabled) {
       audit.decision = 'blocked'
       audit.detail = 'tool disabled in settings'
@@ -1350,8 +1361,8 @@ export class ToolExecutor {
       audit.decision = 'auto'
       audit.detail = preGrant ?? 'permission is always allow'
     }
+    if (ctx.signal?.aborted) return 'The task was stopped.'
     if (newOrigin !== null) this.rememberOrigin(ctx, newOrigin)
-
     return this.runTool(definition, args, ctx, toolCall, audit)
   }
 
@@ -1363,7 +1374,8 @@ export class ToolExecutor {
    */
   /** Approval scope for browser origins: the bot, else the conversation. */
   private browserScope(ctx: ToolExecuteContext): string {
-    return ctx.conversation.agentId ? `bot:${ctx.conversation.agentId}` : ctx.conversation.id
+    const agentId = ctx.agentId ?? ctx.conversation.agentId
+    return agentId ? `bot:${agentId}` : ctx.conversation.id
   }
 
   /** The origin a browser 'navigate' would open, when this scope has not visited it yet. */
@@ -1405,7 +1417,7 @@ export class ToolExecutor {
     if (definition.id === 'browser') {
       const origin = this.browserNewOrigin(definition, args, ctx)
       if (origin) {
-        return `Opens a site this ${ctx.conversation.agentId ? 'bot' : 'conversation'} has not visited yet: ${origin}`
+        return `Opens a site this ${(ctx.agentId ?? ctx.conversation.agentId) ? 'bot' : 'conversation'} has not visited yet: ${origin}`
       }
     }
     if (definition.id === 'schedule_task') return this.scheduleTaskNote(args, ctx)
@@ -1577,9 +1589,9 @@ export class ToolExecutor {
       case 'write_file':
         return this.runWriteFile(args, ctx, audit)
       case 'task_output':
-        return this.runTaskOutput(args)
+        return this.runTaskOutput(args, ctx)
       case 'task_stop':
-        return this.runTaskStop(args)
+        return this.runTaskStop(args, ctx)
       case 'update_task_list':
         return this.runUpdateTaskList(args, ctx)
       case 'schedule_task':
@@ -2090,18 +2102,18 @@ export class ToolExecutor {
 
   // -- background tasks + task list + questions -----------------------------------
 
-  private runTaskOutput(args: Record<string, unknown>): string {
+  private runTaskOutput(args: Record<string, unknown>, ctx: ToolExecuteContext): string {
     if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
     const [taskId, taskIdError] = requireStringArg(args, 'taskId')
     if (taskIdError) return taskIdError
-    return this.deps.delegateBackground.output(taskId)
+    return this.deps.delegateBackground.output(taskId, ctx)
   }
 
-  private runTaskStop(args: Record<string, unknown>): string {
+  private runTaskStop(args: Record<string, unknown>, ctx: ToolExecuteContext): string {
     if (!this.deps.delegateBackground) return 'Error: background tasks are unavailable in this build.'
     const [taskId, taskIdError] = requireStringArg(args, 'taskId')
     if (taskIdError) return taskIdError
-    return this.deps.delegateBackground.stop(taskId)
+    return this.deps.delegateBackground.stop(taskId, ctx)
   }
 
   private runUpdateTaskList(args: Record<string, unknown>, ctx: ToolExecuteContext): string {
@@ -2896,7 +2908,7 @@ export class ToolExecutor {
       if (!this.deps.shellBackground) {
         return 'Error: background shell jobs are unavailable in this build.'
       }
-      return this.deps.shellBackground.start(command, workingDir)
+      return this.deps.shellBackground.start(command, workingDir, ctx)
     }
 
     const timeoutMs =

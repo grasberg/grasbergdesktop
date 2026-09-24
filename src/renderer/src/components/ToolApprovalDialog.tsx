@@ -10,6 +10,7 @@ import type { ToolRiskLevel } from '@shared/types'
 import { prettyJson } from '@/lib/format'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useUiStore } from '@/stores/ui'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
 
 const RISK_LABEL: Record<ToolRiskLevel, string> = {
   safe: 'safe',
@@ -30,6 +31,8 @@ export default function ToolApprovalDialog(): ReactElement | null {
 
   const visible = pending !== null && !settingsOpen
   const denyRef = useRef<HTMLButtonElement>(null)
+  const responding = useToolsStore(s => !!(pending && s.responding[pending.requestId]))
+  const modalRef = useModalBehavior(visible, () => { if (pending) void useToolsStore.getState().respond(pending.requestId, false) })
 
   // Have definitions at hand for description/permission display.
   useEffect(() => {
@@ -45,20 +48,6 @@ export default function ToolApprovalDialog(): ReactElement | null {
   // otherwise stop the in-flight generation) never sees the event.
   // Every response names the request this dialog rendered — main may settle the
   // head request underneath us, and the answer must not land on the next one.
-  const requestId = pending?.requestId ?? null
-  useEffect(() => {
-    if (!visible || !requestId) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        void useToolsStore.getState().respond(requestId, false)
-      }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [visible, requestId])
-
   if (!pending || !visible) return null
 
   const tool =
@@ -70,6 +59,7 @@ export default function ToolApprovalDialog(): ReactElement | null {
     <div className="modal-backdrop tool-approval-backdrop">
       <div
         className="modal tool-approval-modal"
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="tool-approval-title"
@@ -96,11 +86,11 @@ export default function ToolApprovalDialog(): ReactElement | null {
           </pre>
         </div>
 
-        <div className="tool-approval-actions">
+        <fieldset className="tool-approval-actions" disabled={responding} style={{ border: 0, padding: 0 }}>
           <button
             type="button"
             className="btn-link tool-approval-settings"
-            onClick={() => useUiStore.getState().openSettings(true)}
+            onClick={() => useUiStore.getState().openSettings(true, 'tools')}
           >
             Tool settings…
           </button>
@@ -108,6 +98,7 @@ export default function ToolApprovalDialog(): ReactElement | null {
           <button
             type="button"
             ref={denyRef}
+            data-autofocus
             className="btn"
             onClick={() => void useToolsStore.getState().respond(pending.requestId, false)}
           >
@@ -144,7 +135,8 @@ export default function ToolApprovalDialog(): ReactElement | null {
           >
             Allow once
           </button>
-        </div>
+        </fieldset>
+        {responding && <p role="status">Sending your decision…</p>}
 
         {tool && effectivePermission(permissions, tool) === 'ask' ? (
           <p className="tool-approval-hint">

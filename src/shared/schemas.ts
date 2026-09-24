@@ -4,6 +4,13 @@
  */
 
 import { z } from 'zod'
+import { isBotAvatarImage } from './bot-avatar'
+
+export const botAvatarSchema = z.object({
+  emoji: z.string().max(16).nullable().optional(),
+  color: z.string().max(32).nullable().optional(),
+  imageDataUrl: z.string().refine(isBotAvatarImage, 'Choose a PNG, JPEG or WebP profile image.').nullable().optional(),
+})
 
 // ---------------------------------------------------------------------------
 // Settings + provider config (IPC boundary)

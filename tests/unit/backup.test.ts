@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openDatabase, type AppDatabase } from '../../src/main/db/database'
-import { applyBackup, buildBackup, BACKUP_FORMAT } from '../../src/main/services/backup'
+import { applyBackup, buildBackup, BACKUP_FORMAT, BackupImports } from '../../src/main/services/backup'
 
 let dir: string
 let source: AppDatabase
@@ -22,6 +22,55 @@ afterEach(() => {
 })
 
 describe('buildBackup', () => {
+  it('previews without writes, commits the reviewed content once and rejects another device', () => {
+    source.memories.create({ title: 'reviewed', content: 'original' })
+    const imports = new BackupImports(target)
+    const backup = buildBackup(source)
+    const preview = imports.prepare(JSON.stringify(backup), 'example.json', 'phone-one')
+    expect(preview.counts.memoriesImported).toBe(1)
+    expect(target.memories.list()).toEqual([])
+    backup.memories[0].content = 'changed after preview'
+    expect(() => imports.commit(preview.id, 'phone-two')).toThrow(/expired/)
+    expect(imports.commit(preview.id, 'phone-one').memoriesImported).toBe(1)
+    expect(target.memories.list()[0].content).toBe('original')
+    expect(() => imports.commit(preview.id, 'phone-one')).toThrow(/expired/)
+  })
+  it('expires previews and rejects unsupported future backup versions', () => {
+    let now = 0
+    const imports = new BackupImports(target, () => now)
+    const preview = imports.prepare(JSON.stringify(buildBackup(source)), 'backup.json')
+    now = 11 * 60_000
+    expect(() => imports.commit(preview.id)).toThrow(/expired/)
+    expect(() => imports.prepare(JSON.stringify({ ...buildBackup(source), version: 999 }), 'future.json')).toThrow(/newer version/)
+    expect(target.memories.list()).toEqual([])
+  })
+  it('round-trips equal memory titles in distinct owner namespaces', () => {
+    const first = source.agents.create({ name: 'First', systemPrompt: 'test' })
+    const second = source.agents.create({ name: 'Second', systemPrompt: 'test' })
+    for (const [agentId, content] of [[null, 'shared'], [first.id, 'one'], [second.id, 'two']] as const) {
+      source.memories.create({ title: 'same title', content, agentId })
+    }
+    const result = applyBackup(target, buildBackup(source))
+    expect(result.memoriesImported).toBe(3)
+    expect(target.memories.listVisibleTo(null).map((m) => m.content)).toEqual(['shared'])
+    expect(target.memories.listVisibleTo(first.id).map((m) => m.content)).toEqual(['one'])
+    expect(target.memories.listVisibleTo(second.id).map((m) => m.content)).toEqual(['two'])
+    expect(target.memories.list()).toHaveLength(3)
+    expect(target.agents.list()).toHaveLength(0)
+  })
+
+  it.each([undefined, '', 42, {}])('does not promote malformed v5 memory ownership (%j)', (agentId) => {
+    const backup = buildBackup(source)
+    const result = applyBackup(target, { ...backup, memories: [{ title: 'private', content: 'secret', agentId }] })
+    expect(result.skippedItems).toBe(1)
+    expect(target.memories.list()).toHaveLength(0)
+  })
+
+  it.each([1, 2, 3, 4])('still reads legacy v%s ownerless shared memories', (version) => {
+    applyBackup(target, { ...buildBackup(source), version, memories: [{ title: 'old', content: 'shared' }] })
+    expect(target.memories.listVisibleTo(null).map((m) => m.content)).toEqual(['shared'])
+  })
+
   it('collects settings, memories and skills with the format marker', () => {
     source.settings.update({ fontSize: 'large', memoryEnabled: false })
     source.memories.create({ title: 'lang', content: 'Swedish' })
@@ -31,7 +80,7 @@ describe('buildBackup', () => {
     expect(backup.format).toBe(BACKUP_FORMAT)
     expect(backup.version).toBeGreaterThanOrEqual(1)
     expect(backup.settings).toMatchObject({ fontSize: 'large', memoryEnabled: false })
-    expect(backup.memories).toEqual([{ title: 'lang', content: 'Swedish' }])
+    expect(backup.memories).toEqual([{ title: 'lang', content: 'Swedish', agentId: null }])
     expect(backup.skills).toHaveLength(1)
     expect(backup.skills[0]).toMatchObject({ name: 'triage', enabled: true })
   })

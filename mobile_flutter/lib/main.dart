@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'screens/chat_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/pair_screen.dart';
+import 'screens/full_app_screen.dart';
 import 'state/app_store.dart';
 import 'state/tunnel.dart';
 
@@ -94,12 +95,18 @@ class RootView extends StatelessWidget {
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) {
-        final gated = store.tunnelState == TunnelState.unpaired ||
+        final gated =
+            store.tunnelState == TunnelState.unpaired ||
             store.tunnelState == TunnelState.pairing ||
             store.tunnelState == TunnelState.error;
         Widget child;
         if (gated) {
           child = PairScreen(store: store);
+        } else if (store.hasFullAccess && !store.showCompact) {
+          child = FullAppScreen(
+            key: ValueKey(store.identity?.deviceId),
+            store: store,
+          );
         } else if (store.currentId != null) {
           child = ChatScreen(store: store);
         } else {
@@ -114,7 +121,10 @@ class RootView extends StatelessWidget {
                 left: 16,
                 right: 16,
                 bottom: 24,
-                child: ToastCard(message: toast),
+                child: ToastCard(
+                  message: toast,
+                  onDismiss: () => store.setToast(null),
+                ),
               ),
           ],
         );
@@ -124,9 +134,10 @@ class RootView extends StatelessWidget {
 }
 
 class ToastCard extends StatelessWidget {
-  const ToastCard({super.key, required this.message});
+  const ToastCard({super.key, required this.message, this.onDismiss});
 
   final String message;
+  final VoidCallback? onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -139,9 +150,20 @@ class ToastCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: const Color(0xFF30363D)),
         ),
-        child: Text(
-          message,
-          style: const TextStyle(color: Palette.text, fontSize: 13),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(color: Palette.text, fontSize: 13),
+              ),
+            ),
+            IconButton(
+              onPressed: onDismiss,
+              tooltip: 'Dismiss message',
+              icon: const Icon(Icons.close),
+            ),
+          ],
         ),
       ),
     );

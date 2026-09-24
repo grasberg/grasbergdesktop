@@ -616,6 +616,13 @@
   font-size: 0.78rem;
 }
 
+.arena-rounds-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px;
+  gap: 8px;
+  align-items: center;
+}
+
 .arena-actions {
   display: flex;
   gap: 8px;

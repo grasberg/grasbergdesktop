@@ -24,7 +24,7 @@ export const useMemoriesStore = create<MemoriesStoreState>()((set, get) => ({
 
   ...createSimpleListActions<Memory, MemoryInput, MemoryPatch>({
     label: 'memories',
-    api: window.uld.memories,
+    api: () => window.uld.memories,
     onLoaded: (memories) => set({ memories, loaded: true }),
     onLoadFailed: () => set({ loaded: true }),
   }),

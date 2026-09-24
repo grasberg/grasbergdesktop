@@ -1,5 +1,24 @@
-import type { ProviderConfig } from '@shared/types'
+import type { AgentProfile, AppSettings, Conversation, ProviderConfig } from '@shared/types'
+import { PROVIDER_TYPES } from '@shared/catalog'
 import { isLoopbackBaseUrl } from '@shared/schemas'
+
+/** Static model pins in the same order as ChatService.resolveTarget. */
+export function conversationModel(
+  conversation: Pick<Conversation, 'providerId' | 'modelId'> | null,
+  settings: Pick<AppSettings, 'defaultProviderId'> | null,
+  providers: ProviderConfig[],
+  agent?: Pick<AgentProfile, 'providerId' | 'modelId'> | null
+): { provider: ProviderConfig | null; modelId: string | null } {
+  const providerId = conversation?.providerId ?? agent?.providerId ?? settings?.defaultProviderId
+  const provider = providers.find((p) => p.id === providerId) ?? null
+  const modelId = [
+    conversation?.modelId,
+    agent?.modelId,
+    provider?.defaultModelId,
+    provider ? PROVIDER_TYPES[provider.type].defaultModelId : null,
+  ].find((id) => id?.trim())?.trim() ?? null
+  return { provider, modelId }
+}
 
 /**
  * Whether a provider can actually back a generation. OAuth providers ("Sign in

@@ -194,6 +194,16 @@ export interface InnerHello {
 export interface InnerHelloRes {
   t: 'hello-res'
   app: { name: string; version: string }
+  capabilities?: RemoteCapabilities
+}
+
+export interface RemoteCapabilities {
+  revision: 2
+  access: 'limited' | 'full'
+  requestChannels: string[]
+  pushChannels: string[]
+  maxUploadBytes: number
+  chunkBytes: number
 }
 
 /** A request shaped exactly like a renderer ipcRenderer.invoke. */

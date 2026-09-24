@@ -12,14 +12,19 @@ class HomeScreen extends StatelessWidget {
 
   final AppStore store;
 
-  Future<void> _confirmDelete(BuildContext context, ConversationSummary summary) async {
+  Future<void> _confirmDelete(
+    BuildContext context,
+    ConversationSummary summary,
+  ) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: Palette.surface,
         title: const Text('Delete conversation?'),
-        content: Text('“${summary.title.isEmpty ? 'Untitled' : summary.title}” is deleted '
-            'together with its messages, also on the desktop.'),
+        content: Text(
+          '“${summary.title.isEmpty ? 'Untitled' : summary.title}” is deleted '
+          'together with its messages, also on the desktop.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -53,7 +58,9 @@ class HomeScreen extends StatelessWidget {
                 icon: const Icon(Icons.settings_outlined),
                 tooltip: 'Settings',
                 onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(builder: (_) => SettingsScreen(store: store)),
+                  MaterialPageRoute<void>(
+                    builder: (_) => SettingsScreen(store: store),
+                  ),
                 ),
               ),
               IconButton(
@@ -66,32 +73,47 @@ class HomeScreen extends StatelessWidget {
           body: SafeArea(
             child: Column(
               children: [
+                if (store.hasFullAccess)
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: FilledButton(
+                      onPressed: () => store.setCompact(false),
+                      child: const Text('Open full Grasberg'),
+                    ),
+                  )
+                else
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text(
+                      'For bots, settings and Work, grant full access to this device in desktop Settings → Bridges.',
+                    ),
+                  ),
                 ApprovalCards(store: store),
                 Expanded(
                   child: loading && conversations.isEmpty
                       ? const Center(child: CircularProgressIndicator())
                       : conversations.isEmpty
-                          ? const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(24),
-                                child: Text(
-                                  'No conversations yet. Start one, or use the desktop app.',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: Palette.muted),
-                                ),
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: conversations.length,
-                              itemBuilder: (context, index) {
-                                final summary = conversations[index];
-                                return _ConversationTile(
-                                  summary: summary,
-                                  onOpen: () => store.openConversation(summary.id),
-                                  onDelete: () => _confirmDelete(context, summary),
-                                );
-                              },
+                      ? const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Text(
+                              'No conversations yet. Start one, or use the desktop app.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Palette.muted),
                             ),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: conversations.length,
+                          itemBuilder: (context, index) {
+                            final summary = conversations[index];
+                            return _ConversationTile(
+                              summary: summary,
+                              onOpen: () => store.openConversation(summary.id),
+                              onDelete: () => _confirmDelete(context, summary),
+                            );
+                          },
+                        ),
                 ),
               ],
             ),
@@ -103,7 +125,11 @@ class HomeScreen extends StatelessWidget {
 }
 
 class _ConversationTile extends StatelessWidget {
-  const _ConversationTile({required this.summary, required this.onOpen, required this.onDelete});
+  const _ConversationTile({
+    required this.summary,
+    required this.onOpen,
+    required this.onDelete,
+  });
 
   final ConversationSummary summary;
   final VoidCallback onOpen;
@@ -135,13 +161,17 @@ class _ConversationTile extends StatelessWidget {
                       fontSize: 15,
                     ),
                   ),
-                  if (summary.snippet != null && summary.snippet!.isNotEmpty) ...[
+                  if (summary.snippet != null &&
+                      summary.snippet!.isNotEmpty) ...[
                     const SizedBox(height: 2),
                     Text(
                       summary.snippet!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Palette.muted, fontSize: 13),
+                      style: const TextStyle(
+                        color: Palette.muted,
+                        fontSize: 13,
+                      ),
                     ),
                   ],
                 ],

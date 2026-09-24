@@ -43,9 +43,10 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
   gap: 14px;
   padding: 24px;
+  overflow-y: auto;
   pointer-events: none;
 }
 
@@ -60,10 +61,10 @@
 
 .workflows-gallery-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 260px));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   justify-content: center;
   gap: 10px;
-  max-width: 860px;
+  width: min(860px, 100%);
 }
 
 .workflows-gallery-card {
@@ -158,4 +159,20 @@
 .workflows-day:disabled {
   opacity: 0.5;
   cursor: default;
+}
+.workflows-mobile-tabs { display: none; }
+.workflows-check-summary { padding: 8px 14px; color: var(--danger); display: flex; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .workflows .workflows-header { flex-wrap: wrap; padding: 8px; }
+  .workflows .workflows-header-left { flex-wrap: wrap; flex-basis: 100%; }
+  .workflows .workflows-header-left select { max-width: 100%; }
+  .workflows .workflows-header-actions { flex-wrap: wrap; }
+  .workflows .workflows-body { display: flex; flex-direction: column; }
+  .workflows .workflows-mobile-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; flex-shrink: 0; }
+  .workflows .workflows-mobile-tabs select { flex-basis: 100%; min-width: 0; }
+  .workflows .workflows-mobile-tabs button { min-height: 44px; flex: 1; }
+  .workflows .workflows-palette, .workflows .workflows-inspector, .workflows .workflows-canvas { display: none; flex: 1; min-height: 0; border: 0; }
+  .workflow-mobile-palette .workflows-palette { display: flex; }
+  .workflow-mobile-canvas .workflows-canvas { display: block; }
+  .workflow-mobile-inspector .workflows-inspector { display: block; }
 }

@@ -14,11 +14,13 @@
  */
 
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import {
   DEFAULT_SETTINGS,
   SECURITY_SENSITIVE_SETTING_KEYS,
   type AppSettings,
   type BackupSummary,
+  type BackupPreview,
   type Conversation,
   type Message,
   type WorkflowGraph,
@@ -33,8 +35,9 @@ export const LEGACY_BACKUP_FORMAT = 'grasberg-desktop-backup'
  * v3: the two-mode model — legacy modes remap to 'work' on import.
  * v4: private spaces — a `spaces` section and conversation `spaceId`, present
  * only when the export explicitly opted private spaces in.
+ * v5: every memory carries its owner; unknown owners remain isolated.
  */
-export const BACKUP_VERSION = 4
+export const BACKUP_VERSION = 5
 
 /** A conversation with its transcript, as exported. */
 interface BackupConversation extends Conversation {
@@ -46,7 +49,7 @@ export interface BackupFile {
   version: number
   exportedAt: number
   settings: Record<string, unknown>
-  memories: { title: string; content: string }[]
+  memories: { title: string; content: string; agentId: string | null }[]
   skills: {
     name: string
     description: string
@@ -96,7 +99,7 @@ export function buildBackup(
     version: BACKUP_VERSION,
     exportedAt: Date.now(),
     settings,
-    memories: db.memories.list().map((m) => ({ title: m.title, content: m.content })),
+    memories: db.memories.list().map((m) => ({ title: m.title, content: m.content, agentId: m.agentId })),
     skills: db.skills.list().map((s) => ({
       name: s.name,
       description: s.description,
@@ -137,10 +140,72 @@ const envelopeSchema = z
   })
   .passthrough()
 
+/** Bounded, expiring previews hold the exact bytes reviewed, never a mutable file path. */
+export class BackupImports {
+  private pending = new Map<string, { owner: string; raw: unknown; expires: number }>()
+  constructor(private db: AppDatabase, private now = Date.now) {}
+
+  prepare(json: string, filename: string, owner = 'desktop'): BackupPreview {
+    if (Buffer.byteLength(json, 'utf8') > 64 * 1024 * 1024) throw new Error('Backups must be 64 MB or smaller.')
+    let raw: unknown
+    try { raw = JSON.parse(json) } catch { throw new Error('The selected file is not valid JSON.') }
+    const parsed = envelopeSchema.safeParse(raw)
+    if (!parsed.success) throw new Error('Not a Grasberg backup file.')
+    if (parsed.data.version > BACKUP_VERSION) throw new Error('This backup needs a newer version of Grasberg.')
+    const data = parsed.data
+    const counts: BackupSummary = { settingsApplied: 0, memoriesImported: 0, skillsImported: 0, conversationsImported: 0, promptsImported: 0, workflowsImported: 0, skippedItems: 0 }
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (data.settings && key in data.settings && !SECURITY_SENSITIVE_SETTING_KEYS.has(key) && settingsPatchSchema.safeParse({ [key]: data.settings[key] }).success) counts.settingsApplied++
+    }
+    for (const item of data.memories ?? []) {
+      const p = memoryItemSchema.safeParse(item)
+      if (p.success && (data.version < 5 || p.data.agentId !== undefined)) counts.memoriesImported++
+      else counts.skippedItems++
+    }
+    for (const item of data.skills ?? []) {
+      if (skillItemSchema.safeParse(item).success) counts.skillsImported++
+      else counts.skippedItems++
+    }
+    const seenConversations = new Set<string>()
+    for (const item of data.conversations ?? []) {
+      const p = conversationItemSchema.safeParse(item)
+      if (p.success && !this.db.conversations.getById(p.data.id) && !seenConversations.has(p.data.id)) {
+        seenConversations.add(p.data.id); counts.conversationsImported++
+      } else counts.skippedItems++
+    }
+    const promptNames = new Set(this.db.prompts.list().map(p => p.title.toLowerCase()))
+    for (const item of data.prompts ?? []) {
+      const p = promptItemSchema.safeParse(item)
+      if (p.success && !promptNames.has(p.data.title.toLowerCase())) { promptNames.add(p.data.title.toLowerCase()); counts.promptsImported++ }
+      else counts.skippedItems++
+    }
+    const workflowNames = new Set(this.db.workflows.list().map(w => w.name.toLowerCase()))
+    for (const item of data.workflows ?? []) {
+      const p = workflowItemSchema.safeParse(item)
+      if (p.success && !workflowNames.has(p.data.name.toLowerCase())) { workflowNames.add(p.data.name.toLowerCase()); counts.workflowsImported++ }
+      else counts.skippedItems++
+    }
+    for (const [id, p] of this.pending) if (p.owner === owner || p.expires <= this.now()) this.pending.delete(id)
+    if (this.pending.size >= 4) this.pending.delete(this.pending.keys().next().value!)
+    const id = randomUUID()
+    this.pending.set(id, { owner, raw, expires: this.now() + 10 * 60_000 })
+    return { id, filename, version: data.version, exportedAt: typeof data.exportedAt === 'number' ? data.exportedAt : null, counts }
+  }
+
+  commit(id: string, owner = 'desktop'): BackupSummary {
+    const pending = this.pending.get(id)
+    if (!pending || pending.owner !== owner || pending.expires <= this.now()) throw new Error('This import preview expired. Choose the backup again.')
+    const result = this.db.driver.transaction(() => applyBackup(this.db, pending.raw))
+    this.pending.delete(id)
+    return result
+  }
+}
+
 const memoryItemSchema = z
   .object({
     title: z.string().trim().min(1).max(200),
     content: z.string().max(10_000),
+    agentId: z.string().min(1).max(100).nullable().optional(),
   })
   .passthrough()
 
@@ -315,11 +380,17 @@ export function applyBackup(db: AppDatabase, raw: unknown): BackupSummary {
 
   for (const item of data.memories ?? []) {
     const parsed = memoryItemSchema.safeParse(item)
-    if (!parsed.success) {
+    if (!parsed.success || (data.version >= 5 && parsed.data.agentId === undefined)) {
       summary.skippedItems += 1
       continue
     }
-    db.memories.upsertByTitle({ title: parsed.data.title, content: parsed.data.content })
+    // No roster is imported. Keep an unknown owner inert, never promote it
+    // into shared memory or guess an owner from a matching name.
+    db.memories.upsertByTitle({
+      title: parsed.data.title,
+      content: parsed.data.content,
+      agentId: parsed.data.agentId ?? null,
+    })
     summary.memoriesImported += 1
   }
 

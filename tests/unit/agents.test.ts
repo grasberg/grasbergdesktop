@@ -33,6 +33,19 @@ afterEach(() => {
 })
 
 describe('agents repository', () => {
+  it('persists an image-only avatar across restart and supports replacing and removing it', () => {
+    const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII='
+    const agent = db.agents.create({ name: 'Photo bot', systemPrompt: 'Help.', avatar: { imageDataUrl } })
+    db.close()
+    db = openDatabase(join(dir, 'app.db'))
+    expect(db.agents.getById(agent.id)?.avatar?.imageDataUrl).toBe(imageDataUrl)
+    const replacement = 'data:image/webp;base64,UklGRg=='
+    db.agents.update(agent.id, { avatar: { imageDataUrl: replacement, emoji: '🤖' } })
+    expect(db.agents.getById(agent.id)?.avatar?.imageDataUrl).toBe(replacement)
+    db.agents.update(agent.id, { avatar: { imageDataUrl: null, emoji: '🦊' } })
+    expect(db.agents.getById(agent.id)?.avatar).toEqual({ emoji: '🦊', color: null })
+  })
+
   it('round-trips a profile and looks names up case-insensitively', () => {
     const created = db.agents.create({
       name: 'Researcher',

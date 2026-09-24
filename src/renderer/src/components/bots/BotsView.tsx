@@ -18,6 +18,8 @@ import { useBotsStore } from '@/stores/bots'
 import { useSettingsStore } from '@/stores/settings'
 import { BotAvatarBadge } from './BotAvatarBadge'
 import { toastError } from '@/stores/ui'
+import { navigateGuarded, useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import { getChatDraft, loadChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 import './bots.css'
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,11 @@ function GroupForm({
   )
   const [mode, setMode] = useState<BotGroupMode>(editing?.mode ?? 'roundtable')
   const [leadAgentId, setLeadAgentId] = useState<string>(editing?.leadAgentId ?? '')
+  const [busy, setBusy] = useState(false)
+  const savingRef = useRef(false)
+  const formValue = JSON.stringify({ name, memberIds, observerIds, activation, mode, leadAgentId })
+  const [baseline] = useState(formValue)
+  const guard = useUnsavedChanges(formValue !== baseline)
   const createGroup = useBotsStore((s) => s.createGroup)
   const updateGroup = useBotsStore((s) => s.updateGroup)
   const maxMembers = useSettingsStore((s) => s.settings?.botMode.groupMaxMembers ?? 6)
@@ -70,9 +77,11 @@ function GroupForm({
     (mode !== 'ensemble' || lead !== null)
 
   const submit = async (): Promise<void> => {
-    if (!valid) return
-    if (editing) {
-      await updateGroup(editing.id, {
+    if (!valid || savingRef.current) return
+    savingRef.current = true; setBusy(true)
+    try {
+    const saved = editing
+      ? await updateGroup(editing.id, {
         name: name.trim(),
         memberIds,
         activation,
@@ -80,15 +89,15 @@ function GroupForm({
         mode,
         leadAgentId: lead,
       })
-    } else {
-      await createGroup(name.trim(), memberIds, activation, observers, mode, lead)
-    }
-    onDone()
+      : await createGroup(name.trim(), memberIds, activation, observers, mode, lead)
+    if (saved) { guard.markSaved(); onDone() }
+    } finally { savingRef.current = false; setBusy(false) }
   }
 
   return (
     <div className="bot-form">
       <h3>{editing ? `Edit ${editing.name}` : 'New group chat'}</h3>
+      <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'contents' }}>
       <label>
         Room name
         <input
@@ -164,13 +173,14 @@ function GroupForm({
         ) : null}
       </div>
       <div className="bot-form-actions">
-        <button type="button" className="primary" disabled={!valid} onClick={() => void submit()}>
-          {editing ? 'Save' : 'Create room'}
+        <button type="button" className="primary" disabled={!valid || busy} onClick={() => void submit()}>
+          {busy ? 'Saving…' : editing ? 'Save' : 'Create room'}
         </button>
-        <button type="button" onClick={onDone}>
+        <button type="button" onClick={() => guard.discard(onDone)}>
           Cancel
         </button>
       </div>
+      </fieldset>
     </div>
   )
 }
@@ -194,8 +204,18 @@ function RoomView({
   const sendToGroup = useBotsStore((s) => s.sendToGroup)
   const stopGroup = useBotsStore((s) => s.stopGroup)
   const deleteGroup = useBotsStore((s) => s.deleteGroup)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => getChatDraft(group.conversationId).text)
+  const [draftLoaded, setDraftLoaded] = useState(false)
+  const [sending, setSending] = useState(false)
+  const sendingRef = useRef(false)
+  useEffect(() => {
+    let live = true
+    setDraftLoaded(false)
+    void loadChatDraft(group.conversationId).then(value => { if (live) { setDraft(value.text); setDraftLoaded(true) } }).catch(e => toastError('Could not restore room draft', e))
+    return () => { live = false }
+  }, [group.conversationId])
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const stickToBottom = useRef(true)
   const byId = useMemo(() => new Map(bots.map((bot) => [bot.id, bot])), [bots])
   const members = group.memberIds
     .map((id) => byId.get(id))
@@ -203,14 +223,19 @@ function RoomView({
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [messages.length, active])
 
   const send = async (): Promise<void> => {
     const text = draft.trim()
-    if (!text) return
-    setDraft('')
-    await sendToGroup(group.id, text)
+    if (!text || sendingRef.current || !draftLoaded) return
+    sendingRef.current = true; setSending(true)
+    stickToBottom.current = true
+    try {
+      if (await sendToGroup(group.id, text)) {
+        setDraft(''); await saveChatDraft(group.conversationId, { text: '' }).catch(e => toastError('Could not clear saved room draft', e))
+      }
+    } finally { sendingRef.current = false; setSending(false) }
   }
 
   return (
@@ -248,7 +273,7 @@ function RoomView({
           />
         </div>
       </header>
-      <div className="bot-room-messages" ref={scrollRef}>
+      <div className="bot-room-messages" ref={scrollRef} onScroll={(event) => { const el = event.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100 }}>
         {messages.length === 0 ? (
           <p className="bot-empty-hint">
             Say something to the room. @mention a bot to address it directly; the members reply
@@ -263,7 +288,8 @@ function RoomView({
       <div className="bot-room-composer">
         <textarea
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          disabled={!draftLoaded || sending}
+          onChange={(e) => { setDraft(e.target.value); void saveChatDraft(group.conversationId, { text: e.target.value }).catch(error => toastError('Could not save room draft', error)) }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
@@ -277,7 +303,7 @@ function RoomView({
           }
           rows={2}
         />
-        <button type="button" className="primary" disabled={!draft.trim()} onClick={() => void send()}>
+        <button type="button" className="primary" disabled={!draft.trim() || !draftLoaded || sending} onClick={() => void send()}>
           Send
         </button>
       </div>
@@ -331,6 +357,7 @@ export default function BotsView(): ReactElement {
   const setShowHidden = useBotsStore((s) => s.setShowHidden)
   const [search, setSearch] = useState('')
   const [panel, setPanel] = useState<Panel>({ kind: 'none' })
+  const changePanel = (next: Panel): void => navigateGuarded(() => setPanel(next), 'page')
 
   useEffect(() => {
     void load()
@@ -377,7 +404,7 @@ export default function BotsView(): ReactElement {
   const activeGroup = groups.find((row) => row.group.id === activeGroupId)
 
   return (
-    <div className="bots-view">
+    <div className={`bots-view${panel.kind !== 'none' || activeGroup ? ' has-detail' : ''}`}>
       <aside className="bots-roster" aria-label="Bots">
         <header className="bots-roster-header">
           <h2>Bots</h2>
@@ -392,10 +419,10 @@ export default function BotsView(): ReactElement {
                 👁
               </button>
             ) : null}
-            <button type="button" onClick={() => setPanel({ kind: 'new-group' })}>
+            <button type="button" onClick={() => changePanel({ kind: 'new-group' })}>
               New group
             </button>
-            <button type="button" className="primary" onClick={() => setPanel({ kind: 'new-bot' })}>
+            <button type="button" className="primary" onClick={() => changePanel({ kind: 'new-bot' })}>
               New bot
             </button>
           </div>
@@ -415,7 +442,7 @@ export default function BotsView(): ReactElement {
                 type="button"
                 className="bots-active-chip"
                 title={`${row.agent.name} is working`}
-                onClick={() => void openBotChat(row.agent.id)}
+                onClick={() => navigateGuarded(() => void openBotChat(row.agent.id), 'page')}
               >
                 <BotAvatarBadge agent={row.agent} size={22} />
                 <span>{row.agent.name}</span>
@@ -433,7 +460,7 @@ export default function BotsView(): ReactElement {
                 <button
                   type="button"
                   className="bots-row-main"
-                  onClick={() => void openBotChat(entry.row.agent.id)}
+                  onClick={() => navigateGuarded(() => void openBotChat(entry.row.agent.id), 'page')}
                 >
                   <span className="bots-row-avatar">
                     <BotAvatarBadge agent={entry.row.agent} />
@@ -461,7 +488,7 @@ export default function BotsView(): ReactElement {
                   <button
                     type="button"
                     title="Edit bot"
-                    onClick={() => setPanel({ kind: 'edit-bot', agent: entry.row.agent })}
+                    onClick={() => changePanel({ kind: 'edit-bot', agent: entry.row.agent })}
                   >
                     ✎
                   </button>
@@ -494,7 +521,7 @@ export default function BotsView(): ReactElement {
                 <button
                   type="button"
                   className="bots-row-main"
-                  onClick={() => selectGroup(entry.row.group.id)}
+                  onClick={() => navigateGuarded(() => { setPanel({ kind: 'none' }); selectGroup(entry.row.group.id) }, 'page')}
                 >
                   <span className="bots-row-avatar group-avatar">👥</span>
                   <span className="bots-row-text">
@@ -529,6 +556,7 @@ export default function BotsView(): ReactElement {
         </ul>
       </aside>
       <main className="bots-detail">
+        <button className="btn bots-back" onClick={() => navigateGuarded(() => { setPanel({ kind: 'none' }); selectGroup(null) }, 'page')}>← All bots</button>
         {panel.kind === 'new-bot' || panel.kind === 'edit-bot' ? (
           <AgentProfileForm
             key={panel.kind === 'edit-bot' ? panel.agent.id : 'new'}
@@ -540,16 +568,18 @@ export default function BotsView(): ReactElement {
           />
         ) : panel.kind === 'new-group' || panel.kind === 'edit-group' ? (
           <GroupForm
+            key={panel.kind === 'edit-group' ? panel.group.id : 'new-group'}
             bots={allAgents.filter((agent) => agent.enabled)}
             editing={panel.kind === 'edit-group' ? panel.group : null}
             onDone={() => setPanel({ kind: 'none' })}
           />
         ) : activeGroup ? (
           <RoomView
+            key={activeGroup.group.id}
             group={activeGroup.group}
             active={activeGroup.active}
             bots={allAgents}
-            onEdit={() => setPanel({ kind: 'edit-group', group: activeGroup.group })}
+            onEdit={() => changePanel({ kind: 'edit-group', group: activeGroup.group })}
           />
         ) : (
           <div className="bots-placeholder">
@@ -561,7 +591,7 @@ export default function BotsView(): ReactElement {
               answer all at once and let a lead synthesize, in an ensemble room.
             </p>
             <p className="bot-empty-hint">
-              Routines: schedule a task in the composer's Scheduled Tasks popover and pick the
+              Routines: open Automation, create a scheduled task and pick the
               bot under "Run as" — results land in the bot's chat.
             </p>
             <button type="button" className="primary" onClick={() => setPanel({ kind: 'new-bot' })}>

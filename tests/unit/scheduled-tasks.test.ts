@@ -25,6 +25,18 @@ afterEach(() => {
 })
 
 describe('scheduled tasks repository', () => {
+  it('edits instructions and schedule without losing pause state, budget or run history', async () => {
+    const original = db.scheduledTasks.create({ title: 'Original', prompt: 'Old instructions', recurrence: 'daily', runAt: Date.now() + 60_000 })
+    db.scheduledTasks.setEnabled(original.id, false)
+    db.scheduledTasks.setBudget(original.id, 12)
+    await new ScheduledTaskScheduler({ db, run: async () => 'Recorded output' }).runNow(original.id)
+    const runs = db.scheduledTaskRuns.list(original.id)
+    expect(runs).toHaveLength(1)
+    const runAt = Date.now() + 120_000
+    const updated = db.scheduledTasks.update(original.id, { title: 'Updated', prompt: 'New instructions', recurrence: 'weekly', runAt })!
+    expect(updated).toMatchObject({ id: original.id, title: 'Updated', prompt: 'New instructions', recurrence: 'weekly', nextRunAt: runAt, enabled: false, budgetUsd: 12, lastOutput: 'Recorded output', lastStatus: 'ok', createdAt: original.createdAt })
+    expect(db.scheduledTaskRuns.list(original.id)).toEqual(runs)
+  })
   it('creates, lists, pauses and removes a standalone task', () => {
     const runAt = Date.now() + 60_000
     const task = db.scheduledTasks.create({

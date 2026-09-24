@@ -4,6 +4,8 @@
  * provider type uses it directly.
  */
 
+import { discoverModels } from './model-discovery'
+
 import type { z } from 'zod'
 import type {
   ModelInfo,
@@ -12,7 +14,7 @@ import type {
   TokenUsage,
   ToolCallRecord,
 } from '@shared/types'
-import { PROVIDER_TYPES, UNKNOWN_MODEL_CAPS, findInCatalog } from '@shared/catalog'
+import { PROVIDER_TYPES, UNKNOWN_MODEL_CAPS } from '@shared/catalog'
 import type { ProviderModelCatalog } from '@shared/catalog'
 import {
   oaiChatChunkSchema,
@@ -621,30 +623,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   async listModels(ctx: AdapterContext): Promise<ModelInfo[]> {
-    const meta = this.catalog(ctx)
-    if (!meta.supportsModelListing) return meta.knownModels
-    try {
-      const json = await withRetry(
-        async () => {
-          const res = await this.doRequest(ctx, '/models', { method: 'GET' })
-          return this.readJson(res, ctx)
-        },
-        { signal: ctx.signal }
-      )
-      const parsed = oaiModelsListSchema.parse(json)
-      const mapped = parsed.data.map((entry) => {
-        const known = findInCatalog(meta.knownModels, entry.id)
-        const info: ModelInfo = known
-          ? { ...known, fromCatalog: false } // live-listed, but enriched from catalog
-          : { id: entry.id, capabilities: UNKNOWN_MODEL_CAPS, fromCatalog: false }
-        return { info, known: known !== undefined }
-      })
-      mapped.sort((a, b) => Number(b.known) - Number(a.known)) // catalog-known first, stable
-      return mapped.map((m) => m.info)
-    } catch (e) {
-      if (e instanceof ProviderError && e.code === 'aborted') throw e
-      return meta.knownModels
-    }
+    return discoverModels(this.type, ctx, this.catalog(ctx).knownModels)
   }
 
   async testConnection(ctx: AdapterContext): Promise<TestConnectionResult> {

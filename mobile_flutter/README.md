@@ -36,9 +36,19 @@ routing metadata only. Protocol: `src/shared/remote-protocol.ts`.
   (desktop online/offline), replay-protected request sequences persisted
   before send, identity revocation handled (4401 → re-pair).
 
-Deliberately out (mirrors the desktop's remote allowlist): settings, provider
-keys, filesystem/git, terminal. The phone is trusted, but its surface stays
-minimal on principle — see `src/main/remote/router.ts`.
+Existing pairs keep this compact interface and limited access. On desktop, use
+**Settings → Bridges → Remote access → Grant full access** for the selected phone
+to enable the complete interface: settings, providers, bots and rooms, libraries,
+automation, rich chat, files, Git, preview, terminal, Arena and Optimizer.
+Desktop can remove the grant at any time. Private-space conversations, stored
+credentials and access management remain excluded from remote management.
+
+The complete interface uses the same React views as desktop and is packaged
+inside the native app. `full_app_screen.dart` serves assets on a nonce-bound
+loopback URL and bridges reviewed requests to the Dart tunnel. The relay cannot
+replace the interface. Pairing secrets and frame keys never enter JavaScript.
+Rich drafts stay in secure native storage; file transfer uses native pickers.
+Android's Back action uses the shared unsaved-change guard.
 
 ## Layout
 
@@ -87,6 +97,7 @@ Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install);
 build each platform on its own OS (Android anywhere, iOS on macOS).
 
 ```bash
+npm run build:native-ui   # repository root; required before native builds
 cd mobile_flutter
 flutter pub get
 flutter test              # unit + interop tests (no device needed)
@@ -96,8 +107,14 @@ flutter build apk         # release APK → build/app/outputs/flutter-apk/
 flutter build ipa         # iOS (macOS + Xcode)
 ```
 
-Android requirements already wired: `INTERNET` (outbound tunnel only) and
-`CAMERA` (QR scan) permissions; iOS: `NSCameraUsageDescription`.
+Android declares `INTERNET`, `CAMERA` (QR scan) and `RECORD_AUDIO` (dictation).
+Cleartext access is restricted to loopback for the packaged interface. iOS declares
+camera/microphone usage and local networking. Recording requests microphone access.
+
+Validation on Windows covers Dart analysis/tests and Android debug compilation.
+Native Android/iOS device checks remain necessary; successful APK compilation does
+not verify the WebView, file picker or microphone on a phone. See
+`docs/UX_IMPLEMENTATION.md` for the current verification matrix.
 
 ## Pairing walkthrough
 
@@ -109,6 +126,8 @@ Android requirements already wired: `INTERNET` (outbound tunnel only) and
    stores the identity in the secure storage and connects.
 4. Same conversations, same streaming, same approvals — as if you were at the
    desktop.
+5. Grant this phone full access on desktop to use the complete interface. Older
+   desktop versions continue to work through compact mode.
 
 The desktop-hosted web client (`src/mobile/`) and this native app are peers:
 either can be paired, both stay connected at the relay, and pushes fan out to

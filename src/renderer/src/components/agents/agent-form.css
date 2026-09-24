@@ -35,7 +35,7 @@
 
 .bot-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -44,6 +44,32 @@
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.bot-avatar-picker {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bot-avatar-label { font-size: 12px; color: var(--text-muted); }
+.bot-avatar-controls { display: flex; align-items: flex-start; gap: 16px; }
+.bot-avatar-options { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.bot-avatar-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.bot-avatar-custom input { width: 110px; }
+.bot-emoji-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.bot-emoji-picker button { min-height: 40px; font-size: 24px; padding: 4px; }
+.bot-emoji-picker button[aria-pressed="true"] { outline: 2px solid var(--text); }
+.bot-avatar-error { margin: 0; color: var(--danger, #c0392b); font-size: 12px; }
 
 .bot-color-swatch {
   width: 22px;
@@ -58,14 +84,40 @@
 }
 
 .bot-form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--bg-panel, var(--bg));
+  border-top: 1px solid var(--border);
+  padding-block: 12px;
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
+.bot-advanced > summary { cursor: pointer; padding: 14px 0; font-weight: 600; }
+.bot-advanced[open] > summary { margin-bottom: 12px; }
+.bot-advanced .bot-form-section { margin-bottom: 16px; }
+
 .bot-form-hint {
   font-size: 12px;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.bot-form label, .bot-form input, .bot-form textarea, .bot-form select { min-width: 0; max-width: 100%; }
+.bot-form button:not(.bot-color-swatch) { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-panel); color: var(--text); padding: 7px 10px; cursor: pointer; }
+.bot-form button.primary { background: var(--accent); color: var(--accent-text, white); }
+.bot-form button:disabled { opacity: .5; cursor: default; }
+.bot-form-actions { flex-wrap: wrap; }
+.bot-form-actions > button { flex: none; white-space: nowrap; }
+.bot-form-actions > .bot-form-hint { flex: 1 1 220px; }
+@media (max-width: 640px) {
+  .bot-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .bot-form { padding: 12px; margin: 10px auto; }
+  .bot-avatar-controls { gap: 10px; }
+  .bot-form button:not(.bot-color-swatch) { min-height: 40px; }
+  .bot-form-tools { grid-template-columns: minmax(0, 1fr); }
 }
 
 .bot-member-pick {

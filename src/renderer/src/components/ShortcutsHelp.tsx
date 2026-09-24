@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
 import { modKeySymbol } from '@/lib/platform'
 import { useUiStore } from '@/stores/ui'
 import './settings/settings.css'
@@ -15,18 +15,7 @@ const SHORTCUTS: { label: string; keys: string[] }[] = [
 export default function ShortcutsHelp() {
   const open = useUiStore((s) => s.shortcutsOpen)
   const openShortcuts = useUiStore((s) => s.openShortcuts)
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        openShortcuts(false)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, openShortcuts])
+  const modalRef = useModalBehavior(open, () => openShortcuts(false))
 
   if (!open) return null
 
@@ -39,6 +28,7 @@ export default function ShortcutsHelp() {
     >
       <div
         className="modal shortcuts-modal"
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="shortcuts-title"

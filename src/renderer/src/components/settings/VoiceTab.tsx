@@ -40,6 +40,7 @@ export default function VoiceTab() {
           </p>
         </div>
       </header>
+      <div className="callout" role="status"><strong>{downloading ? 'Downloading voice files…' : !settings.voiceInputEnabled ? 'Dictation is off' : !status?.binaryReady ? 'Speech engine needed' : !activeDownloaded ? 'Speech model needed' : 'Ready to dictate'}</strong><p>{!status?.binaryReady || !activeDownloaded ? 'Download a model below to install the required speech files. The download contacts the model host; transcription then runs on your desktop.' : 'Use the microphone in a chat. Your operating system or browser may ask for microphone access the first time.'}</p></div>
 
       <label className="field-checkbox">
         <input

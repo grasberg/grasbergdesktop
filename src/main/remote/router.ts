@@ -2,22 +2,22 @@
  * The phone's view of the app: an explicit allowlist of IPC channels a paired
  * device may invoke, plus the push channels forwarded to it.
  *
- * The phone IS the owner's trusted device — but it is a browser on a network
- * the desktop does not control, so the surface stays minimal on principle:
- * conversations and chat (read/run), approvals (answer), workflows (run), and
- * read-only status. Deliberately OUT: settings (they carry pairing codes and
- * endpoint tokens), provider/key management, the filesystem and git surfaces,
- * the terminal, and every destructive bulk operation. Adding a channel is a
- * one-line, reviewable decision — never a wildcard.
+ * Existing pairs retain the limited chat and approval surface. Full access is
+ * a per-device desktop grant checked on every request; the additional channels
+ * are reviewed in capabilities.ts. Private chats, stored secrets and granting
+ * further devices remain desktop-only. No wildcard forwards arbitrary IPC.
  */
 
 import { CHANNELS, type ChannelName } from '@shared/ipc'
 import { callIpcHandler, type IpcHandlerMap } from '../ipc/handler-map'
 import { withInvocationPolicy } from '../invocation-context'
+import { FULL_REMOTE_CHANNELS, FULL_REMOTE_PUSH_CHANNELS, remoteSafeData } from './capabilities'
+import type { RemoteCapabilities } from '@shared/remote-protocol'
 
 export const REMOTE_REQUEST_CHANNELS: ReadonlySet<ChannelName> = new Set([
   // app
   CHANNELS.appGetInfo,
+  CHANNELS.remoteCapabilities,
   // conversations (read + organize + run)
   CHANNELS.convList,
   CHANNELS.convCreate,
@@ -36,6 +36,7 @@ export const REMOTE_REQUEST_CHANNELS: ReadonlySet<ChannelName> = new Set([
   CHANNELS.chatCompact,
   // answering approvals/questions raised by runs
   CHANNELS.toolsApprovalRespond,
+  CHANNELS.toolsPending,
   CHANNELS.toolsQuestionRespond,
   // workflows: list/run/watch
   CHANNELS.workflowsList,
@@ -71,11 +72,13 @@ export const REMOTE_PUSH_CHANNELS: ReadonlySet<string> = new Set([
   CHANNELS.mcpServersChanged,
   CHANNELS.arenaChanged,
   CHANNELS.optimizerChanged,
+  CHANNELS.remoteCapabilitiesChanged,
 ])
 
 export type RemoteRequestInvoker = (
   channel: string,
   args: unknown[]
+  , deviceId?: string
 ) => ReturnType<typeof callIpcHandler>
 
 /**
@@ -154,6 +157,21 @@ function sanitizeRemoteArgs(channel: ChannelName, args: unknown[]): unknown[] {
  * with no content.
  */
 const REMOTE_CONVERSATION_REF: Partial<Record<ChannelName, (args: unknown[]) => unknown>> = {
+  [CHANNELS.convExport]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
+  [CHANNELS.codeCheckpointsList]: args => args[0],
+  [CHANNELS.imSetTelegram]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
+  [CHANNELS.convDraftGet]: args => args[0],
+  [CHANNELS.convDraftSave]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
+  [CHANNELS.convForkLineage]: args => args[0],
+  [CHANNELS.terminalCreate]: args => args[0],
+  [CHANNELS.agentRunsList]: args => args[0],
+  [CHANNELS.usageConversationCost]: args => args[0],
+  [CHANNELS.arenaStart]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
+  [CHANNELS.arenaApply]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
+  [CHANNELS.arenaStatus]: args => args[0],
+  [CHANNELS.arenaStop]: args => args[0],
+  [CHANNELS.arenaDiscard]: args => args[0],
+  [CHANNELS.codeTurnRevert]: args => (args[0] as { conversationId?: unknown } | undefined)?.conversationId,
   [CHANNELS.convGet]: (args) => args[0],
   [CHANNELS.convDelete]: (args) => args[0],
   [CHANNELS.convMessages]: (args) => args[0],
@@ -171,8 +189,25 @@ const REMOTE_CONVERSATION_REF: Partial<Record<ChannelName, (args: unknown[]) => 
 }
 
 export interface RemoteRouterOptions {
+  accessForDevice?: (deviceId: string) => 'limited' | 'full'
+  conversationForTerminal?: (sessionId: string) => string | undefined
+  conversationForResource?: (channel: string, args: unknown[]) => string | null | undefined
+  isAttachmentRemotable?: (storageKey: string) => boolean
   /** False = the conversation lives in a private space (never remotable). */
   isConversationRemotable?: (conversationId: string) => boolean
+}
+
+export function excludePrivateData(value: unknown, visible: (id: string) => boolean): unknown {
+  if (Array.isArray(value)) return value.map(v => excludePrivateData(v, visible)).filter(v => v !== undefined)
+  if (!value || typeof value !== 'object') return value
+  const object = value as Record<string, unknown>
+  if (typeof object.conversationId === 'string' && !visible(object.conversationId)) return undefined
+  if (typeof object.id === 'string' && ('spaceId' in object || 'mode' in object) && !visible(object.id)) return undefined
+  return Object.fromEntries(Object.entries(object).map(([key, v]) => [key, excludePrivateData(v, visible)]))
+}
+
+export function remoteCapabilities(access: 'limited' | 'full'): RemoteCapabilities {
+  return { revision: 2, access, requestChannels: [...new Set([...REMOTE_REQUEST_CHANNELS, ...(access === 'full' ? FULL_REMOTE_CHANNELS : [])])], pushChannels: [...new Set([...REMOTE_PUSH_CHANNELS, ...(access === 'full' ? FULL_REMOTE_PUSH_CHANNELS : [])])], maxUploadBytes: 64 * 1024 * 1024, chunkBytes: 128 * 1024 }
 }
 
 /**
@@ -200,8 +235,18 @@ export function createRemoteRouter(
   handlers: IpcHandlerMap,
   opts?: RemoteRouterOptions
 ): RemoteRequestInvoker {
-  return (channel, args) => {
-    if (!REMOTE_REQUEST_CHANNELS.has(channel as ChannelName)) {
+  return async (channel, args, deviceId) => {
+    const access = deviceId ? opts?.accessForDevice?.(deviceId) ?? 'limited' : 'limited'
+    const unavailable = { ok: false as const, error: { code: 'not_supported' as const, message: 'This operation is available only on your desktop.', retryable: false } }
+    if (channel === CHANNELS.backupExport && (args[0] as { includePrivateSpaces?: unknown } | undefined)?.includePrivateSpaces === true) return unavailable
+    if (channel === CHANNELS.settingsUpdate && args[0] && typeof args[0] === 'object' && ['remoteAccessEnabled', 'remoteRelayUrl', 'remoteClientUrl', 'remoteDesktopId', 'appLockHash', 'voiceWhisperBinaryPath', 'workflowWebhookToken', 'telegramBridgePairingCode'].some(key => key in (args[0] as object))) return unavailable
+    if (channel === CHANNELS.terminalInput || channel === CHANNELS.terminalDispose) {
+      const sessionId = channel === CHANNELS.terminalInput ? (args[0] as { sessionId?: string } | undefined)?.sessionId : args[0]
+      const conversationId = typeof sessionId === 'string' ? opts?.conversationForTerminal?.(sessionId) : undefined
+      if (!conversationId || opts?.isConversationRemotable?.(conversationId) === false) return unavailable
+    }
+    if (channel === CHANNELS.remoteCapabilities) return { ok: true, data: remoteCapabilities(access) }
+    if (!REMOTE_REQUEST_CHANNELS.has(channel as ChannelName) && !(access === 'full' && FULL_REMOTE_CHANNELS.has(channel as ChannelName))) {
       return Promise.resolve({
         ok: false as const,
         error: {
@@ -212,7 +257,10 @@ export function createRemoteRouter(
       })
     }
     const ref = REMOTE_CONVERSATION_REF[channel as ChannelName]?.(args)
-    if (typeof ref === 'string' && opts?.isConversationRemotable?.(ref) === false) {
+    const resourceRef = opts?.conversationForResource?.(channel, args)
+    const attachmentKey = channel === CHANNELS.appReadAttachment ? args[0] : channel === CHANNELS.appExtractAttachmentText || channel === CHANNELS.appSaveAttachmentAs || channel === CHANNELS.voiceTranscribeAttachment ? (args[0] as { storageKey?: unknown } | undefined)?.storageKey : undefined
+    if (typeof attachmentKey === 'string' && opts?.isAttachmentRemotable?.(attachmentKey) === false) return unavailable
+    if ([ref, resourceRef].some(id => typeof id === 'string' && opts?.isConversationRemotable?.(id) === false)) {
       return Promise.resolve({
         ok: false as const,
         error: {
@@ -222,14 +270,30 @@ export function createRemoteRouter(
         },
       })
     }
-    return withInvocationPolicy(
-      { origin: 'remote', autoAcceptEdits: false, sandboxLevel: 'workspace-write' },
+    let transportArgs = args
+    if (channel === CHANNELS.voiceSttChunk) {
+      const input = args[0] as { chunkBase64?: unknown; sessionId?: unknown } | undefined
+      const encoded = input?.chunkBase64
+      if (typeof encoded !== 'string' || encoded.length > 512 * 1024 || encoded.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+        return { ok: false, error: { code: 'invalid_request', message: 'Invalid audio chunk. Record again.', retryable: false } }
+      }
+      transportArgs = [{ sessionId: input?.sessionId, chunk: new Uint8Array(Buffer.from(encoded, 'base64')) }]
+    }
+    const result = await withInvocationPolicy(
+      { origin: 'remote', deviceId, autoAcceptEdits: false, sandboxLevel: 'workspace-write' },
       () =>
         callIpcHandler(
           handlers,
           channel as ChannelName,
-          sanitizeRemoteArgs(channel as ChannelName, args)
+          sanitizeRemoteArgs(channel as ChannelName, transportArgs)
         )
     )
+    if (channel === CHANNELS.toolsPending && result.ok && opts?.isConversationRemotable) {
+      const data = result.data as { approvals: Array<{ conversationId: string }>; questions: Array<{ conversationId: string }> }
+      const visible = (r: { conversationId: string }): boolean => opts.isConversationRemotable!(r.conversationId)
+      return { ok: true as const, data: { approvals: data.approvals.filter(visible), questions: data.questions.filter(visible) } }
+    }
+    if (result.ok && channel === CHANNELS.lockStatus) return { ok: true, data: { ...(result.data as object), locked: false } }
+    return result.ok ? { ok: true, data: remoteSafeData(channel, opts?.isConversationRemotable ? excludePrivateData(result.data, opts.isConversationRemotable) : result.data) } : result
   }
 }

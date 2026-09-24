@@ -12,6 +12,7 @@ import { unwrap } from '@/api/uld'
 import type { BotsStoreState } from './contracts'
 import { useConversationsStore } from './conversations'
 import { toastError } from './ui'
+import { getChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 
 /** Sidebar/badge summary of the roster (hidden bots excluded; rooms included). */
 export function botsAttentionSummary(roster: BotRoster): {
@@ -128,8 +129,10 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
     try {
       await unwrap(window.uld.bots.updateGroup(id, patch))
       await get().load()
+      return true
     } catch (e) {
       toastError('Failed to update group', e)
+      return false
     }
   },
 
@@ -145,10 +148,19 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
 
   async sendToGroup(groupId, content) {
     try {
-      await unwrap(window.uld.bots.groupSend(groupId, content))
+      const group = get().roster?.groups.find(g => g.group.id === groupId)?.group
+      if (!group) return false
+      const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`group:${content.trim()}`))), n => n.toString(16).padStart(2, '0')).join('')
+      const pending = getChatDraft(group.conversationId).pendingSend
+      const id = pending?.fingerprint === fingerprint ? pending.id : crypto.randomUUID()
+      await saveChatDraft(group.conversationId, { text: content, pendingSend: { id, fingerprint } })
+      await unwrap(window.uld.bots.groupSend(groupId, content, id))
+      await saveChatDraft(group.conversationId, { pendingSend: undefined }).catch(e => toastError('Message accepted, but the local receipt could not be cleared', e))
       void reloadGroupMessages(groupId)
+      return true
     } catch (e) {
       toastError('Failed to send', e)
+      return false
     }
   },
 

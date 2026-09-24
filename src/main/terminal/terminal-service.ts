@@ -67,6 +67,10 @@ export class TerminalService {
 
   constructor(private readonly options: TerminalServiceOptions) {}
 
+  conversationForSession(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.conversationId
+  }
+
   /**
    * Returns the conversation's live session, or spawns one in `cwd`. One
    * session per conversation: the terminal is the task's, not the tab's, so
@@ -97,7 +101,10 @@ export class TerminalService {
     }
     this.sessions.set(session.sessionId, session)
 
-    const onData = (chunk: Buffer): void => this.pushData(session, chunk.toString('utf8'))
+    // Stream decoders retain UTF-8 characters split across pipe chunks.
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    const onData = (chunk: string): void => this.pushData(session, chunk)
     child.stdout?.on('data', onData)
     child.stderr?.on('data', onData)
     child.on('error', (err) => {

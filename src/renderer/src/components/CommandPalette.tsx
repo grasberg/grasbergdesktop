@@ -5,6 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useConversationsStore } from '@/stores/conversations'
 import { useWorkflowsStore } from '@/stores/workflows'
 import { errorMessage } from '@/api/uld'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
 import './settings/settings.css'
 
 interface PaletteItem {
@@ -33,6 +34,7 @@ const MAX_CONVERSATIONS = 30
 export default function CommandPalette() {
   const open = useUiStore((s) => s.paletteOpen)
   const openPalette = useUiStore((s) => s.openPalette)
+  const modalRef = useModalBehavior(open, () => openPalette(false))
   const openSettings = useUiStore((s) => s.openSettings)
   const openShortcuts = useUiStore((s) => s.openShortcuts)
   const openWorkflows = useUiStore((s) => s.openWorkflows)
@@ -119,6 +121,9 @@ export default function CommandPalette() {
           close()
           void updateSettings({ theme: nextTheme }).catch(catchToast)
         },
+      },
+      {
+        id: 'act-automation', section: 'Actions', label: 'Open Automation', run: () => { close(); setView('automation') },
       },
       {
         id: 'act-workflows',
@@ -274,7 +279,7 @@ export default function CommandPalette() {
         if (e.target === e.currentTarget) openPalette(false)
       }}
     >
-      <div className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div ref={modalRef} className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
         <input
           className="palette-input"
           autoFocus

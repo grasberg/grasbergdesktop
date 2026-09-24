@@ -18,6 +18,8 @@
 
 import { randomBytes } from 'node:crypto'
 import { hostname } from 'node:os'
+import { CHANNELS } from '@shared/ipc'
+import { FULL_REMOTE_PUSH_CHANNELS, remoteSafeData } from './capabilities'
 import type { AppSettings, RemoteStatus } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import type { Keystore } from '../keys/keystore'
@@ -36,6 +38,8 @@ import {
   createRemoteRouter,
   remotePushAllowed,
   REMOTE_PUSH_CHANNELS,
+  remoteCapabilities,
+  excludePrivateData,
   type RemoteRequestInvoker,
 } from './router'
 import {
@@ -58,6 +62,7 @@ export interface RemoteServiceDeps {
   /** The same handler map ipcMain serves — the phone runs the identical code. */
   handlers: IpcHandlerMap
   appVersion: string
+  conversationForTerminal?: (sessionId: string) => string | undefined
   socketFactory: TunnelSocketFactory
   /** Surfaced to the UI (toast) for tunnel errors. */
   notice?: (message: string, level: 'info' | 'error') => void
@@ -115,6 +120,17 @@ export class RemoteService {
     this.isConversationRemotable = (id) => deps.db.conversations.getById(id)?.spaceId == null
     this.router = createRemoteRouter(deps.handlers, {
       isConversationRemotable: this.isConversationRemotable,
+      accessForDevice: id => deps.db.remoteDevices.getActiveById(id)?.access ?? 'limited',
+      conversationForTerminal: deps.conversationForTerminal,
+      conversationForResource: (channel, args) => {
+        if (typeof args[0] !== 'string') return undefined
+        if ([CHANNELS.codeChangeApply, CHANNELS.codeChangeReject, CHANNELS.codeChangeRevert].includes(channel as never)) return deps.db.code.changeGet(args[0])?.conversationId
+        if (channel === CHANNELS.agentRunStop) return deps.db.driver.get<{ conversation_id: string | null }>('SELECT conversation_id FROM agent_runs WHERE id = ?', [args[0]])?.conversation_id
+        if (channel === CHANNELS.codeCheckpointRestore) return deps.db.driver.get<{ conversation_id: string }>('SELECT conversation_id FROM checkpoints WHERE id = ?', [args[0]])?.conversation_id
+        if ([CHANNELS.botGroupSend, CHANNELS.botGroupUpdate, CHANNELS.botGroupDelete, CHANNELS.botGroupStop, CHANNELS.botGroupMarkSeen].includes(channel as never)) return deps.db.botGroups.getById(args[0])?.conversationId
+        return undefined
+      },
+      isAttachmentRemotable: key => !deps.db.driver.get('SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.space_id IS NOT NULL AND m.attachments_json LIKE ? LIMIT 1', [`%${key}%`]),
     })
     // Executable phone code comes from a separately trusted static origin;
     // the untrusted relay receives only transport frames.
@@ -339,6 +355,14 @@ export class RemoteService {
     return this.status()
   }
 
+  setDeviceAccess(deviceId: string, access: 'limited' | 'full'): RemoteStatus {
+    this.deps.db.remoteDevices.setAccess(deviceId, access)
+    const key = this.deviceKey(deviceId)
+    if (key) this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'push', channel: CHANNELS.remoteCapabilitiesChanged, payload: remoteCapabilities(access) }))
+    this.deps.onChanged()
+    return this.status()
+  }
+
   // -- tunnel traffic ---------------------------------------------------------
 
   private async handleDeviceFrame(
@@ -362,7 +386,7 @@ export class RemoteService {
       return
     }
     if (inner.t === 'hello') {
-      this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'hello-res', app: { name: 'Grasberg', version: this.deps.appVersion } }))
+      this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'hello-res', app: { name: 'Grasberg', version: this.deps.appVersion }, capabilities: remoteCapabilities(device.access ?? 'limited') }))
       return
     }
     if (inner.t === 'req') {
@@ -370,7 +394,14 @@ export class RemoteService {
       // claim survives reconnects/restarts, so a captured mutating frame can
       // never be executed twice.
       if (!this.deps.db.remoteDevices.claimRequestSequence(deviceId, inner.seq)) return
-      const result = await this.router(inner.channel, inner.args)
+      const result = await this.router(inner.channel, inner.args, deviceId)
+      // Revocation while an operation awaits must stop its result leaving the desktop.
+      const currentDevice = this.deps.db.remoteDevices.getActiveById(deviceId)
+      if (!currentDevice) return
+      if (device.access === 'full' && currentDevice.access !== 'full') {
+        this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'res', id: inner.id, result: { ok: false, error: { code: 'not_supported', message: 'Full access was removed on the desktop.', retryable: false } } }))
+        return
+      }
       this.tunnel?.sendToDevice(deviceId, sealFrame(key, { t: 'res', id: inner.id, result }))
       return
     }
@@ -428,14 +459,21 @@ export class RemoteService {
   /** Forwards one bus push to every online device, sealed per device. */
   private forwardPush(channel: string, payload: unknown): void {
     if (!this.tunnel || this.onlineDevices.size === 0) return
-    if (!REMOTE_PUSH_CHANNELS.has(channel)) return
+    if (!REMOTE_PUSH_CHANNELS.has(channel) && !FULL_REMOTE_PUSH_CHANNELS.has(channel)) return
     // Private-space frames (stream text, approvals, list refreshes naming the
     // conversation) are dropped before sealing — they must never leave the box.
     if (!remotePushAllowed(channel, payload, this.isConversationRemotable)) return
+    if (channel === CHANNELS.terminalData || channel === CHANNELS.terminalExit) {
+      const id = (payload as { sessionId?: string } | undefined)?.sessionId
+      const conversationId = id ? this.deps.conversationForTerminal?.(id) : undefined
+      if (!conversationId || !this.isConversationRemotable(conversationId)) return
+    }
     for (const deviceId of this.onlineDevices) {
+      const device = this.deps.db.remoteDevices.getActiveById(deviceId)
+      if (!device || (!REMOTE_PUSH_CHANNELS.has(channel) && device.access !== 'full')) continue
       const key = this.deviceKey(deviceId)
       if (!key) continue
-      this.tunnel.sendToDevice(deviceId, sealFrame(key, { t: 'push', channel, payload }))
+      this.tunnel.sendToDevice(deviceId, sealFrame(key, { t: 'push', channel, payload: remoteSafeData(channel, excludePrivateData(payload, this.isConversationRemotable)) }))
     }
   }
 

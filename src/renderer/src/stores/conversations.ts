@@ -5,6 +5,7 @@ import type { ConversationsStoreState } from './contracts'
 import { useChatStore } from './chat'
 import { useSpacesStore } from './spaces'
 import { toastError, useUiStore } from './ui'
+import { navigateGuarded } from '@/hooks/useUnsavedChanges'
 
 /**
  * Upper bound on the sidebar list so the (unindexed, leading-wildcard) search
@@ -79,6 +80,12 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
     }
     try {
       const conv = await unwrap(window.uld.conversations.get(id))
+      // Canonical bot chats are excluded by conversations.list as well. A
+      // completed renderer stream must not add one back through this shortcut.
+      if (conv.agentId) {
+        set((s) => ({ summaries: s.summaries.filter((x) => x.id !== id) }))
+        return
+      }
       if (conv.mode !== get().modeFilter) return
       // A push about another space must never inject a row into this list.
       if ((conv.spaceId ?? null) !== useSpacesStore.getState().activeSpaceId) return
@@ -164,9 +171,11 @@ export const useConversationsStore = create<ConversationsStoreState>()((set, get
   select(id) {
     // Selecting is also navigation: leave Home/Workflows for the conversation
     // surface, or land back on Home when the selection is cleared.
-    useUiStore.getState().setView(id ? 'conversation' : 'home')
-    set({ activeId: id })
-    void useChatStore.getState().openConversation(id)
+    navigateGuarded(() => {
+      useUiStore.getState().setView(id ? 'conversation' : 'home')
+      set({ activeId: id })
+      void useChatStore.getState().openConversation(id)
+    }, 'page')
   },
 
   async rename(id, title) {

@@ -190,6 +190,8 @@ export const CHANNELS = {
   convUpdate: 'conv:update',
   convDelete: 'conv:delete',
   convMessages: 'conv:messages',
+  convDraftGet: 'conv:draftGet',
+  convDraftSave: 'conv:draftSave',
   convExport: 'conv:export',
   convFork: 'conv:fork',
   convForkLineage: 'conv:forkLineage',
@@ -275,6 +277,7 @@ export const CHANNELS = {
   toolsPermissionsList: 'tools:permissions:list',
   toolsPermissionSet: 'tools:permissions:set',
   toolsApprovalRespond: 'tools:approval:respond',
+  toolsPending: 'tools:pending',
   toolsQuestionRespond: 'tools:question:respond',
   toolsCustomList: 'tools:custom:list',
   toolsCustomCreate: 'tools:custom:create',
@@ -321,6 +324,8 @@ export const CHANNELS = {
   // backup (settings + memories + skills)
   backupExport: 'backup:export',
   backupImport: 'backup:import',
+  backupPreview: 'backup:preview',
+  backupCommit: 'backup:commit',
 
   // MCP servers
   mcpList: 'mcp:list',
@@ -343,6 +348,16 @@ export const CHANNELS = {
   /** Opens a pairing offer (QR) for a new phone; cancels when called with false. */
   remotePair: 'remote:pair',
   remoteDeviceRevoke: 'remote:deviceRevoke',
+  remoteDeviceAccess: 'remote:deviceAccess',
+  remoteCapabilities: 'remote:capabilities',
+  remoteCapabilitiesChanged: 'push:remoteCapabilities',
+  remoteUploadBegin: 'remote:upload:begin',
+  remoteUploadChunk: 'remote:upload:chunk',
+  remoteUploadFinish: 'remote:upload:finish',
+  remoteTransferCancel: 'remote:transfer:cancel',
+  remoteDownloadRead: 'remote:download:read',
+  remoteBrowse: 'remote:browse',
+  remoteFileInvoke: 'remote:fileInvoke',
 
   // Workflows
   workflowsList: 'workflows:list',
@@ -362,6 +377,7 @@ export const CHANNELS = {
   // Standalone scheduled tasks (clock menu; independent from workflows)
   scheduledTasksList: 'scheduledTasks:list',
   scheduledTasksCreate: 'scheduledTasks:create',
+  scheduledTasksUpdate: 'scheduledTasks:update',
   scheduledTasksSetEnabled: 'scheduledTasks:setEnabled',
   scheduledTasksSetBudget: 'scheduledTasks:setBudget',
   scheduledTasksDelete: 'scheduledTasks:delete',
@@ -410,6 +426,8 @@ export const CHANNELS = {
 
   // knowledge bases (RAG)
   kbList: 'kb:list',
+  kbProviders: 'kb:providers',
+  kbProgress: 'push:kbProgress',
   kbCreate: 'kb:create',
   kbDelete: 'kb:delete',
   kbImportFiles: 'kb:importFiles',
@@ -658,6 +676,8 @@ export interface ConvForkLineage {
 }
 
 export interface ChatSendRequest {
+  /** Reuse for a retry of the same send; persisted with the user message. */
+  clientRequestId?: string
   conversationId: string
   content: string
   attachments?: Attachment[]
@@ -682,6 +702,12 @@ export interface ChatSendRequest {
      */
     research?: { depth?: ResearchDepth }
   }
+}
+
+export interface ConversationDraft {
+  text: string
+  attachments: Attachment[]
+  pendingSend?: { id: string; fingerprint: string }
 }
 
 /** Starts an ephemeral quick-assistant generation (nothing is persisted). */
@@ -892,6 +918,8 @@ export interface UldApi {
     update(req: ConvUpdateRequest): Promise<IpcResult<Conversation>>
     delete(id: string): Promise<IpcResult<void>>
     messages(conversationId: string): Promise<IpcResult<Message[]>>
+    getDraft(conversationId: string): Promise<IpcResult<ConversationDraft | null>>
+    saveDraft(conversationId: string, draft: ConversationDraft): Promise<IpcResult<void>>
     /** Serializes a conversation to a file via a native save dialog (main). */
     export(req: ConvExportRequest): Promise<IpcResult<ConvExportResult>>
     /**
@@ -1112,6 +1140,7 @@ export interface UldApi {
     onPromoted(cb: (payload: { conversationId: string }) => void): () => void
   }
   tools: {
+    pending(): Promise<IpcResult<{ approvals: ToolApprovalRequest[]; questions: UserQuestionRequest[] }>>
     list(): Promise<IpcResult<ToolDefinition[]>>
     setEnabled(toolId: string, enabled: boolean): Promise<IpcResult<void>>
     permissionsList(): Promise<IpcResult<ToolPermission[]>>
@@ -1201,6 +1230,8 @@ export interface UldApi {
     importFolder(path: string): Promise<IpcResult<Skill[]>>
   }
   backup: {
+    preview(): Promise<IpcResult<{ canceled: true } | ({ canceled: false } & import('./types').BackupPreview)>>
+    commit(id: string): Promise<IpcResult<BackupSummary>>
     /**
      * Save-dialog export of settings + memories + skills (never secrets).
      * Private-space conversations are excluded unless `includePrivateSpaces`
@@ -1248,6 +1279,8 @@ export interface UldApi {
     setWebhook(url: string | null): Promise<IpcResult<ImBridgeStatus>>
   }
   remote: {
+    setAccess(deviceId: string, access: 'limited' | 'full'): Promise<IpcResult<RemoteStatus>>
+    capabilities(): Promise<IpcResult<import('./remote-protocol').RemoteCapabilities>>
     status(): Promise<IpcResult<RemoteStatus>>
     setConfig(input: RemoteSetConfigInput): Promise<IpcResult<RemoteStatus>>
     /**
@@ -1297,6 +1330,7 @@ export interface UldApi {
   scheduledTasks: {
     list(): Promise<IpcResult<ScheduledTask[]>>
     create(input: ScheduledTaskInput): Promise<IpcResult<ScheduledTask>>
+    update(id: string, input: ScheduledTaskInput): Promise<IpcResult<ScheduledTask>>
     setEnabled(id: string, enabled: boolean): Promise<IpcResult<ScheduledTask>>
     /** Sets/clears the task's monthly spend cap (USD). */
     setBudget(id: string, budgetUsd: number | null): Promise<IpcResult<ScheduledTask>>
@@ -1357,7 +1391,7 @@ export interface UldApi {
     createGroupFromMoaPreset(presetId: string): Promise<IpcResult<BotGroup>>
     deleteGroup(id: string): Promise<IpcResult<void>>
     /** Post a user message into a room; rounds run detached (push events). */
-    groupSend(groupId: string, content: string): Promise<IpcResult<void>>
+    groupSend(groupId: string, content: string, requestId?: string): Promise<IpcResult<void>>
     groupStop(groupId: string): Promise<IpcResult<void>>
     /** Clears the room's needs-you badge. */
     groupMarkSeen(groupId: string): Promise<IpcResult<void>>
@@ -1380,13 +1414,15 @@ export interface UldApi {
     ): () => void
   }
   knowledge: {
+    providers(): Promise<IpcResult<Array<{ id: string; label: string }>>>
+    onProgress(cb: (event: { kbId: string; source: string; file: number; totalFiles: number; completed: number; total: number; status: 'embedding' | 'done' }) => void): () => void
     list(): Promise<IpcResult<KnowledgeBase[]>>
     create(input: KnowledgeBaseInput): Promise<IpcResult<KnowledgeBase>>
     delete(id: string): Promise<IpcResult<void>>
     /** Opens a file picker and imports the chosen files' text into the base. */
     importFiles(
       id: string
-    ): Promise<IpcResult<{ canceled: boolean; imported: number; chunks: number; skipped: number }>>
+    ): Promise<IpcResult<{ canceled: boolean; imported: number; chunks: number; skipped: number; failures?: Array<{ source: string; error: string }> }>>
     sources(id: string): Promise<IpcResult<Array<{ source: string; chunks: number }>>>
     removeSource(id: string, source: string): Promise<IpcResult<void>>
   }

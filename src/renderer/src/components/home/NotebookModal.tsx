@@ -10,6 +10,9 @@ import { unwrap } from '@/api/uld'
 import { relativeTime } from '@/lib/format'
 import { toastError } from '@/stores/ui'
 import Markdown from '@/components/chat/Markdown'
+import { confirmAction } from '@/components/common/ConfirmDialog'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
+import { useModalBehavior } from '@/hooks/useModalBehavior'
 
 interface NotebookModalProps {
   docId: string
@@ -49,18 +52,9 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
   // (Escape, backdrop mis-click, Close) would destroy it unrecoverably.
   const dirty =
     editing && doc !== null && (draftTitle !== doc.title || draftContent !== doc.content)
-  const requestClose = useCallback((): void => {
-    if (dirty && !window.confirm('Discard unsaved changes?')) return
-    onClose()
-  }, [dirty, onClose])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') requestClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [requestClose])
+  const guard = useUnsavedChanges(dirty)
+  const requestClose = (): void => { if (!busy) guard.discard(onClose) }
+  const modalRef = useModalBehavior(true, requestClose)
 
   const startEdit = (): void => {
     if (!doc) return
@@ -79,7 +73,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
           content: draftContent,
         })
       )
-      setEditing(false)
+      guard.markSaved(); setEditing(false)
       await refetch()
       if (showHistory) await loadVersions()
     } catch (e) {
@@ -96,14 +90,17 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
   }
 
   const restore = async (version: NotebookDocVersionSummary): Promise<void> => {
-    if (!window.confirm('Restore this version? The current content is saved as a version.')) return
+    if (busy) return
+    if (!await confirmAction('Restore note version?', dirty ? 'Your unsaved edits will be discarded. The current saved content is kept in version history.' : 'The current saved content is kept in version history.', 'Restore version')) return
+    setBusy(true)
     try {
       await unwrap(window.uld.documents.revert(docId, version.id))
+      guard.markSaved(); setEditing(false)
       await refetch()
       await loadVersions()
     } catch (e) {
       toastError('Failed to restore version', e)
-    }
+    } finally { setBusy(false) }
   }
 
   const exportMd = async (): Promise<void> => {
@@ -115,7 +112,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
   }
 
   const remove = async (): Promise<void> => {
-    if (!window.confirm('Delete this note and its version history?')) return
+    if (!await confirmAction('Delete note?', 'This note and its version history will be deleted.', 'Delete note')) return
     try {
       await unwrap(window.uld.documents.delete(docId))
       onClose()
@@ -128,6 +125,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
     <div className="modal-backdrop" onClick={requestClose}>
       <div
         className="modal notebook-modal"
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-label={doc?.title ?? 'Note'}
@@ -138,6 +136,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
             <input
               className="input notebook-title-input"
               value={draftTitle}
+              disabled={busy}
               onChange={(event) => setDraftTitle(event.target.value)}
               maxLength={200}
               aria-label="Note title"
@@ -151,7 +150,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
                 <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void save()}>
                   Save
                 </button>
-                <button type="button" className="btn btn-ghost" onClick={() => setEditing(false)}>
+                <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => guard.discard(() => setEditing(false))}>
                   Cancel
                 </button>
               </>
@@ -181,6 +180,7 @@ export default function NotebookModal({ docId, onClose }: NotebookModalProps): R
           <textarea
             className="textarea notebook-textarea"
             value={draftContent}
+            disabled={busy}
             onChange={(event) => setDraftContent(event.target.value)}
             aria-label="Note content (Markdown)"
           />

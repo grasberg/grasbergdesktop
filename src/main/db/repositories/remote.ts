@@ -13,6 +13,8 @@ import type { RemoteDevice } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 
 interface DeviceRow {
+  access_level: 'limited' | 'full'
+  access_granted_at: number | null
   id: string
   name: string
   token_hash: string
@@ -32,6 +34,8 @@ function toDevice(row: DeviceRow): RemoteDevice {
     lastSeenAt: row.last_seen_at,
     revokedAt: row.revoked_at,
     online: false,
+    access: row.access_level,
+    accessGrantedAt: row.access_granted_at,
   }
 }
 
@@ -56,6 +60,7 @@ export interface RemoteDevicesRepository {
   getActiveByTokenHash(tokenHash: string): RemoteDevice | null
   /** Stamps last_seen_at = now; no-op for revoked or unknown devices. */
   touch(id: string): void
+  setAccess(id: string, access: 'limited' | 'full'): void
   /** Atomically accepts a strictly newer authenticated request sequence. */
   claimRequestSequence(id: string, seq: number): boolean
   /** Marks the device revoked; its token stops authenticating immediately. */
@@ -68,6 +73,8 @@ export function createRemoteDevicesRepository(driver: SqliteDriver): RemoteDevic
   return {
     create(input) {
       const row: DeviceRow = {
+        access_level: 'limited',
+        access_granted_at: null,
         id: randomUUID(),
         name: input.name,
         token_hash: input.tokenHash,
@@ -119,6 +126,11 @@ export function createRemoteDevicesRepository(driver: SqliteDriver): RemoteDevic
         [tokenHash]
       )
       return row ? toDevice(row) : null
+    },
+
+    setAccess(id, access) {
+      const result = driver.run('UPDATE remote_devices SET access_level = ?, access_granted_at = ? WHERE id = ? AND revoked_at IS NULL', [access, access === 'full' ? Date.now() : null, id])
+      if (!result.changes) throw new Error('Active device not found.')
     },
 
     touch(id) {

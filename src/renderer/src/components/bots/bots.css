@@ -1,4 +1,13 @@
 /* Bot Mode (v46) — the Bots surface. */
+.bots-back { display: none; }
+@media (max-width: 760px) {
+  .bots-view { grid-template-columns: minmax(0, 1fr) !important; }
+  .bots-view:not(.has-detail) .bots-detail { display: none; }
+  .bots-view.has-detail .bots-roster { display: none; }
+  .bots-view .bots-back { display: block; margin: 8px 12px; align-self: flex-start; }
+  .bots-view .bots-detail { min-width: 0; }
+  .bots-view .bot-form { padding: 14px; }
+}
 
 .bots-view {
   display: grid;
@@ -199,8 +208,15 @@
   padding-right: 6px;
 }
 
-.bots-row:hover .bots-row-menu {
+.bots-row:hover .bots-row-menu, .bots-row:focus-within .bots-row-menu {
   display: inline-flex;
+}
+
+@media (max-width: 760px), (hover: none) {
+  .bots-row .bots-row-menu { display: inline-flex; }
+  .bots-row .bots-row-menu button { min-width: 36px; min-height: 40px; }
+  .bot-room-header, .bot-room-title { flex-wrap: wrap; }
+  .bot-room-composer textarea { min-width: 0; }
 }
 
 .bots-row-menu button {

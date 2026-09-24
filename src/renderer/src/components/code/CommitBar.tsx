@@ -1,5 +1,6 @@
-import { useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import { useCodeStore } from '@/stores/code'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import './code.css'
 
 /**
@@ -10,6 +11,14 @@ import './code.css'
  */
 export default function CommitBar(): ReactElement | null {
   const gitStatus = useCodeStore((s) => s.gitStatus)
+  const projectId = useCodeStore(s => s.project?.id)
+  const refresh = useCodeStore(s => s.loadGitStatus)
+  useEffect(() => {
+    void refresh()
+    const onFocus = () => { void refresh() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [projectId, refresh])
   const gitBusy = useCodeStore((s) => s.gitBusy)
   const gitStageAll = useCodeStore((s) => s.gitStageAll)
   const gitCommit = useCodeStore((s) => s.gitCommit)
@@ -31,6 +40,7 @@ export default function CommitBar(): ReactElement | null {
   const [prDraft, setPrDraft] = useState(false)
   const [prUrl, setPrUrl] = useState<string | null>(null)
   const [remoteDraft, setRemoteDraft] = useState<string | null>(null)
+  useUnsavedChanges(!!message.trim() || !!branchDraft?.trim() || !!remoteDraft?.trim() || (prOpen && (!!prTitle.trim() || !!prBody.trim())))
 
   if (!gitStatus || !gitStatus.isRepo) return null
 
@@ -70,6 +80,7 @@ export default function CommitBar(): ReactElement | null {
   return (
     <div className="commit-bar">
       <div className="commit-bar-status">
+        <button type="button" className="btn-link commit-bar-action" disabled={gitBusy} onClick={() => void refresh()}>Refresh Git</button>
         <span
           className={`badge commit-bar-branch${onDefault ? ' commit-bar-branch-default' : ''}`}
           title={
@@ -284,6 +295,7 @@ export default function CommitBar(): ReactElement | null {
           rows={2}
           value={message}
           placeholder={staged > 0 ? 'Commit message…' : 'Stage files to commit'}
+          aria-label="Commit message"
           disabled={gitBusy || staged === 0}
           onChange={(e) => {
             setMessage(e.target.value)

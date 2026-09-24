@@ -49,7 +49,7 @@ export interface ModelInfo {
   contextLength?: number
   maxOutputTokens?: number
   capabilities: ModelCapabilities
-  /** True when the id came from the static catalog rather than a live /models call. */
+  /** True when the id came from bundled/downloaded metadata rather than the provider model API. */
   fromCatalog?: boolean
 }
 
@@ -853,6 +853,8 @@ export interface StartStreamResult {
 export interface QueuedSendResult {
   queued: true
   userMessage: Message
+  /** Receipt from an earlier request: refresh history to reconcile its outcome. */
+  replayed?: true
 }
 
 export type ChatSendResult = StartStreamResult | QueuedSendResult
@@ -2082,10 +2084,11 @@ export interface AgentProfile {
   updatedAt: number
 }
 
-/** Bot roster avatar: an emoji and/or an accent color (hex). */
+/** Bot avatar: optional local profile image, with emoji/initials and color as fallback. */
 export interface BotAvatar {
   emoji?: string | null
   color?: string | null
+  imageDataUrl?: string | null
 }
 
 /** Bot heartbeat config (v47). */
@@ -2289,6 +2292,8 @@ export interface DelegateHandoffInfo {
   agentId: string
   agentName: string
   callerConversationId: string
+  /** Snapshot retained if the source conversation is removed during the run. */
+  callerSpaceId?: string | null
   /** The calling bot when the delegation came from a bot chat; null = the user's conversation. */
   callerAgentId: string | null
   callerTitle: string
@@ -2624,6 +2629,9 @@ export interface SetTelegramBridgeInput {
 
 /** One phone (or other device) paired to this desktop. */
 export interface RemoteDevice {
+  /** Missing on older desktops means limited access. Only desktop can change this. */
+  access?: 'limited' | 'full'
+  accessGrantedAt?: number | null
   id: string
   /** User-visible label chosen at pairing ("Magnus phone"). */
   name: string
@@ -2840,6 +2848,14 @@ export interface DreamResult {
 // ---------------------------------------------------------------------------
 // Backup (export/import of settings, memories and skills)
 // ---------------------------------------------------------------------------
+
+export interface BackupPreview {
+  id: string
+  filename: string
+  version: number
+  exportedAt: number | null
+  counts: BackupSummary
+}
 
 export interface BackupSummary {
   /** Number of settings keys applied from the backup. */

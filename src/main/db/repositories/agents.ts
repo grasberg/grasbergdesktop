@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { isBotAvatarImage } from '@shared/bot-avatar'
 import type {
   AgentProfile,
   AgentProfileInput,
@@ -77,8 +78,9 @@ function parseAvatar(json: string | null): BotAvatar | null {
     const record = parsed as Record<string, unknown>
     const emoji = typeof record.emoji === 'string' ? record.emoji : null
     const color = typeof record.color === 'string' ? record.color : null
-    if (!emoji && !color) return null
-    return { emoji, color }
+    const imageDataUrl = isBotAvatarImage(record.imageDataUrl) ? record.imageDataUrl : null
+    if (!emoji && !color && !imageDataUrl) return null
+    return { emoji, color, ...(imageDataUrl ? { imageDataUrl } : {}) }
   } catch {
     return null
   }
