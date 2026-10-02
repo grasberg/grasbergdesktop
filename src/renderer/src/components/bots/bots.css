@@ -1,63 +1,19 @@
-/* Bot Mode (v46) — the Bots surface. */
-.bots-back { display: none; }
+/* Bot Mode (v46) — the Bots surface. Since v53 Bots is a main tab beside Chat
+   and Work: the roster rows below render in the SIDEBAR (BotRosterList) and
+   .bots-view is the main area only. */
 @media (max-width: 760px) {
-  .bots-view { grid-template-columns: minmax(0, 1fr) !important; }
-  .bots-view:not(.has-detail) .bots-detail { display: none; }
-  .bots-view.has-detail .bots-roster { display: none; }
-  .bots-view .bots-back { display: block; margin: 8px 12px; align-self: flex-start; }
-  .bots-view .bots-detail { min-width: 0; }
   .bots-view .bot-form { padding: 14px; }
 }
 
 .bots-view {
-  display: grid;
-  grid-template-columns: minmax(280px, 360px) 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
   background: var(--bg);
 }
 
-/* -- roster -------------------------------------------------------------- */
-
-.bots-roster {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.bots-roster-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 12px 14px 8px;
-}
-
-.bots-roster-header h2 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.bots-roster-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.bots-roster-actions .icon-btn.active {
-  color: var(--accent);
-}
-
-.bots-search {
-  margin: 0 14px 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text);
-}
+/* -- roster rows (sidebar list on the Bots tab) --------------------------- */
 
 .bots-active-strip {
   display: flex;
@@ -236,11 +192,19 @@
 /* -- detail pane --------------------------------------------------------- */
 
 .bots-detail {
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+}
+
+.bots-placeholder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 .bots-placeholder {

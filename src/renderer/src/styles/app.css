@@ -139,6 +139,16 @@ kbd {
   --accent-hover: #ffb568;
 }
 
+.app-layout.app-mode-bots {
+  --accent: #7a4fd6;
+  --accent-hover: #6339bd;
+}
+
+[data-theme='dark'] .app-layout.app-mode-bots {
+  --accent: #ab8cff;
+  --accent-hover: #c0a8ff;
+}
+
 .app-main {
   display: flex;
   flex-direction: column;
@@ -148,20 +158,28 @@ kbd {
 }
 
 .app-mode-chat .app-main,
-.app-mode-work .app-main {
+.app-mode-work .app-main,
+.app-mode-bots .app-main {
   border-top: 3px solid var(--accent);
 }
 
 .app-mode-chat .chat-view,
-.app-mode-work .chat-view {
+.app-mode-work .chat-view,
+.app-mode-bots .chat-view {
   background: color-mix(in srgb, var(--accent) 4%, var(--bg));
 }
 
 .app-mode-chat .chat-header,
 .app-mode-chat .chat-footer,
 .app-mode-work .chat-header,
-.app-mode-work .chat-footer {
+.app-mode-work .chat-footer,
+.app-mode-bots .chat-header,
+.app-mode-bots .chat-footer {
   background: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
+}
+
+.app-mode-bots .bots-view {
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg));
 }
 
 .app-mode-work .work-panel,
@@ -463,13 +481,29 @@ kbd {
   --sidebar-mode-color: #f0a04b;
 }
 
+.sidebar-mode-bots {
+  --accent: #7a4fd6;
+  --accent-hover: #6339bd;
+  --sidebar-mode-color: #7a4fd6;
+  background: color-mix(in srgb, var(--sidebar-mode-color) 7%, var(--bg-panel));
+  border-right-color: color-mix(in srgb, var(--sidebar-mode-color) 30%, var(--border));
+}
+
+[data-theme='dark'] .sidebar-mode-bots {
+  --accent: #ab8cff;
+  --accent-hover: #c0a8ff;
+  --sidebar-mode-color: #ab8cff;
+}
+
 .sidebar-mode-chat .sidebar-brand,
-.sidebar-mode-work .sidebar-brand {
+.sidebar-mode-work .sidebar-brand,
+.sidebar-mode-bots .sidebar-brand {
   box-shadow: inset 0 3px 0 var(--sidebar-mode-color);
 }
 
 .sidebar-mode-chat .mode-quick-actions,
-.sidebar-mode-work .mode-quick-actions {
+.sidebar-mode-work .mode-quick-actions,
+.sidebar-mode-bots .mode-quick-actions {
   padding: 3px;
   border: 1px solid color-mix(in srgb, var(--sidebar-mode-color) 22%, var(--border));
   border-radius: var(--radius-sm);
@@ -477,7 +511,8 @@ kbd {
 }
 
 .sidebar-mode-chat .mode-quick-action,
-.sidebar-mode-work .mode-quick-action {
+.sidebar-mode-work .mode-quick-action,
+.sidebar-mode-bots .mode-quick-action {
   color: color-mix(in srgb, var(--sidebar-mode-color) 78%, var(--text));
 }
 
@@ -535,6 +570,79 @@ kbd {
 
 .mode-tab-item[data-mode='work'] {
   --mode-tab-color: #d47a2c;
+}
+
+.mode-tab-item[data-mode='bots'] {
+  --mode-tab-color: #8a5ff0;
+}
+
+/* Bots attention on its tab: needs-you / unread count, or a working pulse. */
+.mode-tab-badge {
+  display: inline-block;
+  min-width: 15px;
+  height: 15px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--mode-tab-color);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  vertical-align: 1px;
+}
+
+.mode-tab-badge.is-needs-you {
+  background: var(--danger);
+}
+
+.mode-tab-working {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--mode-tab-color);
+  vertical-align: 1px;
+  animation: run-dot-pulse 1.6s ease-in-out infinite;
+}
+
+/* The Bots tab's list (BotRosterList) fills the sidebar like the task tree. */
+.sidebar-bots {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-bots .bots-active-strip {
+  padding: 0 14px 6px;
+}
+
+.sidebar-bots-list.bots-list {
+  padding: 2px 8px 8px;
+}
+
+.sidebar-bots-list .bots-row.selected {
+  background: color-mix(in srgb, var(--sidebar-mode-color) 16%, transparent);
+}
+
+.sidebar-bots-hidden-toggle {
+  margin: 0 14px 10px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-bots-hidden-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .mode-tab {
@@ -1505,42 +1613,8 @@ kbd {
   border-color: var(--accent);
 }
 
-/* -- Bots attention badge on the sidebar nav button (v49) ------------------- */
+/* Bots attention moved onto the Bots main tab (.mode-tab-badge, v53). */
 
 .sidebar-home-btn {
   position: relative;
-}
-
-.sidebar-bots-badge {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
-  pointer-events: none;
-}
-
-.sidebar-bots-badge.is-needs-you {
-  background: var(--danger);
-  color: #fff;
-}
-
-.sidebar-bots-working {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: run-dot-pulse 1.6s ease-in-out infinite;
-  pointer-events: none;
 }

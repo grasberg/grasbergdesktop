@@ -51,6 +51,16 @@ export const useBotsStore = create<BotsStoreState>()((set, get) => ({
   activeGroupId: null,
   groupMessages: [],
   showHidden: false,
+  panel: { kind: 'none' },
+  search: '',
+
+  setPanel(panel) {
+    set({ panel })
+  },
+
+  setSearch(search) {
+    set({ search })
+  },
 
   async load() {
     try {

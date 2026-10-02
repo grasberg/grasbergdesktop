@@ -57,7 +57,7 @@ A local-first desktop client for OpenAI, Anthropic, Google Gemini, Amazon Bedroc
 
 ### Bots
 
-- **A roster of named bots** — each with a role, avatar, its own chat, its own memory, model pin and toolset; hide the ones you rarely talk to. One editor serves the Bots pane and Settings → Agents.
+- **A roster of named bots** — Bots is the third main tab beside Chat and Work; each bot has a role, avatar, its own chat, its own memory, model pin and toolset; hide the ones you rarely talk to. One editor serves the Bots tab and Settings → Agents.
 - **Bot-to-bot messaging** — a bot hands work to a teammate with `message_agent`; deliveries are durable (queued rows survive restarts, an interrupted reply is retried once), and both chats show the handoff as a card with a live status.
 - **Group rooms** — 2–6 bots deliberate in short reply-or-pass rounds with @mentions, observer members and mention-only activation; a bot that needs a human decision says `@user` and the room lights up "needs you".
 - **Attention at a glance** — working / unread / needs-you states in the roster, on the sidebar's Bots button, in the chat header and in the dock/tray badge; notification clicks open the right chat or room.

@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { join, normalize, resolve, sep } from 'node:path'
 import type {
   AgentProfile,
   AppSettings,
@@ -2336,6 +2336,27 @@ export class ChatService {
     let emptyRetryUsed = false
     // Tool side effects close the failover gate: a retry could re-run them.
     let toolExecuted = false
+    // A model's final prose is not proof that its file writes succeeded.
+    // Keep unresolved failures, but allow a corrected retry of the same path.
+    const failedFileChanges = new Map<string, string>()
+    const recordFileChange = (name: string, rawArgs: string, output: string): void => {
+      if (name !== 'write_file' && name !== 'edit_file') return
+      let key = name
+      try {
+        const args = JSON.parse(rawArgs) as { path?: unknown }
+        if (typeof args.path === 'string' && args.path.trim()) {
+          key = normalize(args.path.trim().replace(/[\\/]/g, sep))
+          if (process.platform === 'win32') key = key.toLowerCase()
+        }
+      } catch {
+        // Invalid arguments still count as an unsuccessful file operation.
+      }
+      const applied = name === 'edit_file'
+        ? output.startsWith('Edited ')
+        : output.startsWith('Created ') || output.startsWith('Replaced ')
+      if (applied) failedFileChanges.delete(key)
+      else failedFileChanges.set(key, redactSecrets(output))
+    }
     let final = ''
     // Charter's empty-reply definition includes zero REASONING: a reasoning
     // model that burned its budget thinking is not an empty reply.
@@ -2393,7 +2414,9 @@ export class ChatService {
             if (opts?.signal?.aborted) throw new ProviderError('aborted', 'The workflow run was cancelled.')
             const definition = enabledDefs.find((d) => d.id === call.name) ?? enabledDefs.find((d) => d.name === call.name)
             if (!definition || !allowedToolIds.has(definition.id)) {
-              messages.push({ role: 'tool', content: `Tool '${call.name}' is not available to this run.`, toolCallId: call.id })
+              const out = `Tool '${call.name}' is not available to this run.`
+              recordFileChange(definition?.id ?? call.name, call.arguments, out)
+              messages.push({ role: 'tool', content: out, toolCallId: call.id })
               continue
             }
             const out = await tools.executor.execute(call, {
@@ -2423,6 +2446,7 @@ export class ChatService {
               requestText: prompt,
               ...(opts?.signal ? { signal: opts.signal } : {}),
             })
+            recordFileChange(definition.id, call.arguments, out)
             messages.push({ role: 'tool', content: out, toolCallId: call.id })
           }
           this.appendComputerScreenshot(messages, agent?.id ?? null, modelSupportsVision(target.provider, target.modelId))
@@ -2452,6 +2476,12 @@ export class ChatService {
       if (usageTotal) {
         recordHeadlessUsage(this.db, usageRef, target.provider, target.modelId, usageTotal)
       }
+    }
+    if (failedFileChanges.size > 0) {
+      throw new ProviderError(
+        'invalid_request',
+        'File changes failed: ' + [...failedFileChanges.values()].join('\n').slice(0, 4000)
+      )
     }
     // Headless runs never create a message row, so the memory completion hook
     // cannot see them — an agent's own memories are persisted here instead.

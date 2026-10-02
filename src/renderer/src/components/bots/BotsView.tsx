@@ -1,15 +1,15 @@
 /**
- * Bot Mode (v46) — the Bots surface, modeled on Hermes Desktop's Bots pane:
- * an activity-ordered roster of named bots and group rooms with an active-now
- * strip, search, hide-with-eye-toggle, attention chips (v49), the shared
- * agent editor (components/agents/AgentProfileForm), and a group-room view
- * (serial reply-or-pass rounds run main-side; this view just renders the
- * shared transcript live off push events).
+ * Bot Mode (v46) — the Bots surface, modeled on Hermes Desktop's Bots pane.
+ * Since v53 Bots is a main tab beside Chat and Work: the roster (bots and
+ * group rooms, active-now strip, attention chips) is the SIDEBAR's list
+ * (BotRosterList), and this main area shows the shared agent editor
+ * (components/agents/AgentProfileForm), the personal-agent setup, the group
+ * form, or a group-room view (serial reply-or-pass rounds run main-side; this
+ * view just renders the shared transcript live off push events).
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { AgentProfile, BotAttention, BotGroup, BotGroupMode, Message } from '@shared/types'
-import { unwrap } from '@/api/uld'
+import type { AgentProfile, BotGroup, BotGroupMode, Message } from '@shared/types'
 import AgentProfileForm from '@/components/agents/AgentProfileForm'
 import AgentOnboarding from './AgentOnboarding'
 import Markdown from '@/components/chat/Markdown'
@@ -22,16 +22,6 @@ import { toastError } from '@/stores/ui'
 import { navigateGuarded, useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { getChatDraft, loadChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 import './bots.css'
-
-// ---------------------------------------------------------------------------
-// Attention chip (v49): needs you / new / working
-// ---------------------------------------------------------------------------
-
-function AttentionChip({ attention }: { attention: BotAttention }): ReactElement | null {
-  if (attention === 'needs_you') return <span className="bots-needs-you">needs you</span>
-  if (attention === 'unread') return <span className="bots-unread-chip">new</span>
-  return null
-}
 
 // ---------------------------------------------------------------------------
 // Group form
@@ -336,30 +326,22 @@ function RoomMessage({
 }
 
 // ---------------------------------------------------------------------------
-// The Bots surface
+// The Bots surface (main area)
 // ---------------------------------------------------------------------------
 
-type Panel =
-  | { kind: 'none' }
-  | { kind: 'new-bot' }
-  | { kind: 'onboard' }
-  | { kind: 'edit-bot'; agent: AgentProfile }
-  | { kind: 'new-group' }
-  | { kind: 'edit-group'; group: BotGroup }
-
+/**
+ * The Bots main area. The roster itself is the sidebar's list while the Bots
+ * tab is active (components/bots/BotRosterList), so this pane shows what was
+ * picked there: a bot form, the personal-agent setup, a group room, or the
+ * overview. A bot's own chat opens in the conversation surface.
+ */
 export default function BotsView(): ReactElement {
   const roster = useBotsStore((s) => s.roster)
-  const loaded = useBotsStore((s) => s.loaded)
   const load = useBotsStore((s) => s.load)
-  const openBotChat = useBotsStore((s) => s.openBotChat)
   const activeGroupId = useBotsStore((s) => s.activeGroupId)
-  const selectGroup = useBotsStore((s) => s.selectGroup)
-  const setHidden = useBotsStore((s) => s.setHidden)
-  const showHidden = useBotsStore((s) => s.showHidden)
-  const setShowHidden = useBotsStore((s) => s.setShowHidden)
-  const [search, setSearch] = useState('')
-  const [panel, setPanel] = useState<Panel>({ kind: 'none' })
-  const changePanel = (next: Panel): void => navigateGuarded(() => setPanel(next), 'page')
+  const panel = useBotsStore((s) => s.panel)
+  const setPanel = useBotsStore((s) => s.setPanel)
+  const close = (): void => setPanel({ kind: 'none' })
 
   useEffect(() => {
     void load()
@@ -368,227 +350,28 @@ export default function BotsView(): ReactElement {
   const bots = useMemo(() => roster?.bots ?? [], [roster])
   const groups = useMemo(() => roster?.groups ?? [], [roster])
   const allAgents = useMemo(() => bots.map((row) => row.agent), [bots])
-  const anyHidden = bots.some((row) => row.agent.hidden)
-  const activeNow = bots.filter((row) => row.active && !row.agent.hidden)
-
-  const query = search.trim().toLowerCase()
-  const visibleBots = bots.filter(
-    (row) =>
-      (showHidden || !row.agent.hidden) &&
-      (!query ||
-        row.agent.name.toLowerCase().includes(query) ||
-        row.agent.title.toLowerCase().includes(query))
-  )
-  const visibleGroups = groups.filter(
-    (row) => !query || row.group.name.toLowerCase().includes(query)
-  )
-
-  // One activity-ordered roster: group rows standalone among the bot DMs.
-  const rows = useMemo(() => {
-    const merged: Array<
-      | { kind: 'bot'; at: number; row: (typeof visibleBots)[number] }
-      | { kind: 'group'; at: number; row: (typeof visibleGroups)[number] }
-    > = [
-      ...visibleBots.map((row) => ({
-        kind: 'bot' as const,
-        at: row.lastMessageAt ?? row.agent.createdAt,
-        row,
-      })),
-      ...visibleGroups.map((row) => ({
-        kind: 'group' as const,
-        at: row.lastMessageAt ?? row.group.createdAt,
-        row,
-      })),
-    ]
-    return merged.sort((a, b) => b.at - a.at)
-  }, [visibleBots, visibleGroups])
-
   const activeGroup = groups.find((row) => row.group.id === activeGroupId)
 
   return (
-    <div className={`bots-view${panel.kind !== 'none' || activeGroup ? ' has-detail' : ''}`}>
-      <aside className="bots-roster" aria-label="Bots">
-        <header className="bots-roster-header">
-          <h2>Bots</h2>
-          <div className="bots-roster-actions">
-            {anyHidden ? (
-              <button
-                type="button"
-                className={`icon-btn${showHidden ? ' active' : ''}`}
-                title={showHidden ? 'Conceal hidden bots' : 'Reveal hidden bots'}
-                onClick={() => setShowHidden(!showHidden)}
-              >
-                👁
-              </button>
-            ) : null}
-            <button type="button" onClick={() => changePanel({ kind: 'new-group' })}>
-              New group
-            </button>
-            <button type="button" onClick={() => changePanel({ kind: 'new-bot' })}>
-              New bot
-            </button>
-            <button type="button" className="primary" onClick={() => changePanel({ kind: 'onboard' })}>
-              Personal agent
-            </button>
-          </div>
-        </header>
-        <input
-          type="search"
-          className="bots-search"
-          placeholder="Search bots"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        {activeNow.length > 0 ? (
-          <div className="bots-active-strip" aria-label="Active now">
-            {activeNow.map((row) => (
-              <button
-                key={row.agent.id}
-                type="button"
-                className="bots-active-chip"
-                title={`${row.agent.name} is working`}
-                onClick={() => navigateGuarded(() => void openBotChat(row.agent.id), 'page')}
-              >
-                <BotAvatarBadge agent={row.agent} size={22} />
-                <span>{row.agent.name}</span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-        <ul className="bots-list">
-          {rows.map((entry) =>
-            entry.kind === 'bot' ? (
-              <li
-                key={`bot-${entry.row.agent.id}`}
-                className={`bots-row${entry.row.agent.hidden ? ' hidden-bot' : ''}${entry.row.agent.enabled ? '' : ' disabled-bot'}${entry.row.attention === 'unread' || entry.row.attention === 'needs_you' ? ' has-attention' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="bots-row-main"
-                  onClick={() => navigateGuarded(() => void openBotChat(entry.row.agent.id), 'page')}
-                >
-                  <span className="bots-row-avatar">
-                    <BotAvatarBadge agent={entry.row.agent} />
-                    {entry.row.attention === 'working' ? (
-                      <span className="bots-active-dot" title="Working" />
-                    ) : null}
-                  </span>
-                  <span className="bots-row-text">
-                    <span className="bots-row-name">
-                      {entry.row.agent.name}
-                      {entry.row.agent.title ? (
-                        <span className="bots-row-title">{entry.row.agent.title}</span>
-                      ) : null}
-                      <AttentionChip attention={entry.row.attention} />
-                      {entry.row.agent.paused ? (
-                        <span className="bots-paused-chip" title={entry.row.agent.pausedReason ?? 'Paused'}>
-                          paused
-                        </span>
-                      ) : null}
-                      {entry.row.openSuggestions > 0 ? (
-                        <span className="bots-suggestion-chip" title="Suggestions and steps waiting for you">
-                          💡 {entry.row.openSuggestions}
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="bots-row-snippet">
-                      {entry.row.snippet ?? 'No messages yet — say hi.'}
-                    </span>
-                  </span>
-                  {entry.row.lastMessageAt ? (
-                    <time>{relativeTime(entry.row.lastMessageAt)}</time>
-                  ) : null}
-                </button>
-                <span className="bots-row-menu">
-                  <button
-                    type="button"
-                    title="Edit bot"
-                    onClick={() => changePanel({ kind: 'edit-bot', agent: entry.row.agent })}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    title={entry.row.agent.hidden ? 'Unhide bot' : 'Hide bot (display only)'}
-                    onClick={() => void setHidden(entry.row.agent.id, !entry.row.agent.hidden)}
-                  >
-                    {entry.row.agent.hidden ? '🙈' : '—'}
-                  </button>
-                  <ConfirmButton
-                    label="✕"
-                    prompt={`Delete ${entry.row.agent.name}? Its chat and memberships go too.`}
-                    onConfirm={async () => {
-                      try {
-                        await unwrap(window.uld.agents.delete(entry.row.agent.id))
-                        await load()
-                      } catch (e) {
-                        toastError('Failed to delete bot', e)
-                      }
-                    }}
-                  />
-                </span>
-              </li>
-            ) : (
-              <li
-                key={`group-${entry.row.group.id}`}
-                className={`bots-row group-row${entry.row.group.id === activeGroupId ? ' selected' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="bots-row-main"
-                  onClick={() => navigateGuarded(() => { setPanel({ kind: 'none' }); selectGroup(entry.row.group.id) }, 'page')}
-                >
-                  <span className="bots-row-avatar group-avatar">👥</span>
-                  <span className="bots-row-text">
-                    <span className="bots-row-name">
-                      {entry.row.group.name}
-                      <span className="bots-row-title">
-                        {entry.row.group.memberIds.length} bots
-                        {entry.row.group.mode === 'ensemble' ? ' · ensemble' : ''}
-                      </span>
-                      <AttentionChip attention={entry.row.attention} />
-                    </span>
-                    <span className="bots-row-snippet">
-                      {entry.row.active
-                        ? 'Deliberating…'
-                        : (entry.row.snippet ?? 'A quiet room.')}
-                    </span>
-                  </span>
-                  {entry.row.lastMessageAt ? (
-                    <time>{relativeTime(entry.row.lastMessageAt)}</time>
-                  ) : null}
-                </button>
-              </li>
-            )
-          )}
-          {loaded && rows.length === 0 ? (
-            <li className="bot-empty-hint">
-              {query
-                ? 'No bots match.'
-                : 'No bots yet. Create one — a bot keeps its own chat, memory, model and routines.'}
-            </li>
-          ) : null}
-        </ul>
-      </aside>
-      <main className="bots-detail">
-        <button className="btn bots-back" onClick={() => navigateGuarded(() => { setPanel({ kind: 'none' }); selectGroup(null) }, 'page')}>← All bots</button>
+    <div className="bots-view">
+      <div className="bots-detail">
         {panel.kind === 'onboard' ? (
-          <AgentOnboarding onDone={() => setPanel({ kind: 'none' })} onCancel={() => setPanel({ kind: 'none' })} />
+          <AgentOnboarding onDone={close} onCancel={close} />
         ) : panel.kind === 'new-bot' || panel.kind === 'edit-bot' ? (
           <AgentProfileForm
             key={panel.kind === 'edit-bot' ? panel.agent.id : 'new'}
             variant="bots"
             editing={panel.kind === 'edit-bot' ? panel.agent : null}
             teammates={allAgents}
-            onSaved={() => setPanel({ kind: 'none' })}
-            onCancel={() => setPanel({ kind: 'none' })}
+            onSaved={close}
+            onCancel={close}
           />
         ) : panel.kind === 'new-group' || panel.kind === 'edit-group' ? (
           <GroupForm
             key={panel.kind === 'edit-group' ? panel.group.id : 'new-group'}
             bots={allAgents.filter((agent) => agent.enabled)}
             editing={panel.kind === 'edit-group' ? panel.group : null}
-            onDone={() => setPanel({ kind: 'none' })}
+            onDone={close}
           />
         ) : activeGroup ? (
           <RoomView
@@ -596,14 +379,14 @@ export default function BotsView(): ReactElement {
             group={activeGroup.group}
             active={activeGroup.active}
             bots={allAgents}
-            onEdit={() => changePanel({ kind: 'edit-group', group: activeGroup.group })}
+            onEdit={() => navigateGuarded(() => setPanel({ kind: 'edit-group', group: activeGroup.group }), 'page')}
           />
         ) : (
           <div className="bots-placeholder">
-            <h3>Your bot roster</h3>
+            <h3>{bots.length > 0 ? 'Your bots' : 'Meet your bots'}</h3>
             <p>
-              Click a bot to open its chat — each bot keeps its own persona, memory, model pin
-              and routines, and bots can message each other with <code>message_agent</code>.
+              Pick a bot in the list to open its chat — each bot keeps its own persona, memory,
+              model pin and routines, and bots can message each other with <code>message_agent</code>.
               Open a group room to watch bots deliberate in short reply-or-pass rounds — or
               answer all at once and let a lead synthesize, in an ensemble room.
             </p>
@@ -611,15 +394,20 @@ export default function BotsView(): ReactElement {
               Routines: open Automation, create a scheduled task and pick the
               bot under "Run as" — results land in the bot's chat.
             </p>
-            <button type="button" className="primary" onClick={() => setPanel({ kind: 'onboard' })}>
-              Set up a personal agent
-            </button>
-            <button type="button" onClick={() => setPanel({ kind: 'new-bot' })}>
-              New bot
-            </button>
+            <div className="bots-placeholder-actions">
+              <button type="button" className="btn btn-primary" onClick={() => setPanel({ kind: 'onboard' })}>
+                Set up a personal agent
+              </button>
+              <button type="button" className="btn" onClick={() => setPanel({ kind: 'new-bot' })}>
+                New bot
+              </button>
+              <button type="button" className="btn" onClick={() => setPanel({ kind: 'new-group' })}>
+                New group
+              </button>
+            </div>
           </div>
         )}
-      </main>
+      </div>
     </div>
   )
 }

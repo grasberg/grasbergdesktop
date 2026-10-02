@@ -39,6 +39,27 @@ async function until(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 }
 
 describe('TerminalService', () => {
+  it.runIf(process.platform === 'win32')('decodes Swedish output from real cmd and UTF-8 programs', async () => {
+    const { broadcast, data, exits } = collectingBroadcast()
+    const previous = process.env.GRASBERG_TERMINAL_UNICODE_TEST
+    process.env.GRASBERG_TERMINAL_UNICODE_TEST = 'åäö ÅÄÖ'
+    const service = new TerminalService({ broadcast })
+    try {
+      const info = service.createOrAttach('windows-unicode', process.cwd())
+      service.write(info.sessionId, 'echo CMD_UNICODE:%GRASBERG_TERMINAL_UNICODE_TEST%\r\n')
+      service.write(info.sessionId, `"${process.execPath}" -e "process.stdout.write('NODE_UNICODE:'+String.fromCharCode(229,228,246,32,197,196,214))"\r\nexit\r\n`)
+      await until(() => exits.length > 0)
+      const output = data.map((event) => event.chunk).join('')
+      expect(output).toContain('CMD_UNICODE:åäö ÅÄÖ')
+      expect(output).toContain('NODE_UNICODE:åäö ÅÄÖ')
+      expect(output).not.toContain('\uFFFD')
+      expect(exits[0].code).toBe(0)
+    } finally {
+      service.disposeAll()
+      if (previous === undefined) delete process.env.GRASBERG_TERMINAL_UNICODE_TEST
+      else process.env.GRASBERG_TERMINAL_UNICODE_TEST = previous
+    }
+  })
   it('decodes multibyte output split between pipe writes', async () => {
     const { broadcast, exits } = collectingBroadcast()
     const service = new TerminalService({ broadcast, shellSpec: () => ({ file: process.execPath, args: ['-e', 'process.stdout.write(Buffer.from([0xf0,0x9f]));setTimeout(()=>{process.stdout.write(Buffer.from([0xa6,0x89]));},80)'] }) })

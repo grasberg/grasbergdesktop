@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConversationMode, ConversationSummary, Project } from '@shared/types'
 import { newConversation } from '@/lib/new-conversation'
+import {
+  openBotsPanel,
+  rememberLocation,
+  showBots,
+  showMode,
+  useMainSection,
+  type MainSection,
+} from '@/lib/main-sections'
 import { groupTasks } from '@shared/task-groups'
 import { relativeTime } from '@/lib/format'
 import { modKeyLabel } from '@/lib/platform'
@@ -17,16 +25,22 @@ const NO_PROJECT_KEY = '__no_project__'
 const MANAGE_SPACES_VALUE = '__manage__'
 const NO_PROJECT_LABEL = 'Tasks'
 
-const MODE_TABS: ReadonlyArray<{ key: ConversationMode; label: string }> = [
+/** The three main functions, one tab each (Bots since v53 sits beside Chat and Work). */
+const MAIN_TABS: ReadonlyArray<{ key: MainSection; label: string }> = [
   { key: 'chat', label: 'Chat' },
   { key: 'work', label: 'Work' },
+  { key: 'bots', label: 'Bots' },
 ]
 
-/** Human label for the "New task" caret menu, per mode. */
-const NEW_LABELS: Record<ConversationMode, string> = {
+/** Label of each tab's "+" button. */
+const NEW_LABELS: Record<MainSection, string> = {
   chat: 'New chat',
   work: 'New work task',
+  bots: 'New bot',
 }
+
+// The roster list is only needed on the Bots tab — keep it out of the boot chunk.
+const BotRosterList = lazy(() => import('@/components/bots/BotRosterList'))
 
 /** The real app icon (same asset as the packaged exe/dock icon). */
 function Logo({ size = 22 }: { size?: number }): React.JSX.Element {
@@ -476,6 +490,16 @@ export default function Sidebar(): React.JSX.Element {
   const view = useUiStore((s) => s.view)
   const roster = useBotsStore((s) => s.roster)
   const botsAttention = useMemo(() => (roster ? botsAttentionSummary(roster) : null), [roster])
+  const botSearch = useBotsStore((s) => s.search)
+  const activeGroupId = useBotsStore((s) => s.activeGroupId)
+  const section = useMainSection()
+  const inBots = section === 'bots'
+
+  // Each tab remembers what the main area showed, so switching tabs and back
+  // returns to the same conversation, bot chat or room.
+  useEffect(() => {
+    rememberLocation(section, { view, conversationId: activeId, groupId: activeGroupId })
+  }, [section, view, activeId, activeGroupId])
   const spaces = useSpacesStore((s) => s.spaces)
   const activeSpaceId = useSpacesStore((s) => s.activeSpaceId)
   const [query, setQuery] = useState(useConversationsStore.getState().search)
@@ -541,7 +565,7 @@ export default function Sidebar(): React.JSX.Element {
   const visibleGroups = searching ? groups.filter((g) => g.tasks.length > 0) : groups
 
   return (
-    <nav className={`sidebar sidebar-mode-${modeFilter}`} aria-label="Conversations">
+    <nav className={`sidebar sidebar-mode-${section}`} aria-label={inBots ? 'Bots' : 'Conversations'}>
       <div className="sidebar-brand">
         <Logo />
         <span className="sidebar-wordmark">Grasberg</span>
@@ -568,60 +592,12 @@ export default function Sidebar(): React.JSX.Element {
             <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
           </svg>
         </button>
-        <button
-          type="button"
-          className={`btn-icon sidebar-home-btn${view === 'bots' ? ' active' : ''}`}
-          aria-label={
-            botsAttention && botsAttention.needsYou + botsAttention.unread > 0
-              ? `Bots — ${botsAttention.needsYou + botsAttention.unread} need attention`
-              : 'Bots'
-          }
-          aria-current={view === 'bots' ? 'page' : undefined}
-          title={
-            botsAttention && botsAttention.needsYou > 0
-              ? `Bots · ${botsAttention.needsYou} need you`
-              : botsAttention && botsAttention.unread > 0
-                ? `Bots · ${botsAttention.unread} unread`
-                : botsAttention && botsAttention.working > 0
-                  ? `Bots · ${botsAttention.working} working`
-                  : 'Bots'
-          }
-          onClick={() => useUiStore.getState().setView('bots')}
-        >
-          {botsAttention && botsAttention.needsYou + botsAttention.unread > 0 ? (
-            <span
-              className={`sidebar-bots-badge${botsAttention.needsYou > 0 ? ' is-needs-you' : ''}`}
-              aria-hidden="true"
-            >
-              {Math.min(99, botsAttention.needsYou + botsAttention.unread)}
-            </span>
-          ) : botsAttention && botsAttention.working > 0 ? (
-            <span className="sidebar-bots-working" aria-hidden="true" />
-          ) : null}
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <rect x="5" y="8" width="14" height="11" rx="2" />
-            <path d="M12 8V4" />
-            <circle cx="12" cy="3" r="1" />
-            <circle cx="9.5" cy="13" r="0.5" />
-            <circle cx="14.5" cy="13" r="0.5" />
-            <path d="M9.5 16.5h5" />
-          </svg>
-        </button>
         <button className="btn-icon sidebar-clock-btn" aria-label="Automation" title="Automation — scheduled tasks, bot routines and workflows" onClick={() => useUiStore.getState().setView('automation')}>◷</button>
       </div>
 
       <div className="sidebar-controls">
-        {spaces.length > 0 ? (
+        {/* Spaces partition conversations; bots are not in spaces. */}
+        {spaces.length > 0 && !inBots ? (
           <select
             className={`input sidebar-space-switcher${activeSpaceId ? ' space-private' : ''}`}
             aria-label="Space"
@@ -644,17 +620,30 @@ export default function Sidebar(): React.JSX.Element {
             <option value={MANAGE_SPACES_VALUE}>Manage spaces…</option>
           </select>
         ) : null}
-        <input
-          type="search"
-          className="input sidebar-search"
-          placeholder="Search conversations…"
-          aria-label="Search conversations"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <div className="mode-tabs" role="tablist" aria-label="Current mode">
-          {MODE_TABS.map((tab) => {
-            const active = modeFilter === tab.key
+        {inBots ? (
+          <input
+            type="search"
+            className="input sidebar-search"
+            placeholder="Search bots…"
+            aria-label="Search bots"
+            value={botSearch}
+            onChange={(e) => useBotsStore.getState().setSearch(e.target.value)}
+          />
+        ) : (
+          <input
+            type="search"
+            className="input sidebar-search"
+            placeholder="Search conversations…"
+            aria-label="Search conversations"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        )}
+        <div className="mode-tabs" role="tablist" aria-label="Main function">
+          {MAIN_TABS.map((tab) => {
+            const active = section === tab.key
+            const attention = tab.key === 'bots' ? botsAttention : null
+            const attentionCount = attention ? attention.needsYou + attention.unread : 0
             return (
               <div
                 key={tab.key}
@@ -665,17 +654,41 @@ export default function Sidebar(): React.JSX.Element {
                   type="button"
                   role="tab"
                   aria-selected={active}
+                  aria-label={
+                    attentionCount > 0 ? `${tab.label} — ${attentionCount} need attention` : undefined
+                  }
+                  title={
+                    attention && attention.needsYou > 0
+                      ? `Bots · ${attention.needsYou} need you`
+                      : attention && attention.unread > 0
+                        ? `Bots · ${attention.unread} unread`
+                        : attention && attention.working > 0
+                          ? `Bots · ${attention.working} working`
+                          : undefined
+                  }
                   className="mode-tab"
-                  onClick={() => useConversationsStore.getState().setModeFilter(tab.key)}
+                  onClick={() => (tab.key === 'bots' ? showBots() : showMode(tab.key))}
                 >
                   {tab.label}
+                  {attentionCount > 0 ? (
+                    <span
+                      className={`mode-tab-badge${attention && attention.needsYou > 0 ? ' is-needs-you' : ''}`}
+                      aria-hidden="true"
+                    >
+                      {Math.min(99, attentionCount)}
+                    </span>
+                  ) : attention && attention.working > 0 ? (
+                    <span className="mode-tab-working" aria-hidden="true" />
+                  ) : null}
                 </button>
                 <button
                   type="button"
                   className="mode-tab-add"
                   aria-label={NEW_LABELS[tab.key]}
                   title={NEW_LABELS[tab.key]}
-                  onClick={() => startConversation(tab.key)}
+                  onClick={() =>
+                    tab.key === 'bots' ? openBotsPanel({ kind: 'new-bot' }) : startConversation(tab.key)
+                  }
                 >
                   {PlusIcon}
                 </button>
@@ -683,22 +696,48 @@ export default function Sidebar(): React.JSX.Element {
             )
           })}
         </div>
-        <div className="mode-quick-actions" aria-label={`${modeFilter} actions`}>
-          <button type="button" className="mode-quick-action" onClick={startProject}>
-            {PlusIcon}
-            New project
-          </button>
-          <button
-            type="button"
-            className="mode-quick-action"
-            onClick={() => startConversation(modeFilter)}
-          >
-            {PlusIcon}
-            New Task
-          </button>
-        </div>
+        {inBots ? (
+          <div className="mode-quick-actions" aria-label="Bots actions">
+            <button
+              type="button"
+              className="mode-quick-action"
+              onClick={() => openBotsPanel({ kind: 'new-bot' })}
+            >
+              {PlusIcon}
+              New bot
+            </button>
+            <button
+              type="button"
+              className="mode-quick-action"
+              onClick={() => openBotsPanel({ kind: 'new-group' })}
+            >
+              {PlusIcon}
+              New group
+            </button>
+          </div>
+        ) : (
+          <div className="mode-quick-actions" aria-label={`${modeFilter} actions`}>
+            <button type="button" className="mode-quick-action" onClick={startProject}>
+              {PlusIcon}
+              New project
+            </button>
+            <button
+              type="button"
+              className="mode-quick-action"
+              onClick={() => startConversation(modeFilter)}
+            >
+              {PlusIcon}
+              New Task
+            </button>
+          </div>
+        )}
       </div>
 
+      {inBots ? (
+        <Suspense fallback={<div className="tree-list" />}>
+          <BotRosterList />
+        </Suspense>
+      ) : (
       <ul className="tree-list">
         {creatingProject ? (
           <li className="task-group">
@@ -753,6 +792,7 @@ export default function Sidebar(): React.JSX.Element {
           <li className="conv-empty">No conversations yet. Start one with “New task”.</li>
         ) : null}
       </ul>
+      )}
 
       <div className="sidebar-footer">
         <button

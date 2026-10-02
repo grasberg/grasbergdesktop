@@ -245,6 +245,30 @@ export class CodeService {
   }
 
   /**
+   * Approval-gated headless runs have a granted project (often a worktree),
+   * but no persisted conversation. Keep their changes in the same guarded,
+   * revertible pipeline without inventing a conversation or checkpoint.
+   */
+  proposeProjectChange(
+    projectId: string,
+    relPath: string,
+    changeType: CodeChange['changeType'],
+    newContent = ''
+  ): CodeChange {
+    const project = this.db.code.projectGetById(projectId)
+    if (!project) throw invalid('Project not found.')
+    const abs = this.resolveInsideRoot(project.path, relPath)
+    return this.createProposedChange(
+      project.id,
+      null,
+      abs,
+      normalizeRel(relPath),
+      changeType,
+      newContent
+    )
+  }
+
+  /**
    * Applies a proposed change to disk. THE ONLY WRITE PATH INTO A PROJECT —
    * reached from the code:changes:apply IPC (explicit user click) and from
    * the approval-gated edit_file/write_file tools.
@@ -542,7 +566,7 @@ export class CodeService {
    */
   private createProposedChange(
     projectId: string,
-    conversationId: string,
+    conversationId: string | null,
     abs: string,
     rel: string,
     changeType: CodeChange['changeType'],

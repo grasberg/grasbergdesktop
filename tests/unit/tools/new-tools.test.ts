@@ -15,6 +15,7 @@ import { CodeService } from '../../../src/main/code/code-service'
 import { createToolSystem, USER_DECLINED_RESULT } from '../../../src/main/tools'
 import {
   globToRegExp,
+  HEADLESS_CONVERSATION_ID,
   hasCatastrophicBacktracking,
   parseDuckDuckGoHtml,
 } from '../../../src/main/tools/executor'
@@ -72,6 +73,8 @@ function system(options: Parameters<typeof createToolSystem>[2] = {}) {
     codeChanges: {
       propose: (cid, relPath, changeType, newContent) =>
         codeService.proposeChange(cid, relPath, changeType, newContent),
+      proposeForProject: (pid, relPath, changeType, newContent) =>
+        codeService.proposeProjectChange(pid, relPath, changeType, newContent),
       apply: (changeId) => codeService.applyChange(changeId),
     },
     ...options,

@@ -5,6 +5,7 @@
  */
 
 import type {
+  AgentProfile,
   AppLockSetPassphraseInput,
   AppLockStatus,
   AppSettings,
@@ -236,7 +237,8 @@ export interface ArtifactPreview {
  * Which surface fills the main area. 'home' is the boot default (the overview
  * dashboard); 'conversation' shows the active conversation's mode view and
  * falls back to Home while no conversation is selected. 'bots' is the Bot
- * Mode roster + group rooms surface (v46).
+ * Mode surface (v46): since v53 the main area of the Bots tab (bot forms,
+ * group rooms, overview) while the sidebar lists the roster.
  */
 export type AppView = 'home' | 'conversation' | 'workflows' | 'bots' | 'automation'
 
@@ -361,7 +363,26 @@ export interface BotsStoreState {
   stopGroup(groupId: string): Promise<void>
   setHidden(agentId: string, hidden: boolean): Promise<void>
   setShowHidden(show: boolean): void
+  /**
+   * What the Bots main area shows besides a room (v53, Bots as a main tab):
+   * the roster lives in the sidebar, so its buttons and the main area share
+   * this state. 'none' = the open room, or the overview.
+   */
+  panel: BotsPanel
+  setPanel(panel: BotsPanel): void
+  /** The sidebar search while the Bots tab is active (filters the roster). */
+  search: string
+  setSearch(search: string): void
 }
+
+/** A form (or the onboarding) open in the Bots main area. */
+export type BotsPanel =
+  | { kind: 'none' }
+  | { kind: 'new-bot' }
+  | { kind: 'onboard' }
+  | { kind: 'edit-bot'; agent: AgentProfile }
+  | { kind: 'new-group' }
+  | { kind: 'edit-group'; group: BotGroup }
 
 /** Offline voice: whisper model management, push-to-talk STT and read-aloud. */
 export interface VoiceStoreState {

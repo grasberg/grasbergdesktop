@@ -245,6 +245,13 @@ export interface ToolExecutorDeps {
       changeType: 'create' | 'edit',
       newContent: string
     ): { id: string } | Promise<{ id: string }>
+    /** Headless runs use the explicitly granted project, including worktrees. */
+    proposeForProject?(
+      projectId: string,
+      relPath: string,
+      changeType: 'create' | 'edit',
+      newContent: string
+    ): { id: string } | Promise<{ id: string }>
     apply(changeId: string): unknown
   } | null
   /** Persists the conversation task list (update_task_list). */
@@ -2238,7 +2245,7 @@ export class ToolExecutor {
     }
     // Work tasks get their own workspace folder on first write (idempotent:
     // an already-linked folder — granted or auto — is simply returned).
-    if (ctx.conversation.mode === 'work' && this.deps.ensureWorkspaceRoot) {
+    if (ctx.conversation.id !== HEADLESS_CONVERSATION_ID && ctx.conversation.mode === 'work' && this.deps.ensureWorkspaceRoot) {
       try {
         const workspace = this.deps.ensureWorkspaceRoot(ctx.conversation.id)
         return {
@@ -2256,6 +2263,20 @@ export class ToolExecutor {
       return 'Error: file editing is unavailable in this build.'
     }
     return { conversationId: ctx.conversation.id, projectId: ctx.conversation.projectId, root }
+  }
+
+  private proposeFileChange(
+    gate: { conversationId: string; projectId: string },
+    relPath: string,
+    changeType: 'create' | 'edit',
+    newContent: string
+  ): { id: string } | Promise<{ id: string }> {
+    const changes = this.deps.codeChanges!
+    if (gate.conversationId === HEADLESS_CONVERSATION_ID) {
+      if (!changes.proposeForProject) throw new Error('Headless file editing is unavailable in this build.')
+      return changes.proposeForProject(gate.projectId, relPath, changeType, newContent)
+    }
+    return changes.propose(gate.conversationId, relPath, changeType, newContent)
   }
 
   private async runEditFile(
@@ -2305,7 +2326,7 @@ export class ToolExecutor {
     const newContent = current.content.split(oldString).join(newString)
 
     try {
-      const change = await this.deps.codeChanges!.propose(gate.conversationId, relPath, 'edit', newContent)
+      const change = await this.proposeFileChange(gate, relPath, 'edit', newContent)
       // Stamped so the activity entry can link straight to this diff.
       if (audit) audit.changeId = change.id
       await this.deps.codeChanges!.apply(change.id)
@@ -2338,8 +2359,8 @@ export class ToolExecutor {
       exists = false
     }
     try {
-      const change = await this.deps.codeChanges!.propose(
-        gate.conversationId,
+      const change = await this.proposeFileChange(
+        gate,
         relPath,
         exists ? 'edit' : 'create',
         content

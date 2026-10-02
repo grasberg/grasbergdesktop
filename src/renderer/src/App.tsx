@@ -23,6 +23,7 @@ import { useScheduledTasksStore } from '@/stores/scheduled-tasks'
 import { useOptimizerStore } from '@/stores/optimizer'
 import { useVoiceStore } from '@/stores/voice'
 import { useBotsStore } from '@/stores/bots'
+import { useMainSection } from '@/lib/main-sections'
 
 // Lazy like the other views (it already renders inside the view Suspense):
 // Home pulls the Markdown pipeline via its cards, which kept the CI-gated
@@ -66,6 +67,8 @@ export default function App(): React.JSX.Element {
   )
   const mode: ConversationMode = openMode ?? summaryMode ?? 'chat'
   const view = useUiStore((s) => s.view)
+  // Chat / Work / Bots: the main tab tints the whole window (Bots since v53).
+  const section = useMainSection()
   const settingsOpen = useUiStore((s) => s.settingsOpen)
   const paletteOpen = useUiStore((s) => s.paletteOpen)
   const shortcutsOpen = useUiStore((s) => s.shortcutsOpen)
@@ -333,7 +336,13 @@ export default function App(): React.JSX.Element {
   return (
     <>
       <div
-        className={`app-layout${view === 'conversation' && activeId ? ` app-mode-${mode}` : ''}`}
+        className={`app-layout${
+          section === 'bots'
+            ? ' app-mode-bots'
+            : view === 'conversation' && activeId
+              ? ` app-mode-${mode}`
+              : ''
+        }`}
       >
         <Sidebar />
         <main

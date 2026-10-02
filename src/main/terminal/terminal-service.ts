@@ -32,6 +32,7 @@ const INPUT_MAX_CHARS = 8 * 1024
 export interface TerminalShellSpec {
   file: string
   args: string[]
+  windowsVerbatimArguments?: boolean
 }
 
 /**
@@ -41,7 +42,15 @@ export interface TerminalShellSpec {
  */
 export function defaultShell(platform: NodeJS.Platform = process.platform): TerminalShellSpec {
   if (platform === 'win32') {
-    return { file: process.env.ComSpec || 'cmd.exe', args: [] }
+    const file = process.env.ComSpec || 'cmd.exe'
+    // cmd caches its pipe-output encoding at startup. Changing chcp in that
+    // same process still emits OEM bytes; start the interactive shell after
+    // the switch so its output matches our UTF-8 stream decoders.
+    return {
+      file,
+      args: ['/d', '/s', '/c', `"chcp 65001>nul && "${file}" /d /k"`],
+      windowsVerbatimArguments: true,
+    }
   }
   return { file: process.env.SHELL || '/bin/bash', args: [] }
 }
@@ -86,6 +95,7 @@ export class TerminalService {
     const child = spawn(spec.file, spec.args, {
       cwd,
       windowsHide: true,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, TERM: 'dumb' }, // discourage ANSI-heavy output
     })

@@ -29,6 +29,7 @@ import { ensureConversationWorkspace } from '../services/artifact-hooks'
 import { ToolRegistry, type DynamicToolSource } from './registry'
 import {
   ToolExecutor,
+  HEADLESS_CONVERSATION_ID,
   type ToolBrowser,
   type ToolCodeService,
   type ToolExecutorDeps,
@@ -153,7 +154,7 @@ export function createToolSystem(
       // mid-stream (first write), and the caller's conversation object would
       // otherwise be stale for the read tools that follow in the same loop.
       // Headless stubs (synthetic ids) miss and fall back to the given object.
-      const fresh = db.conversations.getById(conversation.id)
+      const fresh = conversation.id === HEADLESS_CONVERSATION_ID ? null : db.conversations.getById(conversation.id)
       const projectId = fresh ? fresh.projectId : conversation.projectId
       if (!projectId) return null
       return db.code.projectGetById(projectId)?.path ?? null

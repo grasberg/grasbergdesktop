@@ -931,6 +931,8 @@ function bootstrap(): void {
     codeChanges: {
       propose: (conversationId, relPath, changeType, newContent) =>
         codeService.proposeChange(conversationId, relPath, changeType, newContent),
+      proposeForProject: (projectId, relPath, changeType, newContent) =>
+        codeService.proposeProjectChange(projectId, relPath, changeType, newContent),
       apply: (changeId) => codeService.applyChange(changeId),
     },
     // Work tasks without a folder get their own workspace on first write.

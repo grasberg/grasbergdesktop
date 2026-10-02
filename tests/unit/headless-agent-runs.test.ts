@@ -10,7 +10,7 @@
  *    context instead of starting cold.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -25,6 +25,9 @@ import type {
 } from '../../src/main/providers/adapter'
 import type { ToolExecuteContext } from '../../src/main/tools/executor'
 import { ChatService, type ChatToolSystem } from '../../src/main/services/chat-service'
+import { CodeService } from '../../src/main/code/code-service'
+import { createToolSystem } from '../../src/main/tools'
+import { HEADLESS_CONVERSATION_ID } from '../../src/main/tools/executor'
 
 let dir: string
 let db: AppDatabase
@@ -147,6 +150,110 @@ function toolResult(adapter: ToolThenDoneAdapter): string {
   const content = adapter.chatRequests[1].messages.find((m) => m.role === 'tool')?.content
   return typeof content === 'string' ? content : ''
 }
+
+function fileRunFixture(calls: Array<{ name: string; args: Record<string, unknown> }>) {
+  const projectDir = join(dir, 'worktree')
+  mkdirSync(projectDir)
+  const project = db.code.projectUpsertByPath(projectDir, 'Headless worktree')
+  const code = new CodeService(db)
+  const tools = createToolSystem(db, code, {
+    codeChanges: {
+      propose: (cid, path, kind, content) => code.proposeChange(cid, path, kind, content),
+      proposeForProject: (pid, path, kind, content) => code.proposeProjectChange(pid, path, kind, content),
+      apply: (id) => code.applyChange(id),
+    },
+  })
+  const adapter = new EchoAdapter('Done.')
+  let round = 0
+  vi.spyOn(adapter, 'chat').mockImplementation(async (request) => {
+    adapter.chatRequests.push(request)
+    const call = calls[round++]
+    return call
+      ? { text: '', toolCalls: [{ id: `file-${round}`, name: call.name, arguments: JSON.stringify(call.args), status: 'proposed' }], finishReason: 'tool_calls' }
+      : { text: 'Done.', toolCalls: [], finishReason: 'stop' }
+  })
+  const providerId = providerWithKey('files')
+  const service = new ChatService(db, () => undefined, {
+    tools: { ...tools, broker: { request: vi.fn(async () => ({ approved: false, scope: 'once' as const })) } },
+    resolveAdapter: () => adapter,
+  })
+  const run = (overrides: Parameters<ChatService['generateForWorkflow']>[3] = {}) =>
+    service.generateForWorkflow('change the granted files', providerId, 'm', {
+      useTools: true,
+      approvedToolIds: ['write_file', 'edit_file'],
+      projectId: project.id,
+      ...overrides,
+    })
+  return { projectDir, project, code, tools, adapter, run }
+}
+
+it('creates and edits in the granted worktree without borrowing a saved conversation', async () => {
+  const fixture = fileRunFixture([
+    { name: 'write_file', args: { path: 'result.txt', content: 'before' } },
+    { name: 'edit_file', args: { path: 'result.txt', old_string: 'before', new_string: 'after' } },
+  ])
+  const original = join(dir, 'original')
+  mkdirSync(original)
+  const originalProject = db.code.projectUpsertByPath(original, 'Original project')
+  // Even a saved row colliding with the synthetic id must not steal its scope.
+  db.conversations.create({ id: HEADLESS_CONVERSATION_ID, mode: 'work', projectId: originalProject.id })
+  expect(await fixture.run()).toBe('Done.')
+  expect(readFileSync(join(fixture.projectDir, 'result.txt'), 'utf8')).toBe('after')
+  expect(existsSync(join(original, 'result.txt'))).toBe(false)
+  const changes = db.code.changesList(fixture.project.id)
+  expect(changes).toHaveLength(2)
+  expect(changes.every((change) => change.conversationId === null && change.status === 'applied')).toBe(true)
+  const edit = changes.find((change) => change.changeType === 'edit')!
+  fixture.code.revertChange(edit.id)
+  expect(readFileSync(join(fixture.projectDir, 'result.txt'), 'utf8')).toBe('before')
+})
+
+it('reports a denied headless write as failure even when the model says Done', async () => {
+  const fixture = fileRunFixture([{ name: 'write_file', args: { path: 'denied.txt', content: 'no' } }])
+  fixture.tools.registry.setPermission('write_file', 'deny')
+  await expect(fixture.run()).rejects.toThrow(/File changes failed:.*denied/s)
+  expect(existsSync(join(fixture.projectDir, 'denied.txt'))).toBe(false)
+  expect(fixture.adapter.chatRequests).toHaveLength(2)
+})
+
+it('keeps the read-only sandbox effective for a pre-approved headless write', async () => {
+  const fixture = fileRunFixture([{ name: 'write_file', args: { path: 'readonly.txt', content: 'no' } }])
+  await expect(fixture.run({ sandboxLevel: 'read-only' })).rejects.toThrow(/File changes failed:.*read-only/s)
+  expect(existsSync(join(fixture.projectDir, 'readonly.txt'))).toBe(false)
+})
+
+it('rejects an escaping headless path and reports failure to the caller', async () => {
+  const fixture = fileRunFixture([{ name: 'write_file', args: { path: '../outside.txt', content: 'no' } }])
+  await expect(fixture.run()).rejects.toThrow(/File changes failed:/)
+  expect(existsSync(join(dir, 'outside.txt'))).toBe(false)
+  expect(db.code.changesList(fixture.project.id)).toHaveLength(0)
+})
+
+it('allows the model to recover a failed edit with a corrected retry of the same path', async () => {
+  const fixture = fileRunFixture([
+    { name: 'edit_file', args: { path: './result.txt', old_string: 'missing', new_string: 'after' } },
+    { name: 'edit_file', args: { path: 'result.txt', old_string: 'before', new_string: 'after' } },
+  ])
+  writeFileSync(join(fixture.projectDir, 'result.txt'), 'before')
+  expect(await fixture.run()).toBe('Done.')
+  expect(readFileSync(join(fixture.projectDir, 'result.txt'), 'utf8')).toBe('after')
+})
+
+it('does not erase another file failure after one successful write', async () => {
+  const fixture = fileRunFixture([
+    { name: 'edit_file', args: { path: 'missing.txt', old_string: 'before', new_string: 'after' } },
+    { name: 'write_file', args: { path: 'success.txt', content: 'yes' } },
+  ])
+  await expect(fixture.run()).rejects.toThrow(/File changes failed:.*missing.txt/s)
+  expect(readFileSync(join(fixture.projectDir, 'success.txt'), 'utf8')).toBe('yes')
+})
+
+it('reports a file tool outside the agent toolset as a failed operation', async () => {
+  const fixture = fileRunFixture([{ name: 'write_file', args: { path: 'unavailable.txt', content: 'no' } }])
+  const agent = db.agents.create({ name: 'Reader', systemPrompt: 'Read only.', toolIds: ['read_file'] })
+  await expect(fixture.run({ agentId: agent.id })).rejects.toThrow(/File changes failed:.*not available/s)
+  expect(existsSync(join(fixture.projectDir, 'unavailable.txt'))).toBe(false)
+})
 
 it('asks over the remote channel when nothing pre-approved the call', async () => {
   const fixture = headlessFixture('r1')
