@@ -27,6 +27,17 @@ import type {
   BotGroupActivation,
   BotGroupMode,
   BotRoster,
+  BotSuggestion,
+  BotProject,
+  BotProjectStatus,
+  MessageFeedback,
+  BrowserFrame,
+  BrowserLogin,
+  BrowserLoginInput,
+  TeachStatus,
+  BotChannel,
+  BotChannelInput,
+  BotChannelPatch,
   BotUsageSummary,
   A2aOutboxEntry,
   ChatParams,
@@ -335,6 +346,11 @@ export const CHANNELS = {
   mcpSetEnabled: 'mcp:setEnabled',
   mcpReconnect: 'mcp:reconnect',
   mcpStatus: 'mcp:status',
+  // v53: natural-language rules → proposed standing rules
+  toolsRuleDraft: 'tools:rules:draft',
+  // v53: OAuth sign-in for remote connectors
+  mcpAuthorize: 'mcp:authorize',
+  mcpSignOut: 'mcp:signOut',
 
   // IM bridges
   imStatus: 'im:status',
@@ -423,6 +439,37 @@ export const CHANNELS = {
   botBindingRepair: 'bots:binding:repair',
   botBindingClearToken: 'bots:binding:clearToken',
   botBindingUpdateGroup: 'bots:binding:updateGroup',
+  // Personal agent (v53): pause/resume/reset + proactive suggestions
+  botsPause: 'bots:pause',
+  botsResume: 'bots:resume',
+  botsReset: 'bots:reset',
+  botSuggestionsList: 'bots:suggestions:list',
+  botSuggestionAccept: 'bots:suggestions:accept',
+  botSuggestionDismiss: 'bots:suggestions:dismiss',
+  botProjectsList: 'bots:projects:list',
+  botProjectUpdate: 'bots:projects:update',
+  botProjectDelete: 'bots:projects:delete',
+  messageFeedbackSet: 'messages:feedback:set',
+  messageFeedbackList: 'messages:feedback:list',
+  // Personal agent (v53): Slack / Discord / email channels for bots
+  channelsList: 'channels:list',
+  channelsCreate: 'channels:create',
+  channelsUpdate: 'channels:update',
+  channelsDelete: 'channels:delete',
+  channelsRepair: 'channels:repair',
+  // Personal agent (v53): teach-a-task + save a conversation as a skill
+  teachStart: 'teach:start',
+  teachStop: 'teach:stop',
+  teachStatus: 'teach:status',
+  skillsFromConversation: 'skills:fromConversation',
+  // Personal agent (v53): the agent's computer — live view + take over
+  browserFrame: 'browser:frame',
+  browserTakeOver: 'browser:takeOver',
+  browserReturnControl: 'browser:returnControl',
+  // Personal agent (v53): credential vault (passwords never come back)
+  loginsList: 'logins:list',
+  loginsSave: 'logins:save',
+  loginsDelete: 'logins:delete',
 
   // knowledge bases (RAG)
   kbList: 'kb:list',
@@ -561,6 +608,9 @@ export const CHANNELS = {
    * persisted, membership changed. Coarse by design; the store refetches.
    */
   botsChanged: 'push:botsChanged',
+  botSuggestionsChanged: 'push:botSuggestionsChanged',
+  browserControl: 'push:browserControl',
+  teachChanged: 'push:teachChanged',
   /**
    * Sent with a NavigateTarget when main wants the window on a conversation
    * or bot room — a notification click, chiefly. Held back while locked and
@@ -1167,6 +1217,8 @@ export interface UldApi {
     /** Standing approval rules ("always allow" / "always ask"), newest first. */
     rulesList(): Promise<IpcResult<ToolRule[]>>
     ruleCreate(input: ToolRuleInput): Promise<IpcResult<ToolRule[]>>
+    /** v53: proposes rules for an instruction in plain words; nothing is saved. */
+    ruleDraft(text: string): Promise<IpcResult<{ rules: ToolRuleInput[]; note: string }>>
     ruleDelete(ruleId: string): Promise<IpcResult<ToolRule[]>>
     /** Fires when an approval answer (or another window) changed the rules. */
     onRulesChanged(cb: () => void): () => void
@@ -1270,6 +1322,9 @@ export interface UldApi {
     setEnabled(id: string, enabled: boolean): Promise<IpcResult<McpServerConfig[]>>
     reconnect(id: string): Promise<IpcResult<McpServerRuntime[]>>
     status(): Promise<IpcResult<McpServerRuntime[]>>
+    /** v53: browser sign-in (OAuth) for a remote connector; resolves when connected. */
+    authorize(id: string): Promise<IpcResult<McpServerRuntime[]>>
+    signOut(id: string): Promise<IpcResult<McpServerRuntime[]>>
     onServersChanged(cb: (runtime: McpServerRuntime[]) => void): () => void
   }
   im: {
@@ -1412,6 +1467,63 @@ export interface UldApi {
     onChanged(
       cb: (event: { agentId?: string | null; groupId?: string | null }) => void
     ): () => void
+    /** Personal agent (v53): pause (heartbeats, deliveries, routines, channels stop). */
+    pause(agentId: string): Promise<IpcResult<AgentProfile>>
+    resume(agentId: string): Promise<IpcResult<AgentProfile>>
+    /** Fresh start, profile kept: chat, own memories, routines, suggestions go. */
+    reset(agentId: string): Promise<IpcResult<AgentProfile>>
+    /** One bot's suggestions (every status), or every OPEN one when agentId is omitted. */
+    suggestions(agentId?: string | null): Promise<IpcResult<BotSuggestion[]>>
+    acceptSuggestion(id: string): Promise<IpcResult<{ conversationId: string }>>
+    dismissSuggestion(id: string): Promise<IpcResult<void>>
+    onSuggestionsChanged(cb: (event: { agentId: string }) => void): () => void
+    /** The bot's projects, open first (v53). */
+    projects(agentId: string): Promise<IpcResult<BotProject[]>>
+    updateProject(
+      id: string,
+      patch: { title?: string; status?: BotProjectStatus; summary?: string; nextStep?: string }
+    ): Promise<IpcResult<BotProject>>
+    deleteProject(id: string): Promise<IpcResult<void>>
+  }
+  /** Personal agent (v53): thumbs up/down on replies — the agent learns from it. */
+  feedback: {
+    /** rating 0 clears it. */
+    set(messageId: string, rating: 1 | -1 | 0, comment?: string): Promise<IpcResult<MessageFeedback | null>>
+    list(conversationId: string): Promise<IpcResult<MessageFeedback[]>>
+  }
+  /** Personal agent (v53): watch an agent's browser and take it over. */
+  computer: {
+    /** One live-view frame of the agent's browser (agentId null = your own chats' browser). */
+    frame(agentId: string | null): Promise<IpcResult<BrowserFrame>>
+    /** Shows the agent's browser as a normal window; the agent waits until you hand back. */
+    takeOver(agentId: string | null): Promise<IpcResult<void>>
+    returnControl(agentId: string | null): Promise<IpcResult<void>>
+    onControl(cb: (event: { agentId: string | null; userControl: boolean }) => void): () => void
+  }
+  /** Personal agent (v53): a bot's Slack / Discord / email presences. */
+  channels: {
+    list(agentId: string): Promise<IpcResult<BotChannel[]>>
+    create(input: BotChannelInput): Promise<IpcResult<BotChannel>>
+    update(id: string, patch: BotChannelPatch): Promise<IpcResult<BotChannel>>
+    remove(id: string): Promise<IpcResult<void>>
+    /** Forgets the paired owner and shows a fresh pairing code. */
+    repair(id: string): Promise<IpcResult<BotChannel>>
+  }
+  /** Personal agent (v53): teach a task by demonstration; save a conversation as a skill. */
+  teach: {
+    /** Opens the agent's browser for you and starts recording (optionally at a URL). */
+    start(agentId: string | null, startUrl?: string | null): Promise<IpcResult<TeachStatus>>
+    /** Stops; saves the generalized skill unless cancel. */
+    stop(input: { name?: string; description?: string; cancel?: boolean }): Promise<IpcResult<Skill | null>>
+    status(): Promise<IpcResult<TeachStatus | null>>
+    fromConversation(conversationId: string, name: string, description?: string): Promise<IpcResult<Skill>>
+    onChanged(cb: (status: TeachStatus | null) => void): () => void
+  }
+  /** Personal agent (v53): saved logins the agent can use without seeing the password. */
+  logins: {
+    list(): Promise<IpcResult<BrowserLogin[]>>
+    save(input: BrowserLoginInput): Promise<IpcResult<BrowserLogin>>
+    remove(id: string): Promise<IpcResult<void>>
   }
   knowledge: {
     providers(): Promise<IpcResult<Array<{ id: string; label: string }>>>

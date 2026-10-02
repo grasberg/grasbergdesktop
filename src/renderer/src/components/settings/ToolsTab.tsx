@@ -16,7 +16,9 @@ import type {
   ToolDefinition,
   ToolPermissionDecision,
   ToolRuleEffect,
+  ToolRuleInput,
 } from '@shared/types'
+import { unwrap } from '@/api/uld'
 import { toolRulePatternHint } from '@shared/tool-rules'
 import { RiskBadge } from '@/components/ToolApprovalDialog'
 import { ConfirmButton, Switch } from '@/components/common/controls'
@@ -24,7 +26,7 @@ import { useAsyncAction } from '@/hooks/useAsyncAction'
 import { useEditorState } from '@/hooks/useEditorState'
 import { effectivePermission, useToolsStore } from '@/stores/tools'
 import { useSettingsStore } from '@/stores/settings'
-import { useUiStore } from '@/stores/ui'
+import { toastError, useUiStore } from '@/stores/ui'
 import { rowsFromExisting, splitRows, SecretRowsEditor, type SecretRow } from './SecretRows'
 import './tools.css'
 
@@ -42,7 +44,10 @@ const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 
 const RULE_EFFECT_LABEL: Record<ToolRuleEffect, string> = {
   allow: 'Run without asking',
+  allow_if_requested: 'Run if I asked for it',
   require_approval: 'Always ask',
+  handoff: 'Hand it to me',
+  block: 'Never',
 }
 
 /**
@@ -62,7 +67,12 @@ function ApprovalRulesSection(): ReactElement {
   // 'Always ask' can be pinned on anything; 'run without asking' can never
   // cover a tool whose contract is a fresh approval per call.
   const selectable = tools.filter(
-    (tool) => tool.enabled && (effect === 'require_approval' || tool.noStandingApproval !== true)
+    (tool) =>
+      tool.enabled &&
+      (effect === 'require_approval' ||
+        effect === 'handoff' ||
+        effect === 'block' ||
+        tool.noStandingApproval !== true)
   )
   const selected = toolId || selectable[0]?.id || ''
   const patternHint = toolRulePatternHint(selected)
@@ -125,7 +135,10 @@ function ApprovalRulesSection(): ReactElement {
           onChange={(e) => setEffect(e.target.value as ToolRuleEffect)}
         >
           <option value="require_approval">Always ask about</option>
+          <option value="allow_if_requested">Run if I asked for it</option>
           <option value="allow">Run without asking</option>
+          <option value="handoff">Hand to me instead</option>
+          <option value="block">Never run</option>
         </select>
         <select
           className="select"
@@ -151,6 +164,141 @@ function ApprovalRulesSection(): ReactElement {
           Add rule
         </button>
       </div>
+      <RuleDrafter toolName={toolName} />
+    </>
+  )
+}
+
+/**
+ * v53 (dots custom rules): describe a rule in plain words; an economy model
+ * proposes concrete rules, which are only saved when you add them.
+ */
+function RuleDrafter({ toolName }: { toolName: (id: string) => string }): ReactElement {
+  const ruleCreate = useToolsStore((s) => s.ruleCreate)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState<{ rules: ToolRuleInput[]; note: string } | null>(null)
+  const propose = async (): Promise<void> => {
+    if (text.trim().length < 3 || busy) return
+    setBusy(true)
+    try {
+      setDraft(await unwrap(window.uld.tools.ruleDraft(text.trim())))
+    } catch (e) {
+      toastError('Could not draft rules', e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const accept = async (rule: ToolRuleInput): Promise<void> => {
+    await ruleCreate(rule)
+    setDraft((d) => (d ? { ...d, rules: d.rules.filter((r) => r !== rule) } : d))
+  }
+  return (
+    <div className="rule-drafter">
+      <p className="field-hint">
+        Or describe a rule in your own words — e.g. “never touch billing or payments”, “ask before
+        you email anyone”, “you may read my calendar without asking”.
+      </p>
+      <div className="tools-rule-form">
+        <input
+          className="input"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Describe what the agent may, may not, or must ask about…"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void propose()
+          }}
+        />
+        <button type="button" className="btn" disabled={busy || text.trim().length < 3} onClick={() => void propose()}>
+          {busy ? 'Thinking…' : 'Propose rules'}
+        </button>
+      </div>
+      {draft ? (
+        <div className="rule-draft">
+          <p className="field-hint">{draft.note}</p>
+          {draft.rules.length > 0 ? (
+            <ul className="tools-rule-list">
+              {draft.rules.map((rule) => (
+                <li key={`${rule.toolId}-${rule.effect}-${rule.pattern ?? ''}`} className="tools-rule">
+                  <span className={`badge tools-rule-effect tools-rule-${rule.effect}`}>{RULE_EFFECT_LABEL[rule.effect]}</span>
+                  <span className="mono tools-rule-tool">{toolName(rule.toolId)}</span>
+                  {rule.pattern ? <code className="tools-rule-pattern">{rule.pattern}</code> : null}
+                  <button type="button" className="btn-link" onClick={() => void accept(rule)}>
+                    Add
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** v53: the guard rails around autonomous work, plus the real-desktop opt-in. */
+function AgentSafetySection(): ReactElement {
+  const settings = useSettingsStore((s) => s.settings)
+  const updateSettings = useSettingsStore((s) => s.update)
+  const load = useToolsStore((s) => s.load)
+  const [, run] = useAsyncAction()
+  const setDesktop = (enabled: boolean): Promise<void> =>
+    run(async () => {
+      await updateSettings({ desktopControlEnabled: enabled })
+      await load()
+    })
+  return (
+    <>
+      <h4 className="section-subhead">Autonomy safeguards</h4>
+      <label className="field agent-safety-row">
+        <span>Auto-review of outward actions (sending, posting, pushing, submitting)</span>
+        <select
+          className="select"
+          value={settings?.autoReview ?? 'autonomous'}
+          onChange={(e) =>
+            void updateSettings({ autoReview: e.target.value as 'off' | 'autonomous' | 'always' })
+          }
+        >
+          <option value="autonomous">When nobody asked in the moment (heartbeats, events, bots, routines)</option>
+          <option value="always">Always</option>
+          <option value="off">Off</option>
+        </select>
+        <span className="field-hint">
+          A cheap model (the economy model when set) checks the action against what was actually
+          asked. It can only add a question or a stop — never let something through.
+        </span>
+      </label>
+      <label className="field-checkbox agent-safety-row">
+        <input
+          type="checkbox"
+          checked={settings?.anomalyMonitorEnabled ?? true}
+          onChange={(e) => void updateSettings({ anomalyMonitorEnabled: e.target.checked })}
+        />
+        <span>
+          Pause a bot that misbehaves
+          <span className="field-hint">
+            Many refused calls in a row, the same call over and over, or a burst of tool calls
+            pauses the bot and stops its turn. You resume it from its profile.
+          </span>
+        </span>
+      </label>
+
+      <h4 className="section-subhead">Desktop control</h4>
+      <label className="field-checkbox">
+        <input
+          type="checkbox"
+          checked={settings?.desktopControlEnabled ?? false}
+          onChange={(e) => void setDesktop(e.target.checked)}
+        />
+        <span>
+          Let agents use your real desktop (Windows)
+          <span className="field-hint">
+            Off by default. When on, the <code>desktop</code> tool can take screenshots and use your
+            mouse and keyboard in any app. Every call asks unless a rule says otherwise. Press
+            Ctrl+Alt+Esc at any time to switch it off instantly.
+          </span>
+        </span>
+      </label>
     </>
   )
 }
@@ -559,6 +707,8 @@ export default function ToolsTab(): ReactElement {
       )}
 
       <ApprovalRulesSection />
+
+      <AgentSafetySection />
 
       <h4 className="section-subhead">Shell execution</h4>
       <label className="field-checkbox">

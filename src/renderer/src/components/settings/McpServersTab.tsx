@@ -18,7 +18,11 @@ import { useEditorState } from '@/hooks/useEditorState'
 import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { useMcpStore } from '@/stores/mcp'
 import { rowsFromExisting, SecretRowsEditor, splitRows, type SecretRow } from './SecretRows'
+import ConnectorCatalog from './ConnectorCatalog'
+import { unwrap } from '@/api/uld'
+import { toastError } from '@/stores/ui'
 import './settings.css'
+import './connectors.css'
 
 function initialRows(server: McpServerConfig | null): SecretRow[] {
   if (!server) return []
@@ -166,6 +170,7 @@ const STATUS_LABEL: Record<string, string> = {
   connecting: 'Connecting…',
   disconnected: 'Disabled',
   error: 'Error',
+  needs_auth: 'Sign-in needed',
 }
 
 function ServerRow({
@@ -181,6 +186,26 @@ function ServerRow({
   const remove = useMcpStore((s) => s.remove)
   const [, run] = useAsyncAction()
   const status = runtime?.status ?? (server.enabled ? 'connecting' : 'disconnected')
+  const [signingIn, setSigningIn] = useState(false)
+  const signIn = async (): Promise<void> => {
+    setSigningIn(true)
+    try {
+      useMcpStore.getState().setRuntime(await unwrap(window.uld.mcp.authorize(server.id)))
+    } catch (e) {
+      toastError(`Sign-in to ${server.name} failed`, e)
+    } finally {
+      setSigningIn(false)
+    }
+  }
+  const signOut = async (): Promise<void> => {
+    try {
+      useMcpStore.getState().setRuntime(await unwrap(window.uld.mcp.signOut(server.id)))
+    } catch (e) {
+      toastError('Sign-out failed', e)
+    }
+  }
+  const setAccess = (access: 'read' | 'write'): Promise<void> =>
+    run(() => useMcpStore.getState().update(server.id, { access }))
 
   return (
     <li className="mcp-item card">
@@ -196,6 +221,26 @@ function ServerRow({
           ) : null}
         </div>
         <div className="mcp-item-actions">
+          <select
+            className="select"
+            value={server.access}
+            aria-label={`Access for ${server.name}`}
+            title="Read only: offers just the tools this server marks as read-only, and trusts that mark (proactive read-only work may use them). Read and write: every tool is treated as able to change things and send data out."
+            onChange={(e) => void setAccess(e.target.value as 'read' | 'write')}
+          >
+            <option value="read">Read only</option>
+            <option value="write">Read &amp; write</option>
+          </select>
+          {server.transport === 'http' && status === 'needs_auth' ? (
+            <button type="button" className="btn btn-primary" disabled={signingIn} onClick={() => void signIn()}>
+              {signingIn ? 'Waiting for sign-in…' : 'Sign in'}
+            </button>
+          ) : null}
+          {server.transport === 'http' && runtime?.signedIn ? (
+            <button type="button" className="btn btn-ghost" onClick={() => void signOut()}>
+              Sign out
+            </button>
+          ) : null}
           <Switch
             checked={server.enabled}
             onChange={(v) => void setEnabled(server.id, v)}
@@ -231,6 +276,7 @@ export default function McpServersTab(): ReactElement {
   const loaded = useMcpStore((s) => s.loaded)
   const load = useMcpStore((s) => s.load)
   const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<McpServerConfig>()
+  const [catalogOpen, setCatalogOpen] = useState(false)
 
   useEffect(() => {
     void load()
@@ -248,12 +294,18 @@ export default function McpServersTab(): ReactElement {
           </p>
         </div>
         {!formOpen ? (
-          <button type="button" className="btn" onClick={openAdd}>
-            + Add server
-          </button>
+          <div className="connector-header-actions">
+            <button type="button" className="btn btn-primary" onClick={() => setCatalogOpen(true)}>
+              + Connect an app
+            </button>
+            <button type="button" className="btn" onClick={openAdd}>
+              + Custom server
+            </button>
+          </div>
         ) : null}
       </header>
 
+      {catalogOpen && !formOpen ? <ConnectorCatalog onClose={() => setCatalogOpen(false)} /> : null}
       {formOpen ? <McpForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} /> : null}
 
       {!loaded ? (

@@ -23,7 +23,7 @@
  * db.code.projectGetById — pass a custom one to override (e.g. in tests).
  */
 
-import type { Conversation } from '@shared/types'
+import type { ActivityEntry, Conversation } from '@shared/types'
 import type { AppDatabase } from '../db/database'
 import { ensureConversationWorkspace } from '../services/artifact-hooks'
 import { ToolRegistry, type DynamicToolSource } from './registry'
@@ -90,6 +90,20 @@ export interface CreateToolSystemOptions {
   delegate?: ToolExecutorDeps['delegate']
   /** Bot Mode: fire-and-forget bot-to-bot delivery for 'message_agent' (wired to BotService). */
   botMessenger?: NonNullable<ToolExecutorDeps['botMessenger']>
+  /** Personal agent (v53): bot-chat-only actions (suggest_action, …), wired to BotService. */
+  botActions?: NonNullable<ToolExecutorDeps['botActions']>
+  /** v53: "your turn" items for steps handed to the user. */
+  handoff?: ToolExecutorDeps['handoff']
+  /** v53: credential vault for the browser's 'login' action. */
+  loginVault?: ToolExecutorDeps['loginVault']
+  /** v53: economy-model review of outward calls in autonomous turns. */
+  autoReview?: ToolExecutorDeps['autoReview']
+  /** v53: the bot's mailbox and Slack/Discord presences. */
+  channels?: ToolExecutorDeps['channels']
+  /** v53: the user's real desktop (opt-in). */
+  desktop?: ToolExecutorDeps['desktop']
+  /** v53: every recorded tool decision, after it is logged (anomaly monitor). */
+  onActivity?: (entry: Omit<ActivityEntry, 'id'>) => void
   /** Text-to-image for 'generate_image' (wired to ChatService.generateImage). */
   imageGeneration?: NonNullable<ToolExecutorDeps['imageGeneration']>
   /** Local git writes for 'git_write' (wired to GitService). */
@@ -152,7 +166,13 @@ export function createToolSystem(
     shellEnabled: options.shellEnabled,
     shellAllowlist: options.shellAllowlist,
     // The audit trail: one record per tool call, with why it was allowed.
-    activityLog: { record: (entry) => db.activity.record(entry) },
+    // v53: the same choke point feeds the anomaly monitor.
+    activityLog: {
+      record: (entry) => {
+        db.activity.record(entry)
+        options.onActivity?.(entry)
+      },
+    },
     // Standing approval rules live in the database, so "always allow" and
     // "always ask" survive a restart (see tools/tool-rules.ts).
     toolRules: {
@@ -170,6 +190,12 @@ export function createToolSystem(
     knowledgeSearch: options.knowledgeSearch,
     delegate: options.delegate,
     botMessenger: options.botMessenger ?? null,
+    botActions: options.botActions ?? null,
+    handoff: options.handoff,
+    loginVault: options.loginVault ?? null,
+    autoReview: options.autoReview,
+    channels: options.channels ?? null,
+    desktop: options.desktop ?? null,
     imageGeneration: options.imageGeneration ?? null,
     gitWrite: options.gitWrite ?? null,
     gitHub: options.gitHub ?? null,
@@ -240,6 +266,15 @@ export function createToolSystem(
         return skill && skill.enabled ? { name: skill.name, content: skill.content } : null
       },
       listEnabledNames: () => db.skills.listEnabled().map((skill) => skill.name),
+      // create_skill (v53): an agent saves a process that worked as a skill.
+      save: (input) => {
+        const skill = db.skills.upsertByName({
+          name: input.name,
+          description: input.description,
+          content: input.content,
+        })
+        return { name: skill.name }
+      },
     },
     getProjectRoot,
     resolveSecretHeaders: options.resolveSecretHeaders,

@@ -29,6 +29,9 @@ import type {
   BotGroupActivation,
   BotGroupMode,
   BotModeSettings,
+  BotProject,
+  BotSuggestion,
+  BotTurnOrigin,
   BotWakeEvent,
   BotRoster,
   Conversation,
@@ -67,6 +70,9 @@ import {
   type BotIdentity,
 } from './bot-prompts'
 import { sanitizeUntrusted, wrapUntrusted } from './untrusted'
+import { withInvocationPolicy } from '../invocation-context'
+import { MAX_OPEN_SUGGESTIONS_PER_BOT } from '../db/repositories/bot-suggestions'
+import { summarizeProjects } from '../db/repositories/bot-projects'
 
 /** A delivery not answered within this window fails as delivery_timeout. */
 const DELIVERY_TIMEOUT_MS = 10 * 60_000
@@ -100,10 +106,13 @@ export interface BotChatService {
    * chat throws, so bot callers only ever see a started stream — but the
    * result type stays loose (`assistantMessage` optional) for assignability.
    */
-  send(req: {
-    conversationId: string
-    content: string
-  }): Promise<{ queued?: boolean; userMessage?: Message | null; assistantMessage?: Message }>
+  send(
+    req: {
+      conversationId: string
+      content: string
+    },
+    opts?: { queueIfBusy?: boolean }
+  ): Promise<{ queued?: boolean; userMessage?: Message | null; assistantMessage?: Message }>
   isConversationActive(conversationId: string): boolean
   compactNow(conversationId: string): Promise<{ compacted: boolean }>
   generateForWorkflow(
@@ -212,8 +221,13 @@ export class BotService {
    * id. Queued deliveries live in a2a_outbox (v48), not in memory.
    */
   private readonly inFlight = new Map<string, InFlightDelivery>()
-  /** Chats whose running turn was started by an outside event (v50; the approval gate reads it). */
-  private readonly eventTurns = new Set<string>()
+  /**
+   * Why the running turn in a bot chat started (v50 events, v53 all origins):
+   * the approval gate reads it. Absent = the user asked.
+   */
+  private readonly turnOrigins = new Map<string, Exclude<BotTurnOrigin, 'user'>>()
+  /** The placeholder of the turn each recorded origin belongs to (stale-record check). */
+  private readonly turnOriginMessages = new Map<string, string>()
   /** Targets with a pump in progress (single-flight per target). */
   private readonly pumping = new Set<string>()
   /** Targets whose running pump was asked to go another round. */
@@ -297,11 +311,14 @@ export class BotService {
       const heartbeat = this.pendingHeartbeats.get(agent.chatConversationId)
       if (heartbeat) clearTimeout(heartbeat.timer)
       this.pendingHeartbeats.delete(agent.chatConversationId)
+      this.turnOrigins.delete(agent.chatConversationId)
       this.deps.db.conversations.remove(agent.chatConversationId)
     }
     this.lastHeartbeatAt.delete(agent.id)
     this.idleCompactAttempted.delete(agent.id)
     this.dailyCompactDone.delete(agent.id)
+    this.deps.db.botSuggestions.removeForAgent(agent.id)
+    this.deps.db.botProjects.removeForAgent(agent.id)
     this.deps.db.botGroups.removeMemberEverywhere(agent.id)
     this.deps.db.botBindings.remove(agent.id)
     this.deps.db.secrets.deleteAllFor('im_bridge', `bot:${agent.id}`)
@@ -334,7 +351,10 @@ export class BotService {
         runningRoutineOwners.has(agent.id) ||
         runningRuns.some((run) => run.agentId === agent.id)
       const active = working || (last !== null && now - last.createdAt < ACTIVE_RECENT_MS)
-      const needsYou = conversationId !== null && pendingFor(conversationId)
+      // An open suggestion is a decision waiting on the user, like an approval.
+      const openSuggestions = db.botSuggestions.countOpen(agent.id)
+      const needsYou =
+        (conversationId !== null && pendingFor(conversationId)) || openSuggestions > 0
       const unread =
         conversationId !== null &&
         isUnread(db.messages.lastBotAuthoredAt(conversationId), agent.chatSeenAt)
@@ -346,7 +366,8 @@ export class BotService {
         active,
         queuedCount,
         inFlight,
-        attention: resolveAttention({ working, needsYou, unread }),
+        attention: resolveAttention({ working: working && !agent.paused, needsYou, unread }),
+        openSuggestions,
       }
     })
     const groups = db.botGroups.list().map((group) => {
@@ -365,10 +386,299 @@ export class BotService {
     return { bots, groups }
   }
 
+  /** Pushes a roster refresh for one bot (IPC edits of bot-owned rows). */
+  notifyChanged(agentId: string): void {
+    this.botsChanged({ agentId })
+  }
+
   /** The user is looking at the bot's chat: clears its unread state (v49). */
   markBotSeen(agentId: string): void {
     this.deps.db.agents.markChatSeen(agentId, Date.now())
     this.botsChanged({ agentId })
+  }
+
+  // -- pause / resume / reset (v53, dots-style controls) -----------------------
+
+  /**
+   * Pauses a bot: heartbeats stop, deliveries and events stay queued, its
+   * routines are skipped and channel messages get a "paused" answer. A turn
+   * already running finishes. `reason` null = the user; text = the anomaly
+   * monitor. Direct chat with the user keeps working.
+   */
+  pauseAgent(agentId: string, reason: string | null = null): AgentProfile {
+    const db = this.deps.db
+    if (!db.agents.getById(agentId)) throw new Error('Unknown agent profile.')
+    db.agents.setPaused(agentId, true, reason)
+    this.botsChanged({ agentId })
+    const agent = db.agents.getById(agentId) as AgentProfile
+    if (reason) {
+      this.deps.notify?.({
+        title: `⏸ ${agent.name} was paused`,
+        body: reason,
+        status: 'error',
+        conversationId: agent.chatConversationId,
+      })
+    }
+    return agent
+  }
+
+  /** Resumes a paused bot and drains whatever queued for it meanwhile. */
+  resumeAgent(agentId: string): AgentProfile {
+    const db = this.deps.db
+    if (!db.agents.getById(agentId)) throw new Error('Unknown agent profile.')
+    db.agents.setPaused(agentId, false)
+    // A resumed bot must not owe a burst of heartbeats for the paused stretch.
+    this.lastHeartbeatAt.set(agentId, Date.now())
+    this.botsChanged({ agentId })
+    void this.pump(agentId)
+    return db.agents.getById(agentId) as AgentProfile
+  }
+
+  /**
+   * Fresh start, profile kept (dots "reset"): the canonical chat, the bot's
+   * own memories, its routines, its suggestions and its open deliveries go;
+   * persona, model, toolset, channels and settings stay. Refused while a turn
+   * is running in the chat — stop it first.
+   */
+  resetAgent(agentId: string): AgentProfile {
+    const db = this.deps.db
+    const agent = db.agents.getById(agentId)
+    if (!agent) throw new Error('Unknown agent profile.')
+    const chatId = agent.chatConversationId
+    if (chatId && this.deps.chat.isConversationActive(chatId)) {
+      throw new Error(`${agent.name} is working right now — stop the turn before resetting.`)
+    }
+    for (const row of db.a2aOutbox.listOpen({ toAgentId: agent.id })) {
+      if (row.targetConversationId) {
+        const entry = this.inFlight.get(row.targetConversationId)
+        if (entry?.outboxId === row.id) {
+          clearTimeout(entry.timer)
+          this.inFlight.delete(row.targetConversationId)
+        }
+      }
+      this.deliverFailure(row, 'cancelled', 'the bot was reset')
+    }
+    for (const row of db.a2aOutbox.cancelForSender(agent.id)) {
+      this.onSettled({ ...row, status: 'cancelled' }, null)
+    }
+    if (chatId) {
+      const heartbeat = this.pendingHeartbeats.get(chatId)
+      if (heartbeat) clearTimeout(heartbeat.timer)
+      this.pendingHeartbeats.delete(chatId)
+      this.turnHops.delete(chatId)
+      this.turnOrigins.delete(chatId)
+      db.conversations.remove(chatId)
+      db.agents.setChatConversation(agent.id, null)
+    }
+    for (const memory of db.memories.listForAgent(agent.id)) db.memories.remove(memory.id)
+    for (const task of db.scheduledTasks.list()) {
+      if (task.agentId === agent.id) db.scheduledTasks.remove(task.id)
+    }
+    db.botSuggestions.removeForAgent(agent.id)
+    db.botProjects.removeForAgent(agent.id)
+    db.driver.run('DELETE FROM message_feedback WHERE agent_id = ?', [agent.id])
+    this.lastHeartbeatAt.delete(agent.id)
+    this.idleCompactAttempted.delete(agent.id)
+    this.dailyCompactDone.delete(agent.id)
+    this.botsChanged({ agentId: agent.id })
+    return db.agents.getById(agent.id) as AgentProfile
+  }
+
+  // -- suggestions (v53): proposals from proactive work -------------------------
+
+  /**
+   * Tool entry for suggest_action: records a proposal from a bot chat and
+   * tells the user. Deduped by title among open suggestions, capped per bot.
+   */
+  suggest(
+    conversationId: string,
+    input: { title: string; action: string; reason?: string }
+  ): string {
+    const db = this.deps.db
+    const conversation = db.conversations.getById(conversationId)
+    const agent = conversation?.agentId ? db.agents.getById(conversation.agentId) : null
+    if (!agent) return 'Error: suggest_action is only available inside a bot chat.'
+    const title = input.title.replace(/\s+/g, ' ').trim().slice(0, 160)
+    const action = input.action.trim().slice(0, 4000)
+    const reason = (input.reason ?? '').trim().slice(0, 1000)
+    if (!title || !action) return 'Error: a suggestion needs a title and an action.'
+    const existing = db.botSuggestions.findOpenByTitle(agent.id, title)
+    if (existing) {
+      return `A suggestion titled "${title}" is already waiting for the user — do not repeat it.`
+    }
+    if (db.botSuggestions.countOpen(agent.id) >= MAX_OPEN_SUGGESTIONS_PER_BOT) {
+      return (
+        'The user already has many open suggestions from you. Do not add more until they ' +
+        'decide; mention the most important one in your reply instead.'
+      )
+    }
+    const suggestion = db.botSuggestions.create({
+      agentId: agent.id,
+      conversationId,
+      title,
+      action,
+      reason,
+    })
+    this.botsChanged({ agentId: agent.id })
+    this.deps.broadcast(CHANNELS.botSuggestionsChanged, { agentId: agent.id })
+    this.deps.notify?.({
+      title: `💡 ${agent.name} suggests: ${title}`,
+      body: reason || action.slice(0, 300),
+      status: 'ok',
+      conversationId,
+    })
+    return (
+      `Suggestion recorded (id ${suggestion.id}). The user will accept or dismiss it; if ` +
+      'accepted, the action comes back to you as an approved request. Do not perform it now.'
+    )
+  }
+
+  /**
+   * A step handed to the user (v53): a 'handoff' rule fired, the agent called
+   * hand_off, or it reached a password/payment field. Recorded as a
+   * kind='handoff' item (agent_id NULL outside bot chats) plus a notification.
+   * Deduped by title while open.
+   */
+  recordHandoff(
+    conversationId: string | null,
+    item: { title: string; instructions: string }
+  ): BotSuggestion | null {
+    const db = this.deps.db
+    const conversation = conversationId ? db.conversations.getById(conversationId) : null
+    const agentId = conversation?.agentId ?? null
+    const title = item.title.replace(/\s+/g, ' ').trim().slice(0, 160) || 'Your turn'
+    const open = agentId
+      ? db.botSuggestions.findOpenByTitle(agentId, title)
+      : db.botSuggestions
+          .listOpen(200)
+          .find(
+            (row) =>
+              row.agentId === null &&
+              row.conversationId === (conversation?.id ?? null) &&
+              row.title.toLowerCase() === title.toLowerCase()
+          ) ?? null
+    if (open) return open
+    const row = db.botSuggestions.create({
+      agentId,
+      kind: 'handoff',
+      conversationId: conversation?.id ?? null,
+      title,
+      action: item.instructions.trim().slice(0, 4000),
+    })
+    const who = agentId ? (db.agents.getById(agentId)?.name ?? 'Your agent') : 'Your agent'
+    this.deps.broadcast(CHANNELS.botSuggestionsChanged, { agentId: agentId ?? '' })
+    if (agentId) this.botsChanged({ agentId })
+    this.deps.notify?.({
+      title: `✋ ${who} needs you: ${title}`,
+      body: item.instructions.trim().slice(0, 300),
+      status: 'ok',
+      conversationId: conversation?.id ?? null,
+    })
+    return row
+  }
+
+  /**
+   * Tool entry for update_project (v53): the bot creates or updates one of
+   * its projects by title. The user sees the list on the bot's profile.
+   */
+  updateProject(
+    conversationId: string,
+    input: { title: string; status?: string; summary?: string; nextStep?: string }
+  ): string {
+    const db = this.deps.db
+    const conversation = db.conversations.getById(conversationId)
+    const agent = conversation?.agentId ? db.agents.getById(conversation.agentId) : null
+    if (!agent) return 'Error: update_project is only available inside a bot chat.'
+    if (!input.title.trim()) return 'Error: a project needs a title.'
+    const status =
+      input.status === 'active' ||
+      input.status === 'waiting' ||
+      input.status === 'blocked' ||
+      input.status === 'done'
+        ? input.status
+        : undefined
+    const project = db.botProjects.upsert({
+      agentId: agent.id,
+      title: input.title,
+      status,
+      summary: input.summary,
+      nextStep: input.nextStep,
+    })
+    this.botsChanged({ agentId: agent.id })
+    return `Project "${project.title}" is now ${project.status}.`
+  }
+
+  listProjects(agentId: string): BotProject[] {
+    return this.deps.db.botProjects.listForAgent(agentId)
+  }
+
+  listSuggestions(agentId?: string | null): BotSuggestion[] {
+    const db = this.deps.db
+    return agentId ? db.botSuggestions.listForAgent(agentId) : db.botSuggestions.listOpen()
+  }
+
+  /**
+   * Accepts a suggestion: the action runs as a USER-requested turn in the
+   * bot's chat (queued behind a busy turn), so the normal approval rules
+   * apply — accepting the idea is not approving every tool call in it.
+   */
+  async acceptSuggestion(id: string): Promise<{ conversationId: string }> {
+    const db = this.deps.db
+    const suggestion = db.botSuggestions.getById(id)
+    if (!suggestion || suggestion.status !== 'open') {
+      throw new Error('That suggestion is no longer open.')
+    }
+    // A handoff is the user's own step: accepting it means "done" — tell the
+    // bot (when there is one) so it can continue from there.
+    if (suggestion.kind === 'handoff') {
+      db.botSuggestions.decide(id, 'accepted')
+      this.deps.broadcast(CHANNELS.botSuggestionsChanged, { agentId: suggestion.agentId ?? '' })
+      const owner = suggestion.agentId ? db.agents.getById(suggestion.agentId) : null
+      if (!owner) return { conversationId: suggestion.conversationId ?? '' }
+      const ownerChat = this.ensureBotChat(owner.id)
+      await this.deps.chat.send(
+        {
+          conversationId: ownerChat.id,
+          content: `[Handoff done] I completed "${suggestion.title}". Continue from there.`,
+        },
+        { queueIfBusy: true }
+      )
+      this.botsChanged({ agentId: owner.id })
+      return { conversationId: ownerChat.id }
+    }
+    const agent = suggestion.agentId ? db.agents.getById(suggestion.agentId) : null
+    if (!agent) throw new Error('The bot behind this suggestion no longer exists.')
+    const chat = this.ensureBotChat(agent.id)
+    db.botSuggestions.decide(id, 'accepted')
+    try {
+      await this.deps.chat.send(
+        {
+          conversationId: chat.id,
+          content:
+            `[Approved suggestion] ${suggestion.title}\n\n` +
+            `The user approved your suggestion. Do it now:\n${suggestion.action}`,
+        },
+        { queueIfBusy: true }
+      )
+    } catch (e) {
+      // Leave it decidable again rather than silently lost.
+      db.driver.run("UPDATE bot_suggestions SET status = 'open', decided_at = NULL WHERE id = ?", [
+        id,
+      ])
+      throw e
+    }
+    this.botsChanged({ agentId: agent.id })
+    this.deps.broadcast(CHANNELS.botSuggestionsChanged, { agentId: agent.id })
+    return { conversationId: chat.id }
+  }
+
+  dismissSuggestion(id: string): void {
+    const db = this.deps.db
+    const suggestion = db.botSuggestions.getById(id)
+    if (!suggestion) throw new Error('Unknown suggestion.')
+    db.botSuggestions.decide(id, 'dismissed')
+    if (suggestion.agentId) this.botsChanged({ agentId: suggestion.agentId })
+    this.deps.broadcast(CHANNELS.botSuggestionsChanged, { agentId: suggestion.agentId ?? '' })
   }
 
   /**
@@ -555,6 +865,8 @@ export class BotService {
     if (this.inFlight.has(chat.id) || this.deps.chat.isConversationActive(chat.id)) {
       return false // the completion hook (or the maintenance tick) pumps again later
     }
+    // Paused (v53): deliveries and events stay queued; resumeAgent pumps.
+    if (db.agents.getById(targetAgentId)?.paused) return false
     const senderName = next.fromAgentId
       ? (db.agents.getById(next.fromAgentId)?.name ?? 'unknown bot')
       : null
@@ -562,10 +874,10 @@ export class BotService {
       ? formatIncomingBotMessage(senderName, next.body)
       : formatIncomingEvent(next.body)
     this.turnHops.set(chat.id, next.hop)
-    if (next.fromAgentId === null) this.eventTurns.add(chat.id)
-    else this.eventTurns.delete(chat.id)
+    this.setTurnOrigin(chat.id, next.fromAgentId === null ? 'event' : 'agent')
     try {
       const result = await this.deps.chat.send({ conversationId: chat.id, content })
+      if (result.assistantMessage) this.turnOriginMessages.set(chat.id, result.assistantMessage.id)
       if (!result.assistantMessage) {
         // Defensive: only a queued result lacks the placeholder, and bot
         // deliveries never opt into queueing — the row stays queued and the
@@ -587,7 +899,7 @@ export class BotService {
       return false
     } catch (e) {
       this.turnHops.delete(chat.id)
-      this.eventTurns.delete(chat.id)
+      this.turnOrigins.delete(chat.id)
       const text = errorMessageOf(e)
       if (text.includes('already streaming')) {
         // Lost the race with a user turn — the row is still queued; the
@@ -625,7 +937,7 @@ export class BotService {
   handleCompletion(conversation: Conversation, message: Message): void {
     if (message.role !== 'assistant' || !conversation.agentId) return
     this.turnHops.delete(conversation.id)
-    this.eventTurns.delete(conversation.id)
+    this.turnOrigins.delete(conversation.id)
     // Heartbeat turns settle first: a quiet NO_REPLY turn is deleted outright
     // (OpenClaw suppresses quiet acknowledgments), an alerting one stays and
     // is delivered per the bot's config.
@@ -730,7 +1042,7 @@ export class BotService {
     if (!entry) return
     this.inFlight.delete(conversationId)
     this.turnHops.delete(conversationId)
-    this.eventTurns.delete(conversationId)
+    this.turnOrigins.delete(conversationId)
     const row = this.deps.db.a2aOutbox.getById(entry.outboxId)
     if (!row) return
     // The turn may have finished as 'complete' with the hook lost — check
@@ -871,8 +1183,26 @@ export class BotService {
    * an outside event (webhook, watched file) is in progress — the tool
    * executor asks before such a turn messages a teammate.
    */
-  turnOrigin(conversationId: string): 'event' | null {
-    return this.eventTurns.has(conversationId) ? 'event' : null
+  turnOrigin(conversationId: string): Exclude<BotTurnOrigin, 'user'> | null {
+    const origin = this.turnOrigins.get(conversationId)
+    if (!origin) return null
+    // A turn that ended stopped or errored never reaches handleCompletion:
+    // once its placeholder is no longer streaming, the record is stale and
+    // must not colour the user's next turn.
+    const messageId = this.turnOriginMessages.get(conversationId)
+    const status = messageId ? this.deps.db.messages.getById(messageId)?.status : undefined
+    if (status !== undefined && status !== 'streaming') {
+      this.turnOrigins.delete(conversationId)
+      this.turnOriginMessages.delete(conversationId)
+      return null
+    }
+    return origin
+  }
+
+  /** Records why the NEXT turn in a bot chat runs (bound to its placeholder once started). */
+  private setTurnOrigin(conversationId: string, origin: Exclude<BotTurnOrigin, 'user'>): void {
+    this.turnOrigins.set(conversationId, origin)
+    this.turnOriginMessages.delete(conversationId)
   }
 
   /** Recent deliveries touching a bot, newest first (the editor's Deliveries card). */
@@ -1513,7 +1843,7 @@ export class BotService {
   async maintenanceTick(now = Date.now()): Promise<void> {
     for (const agent of this.deps.db.agents.listEnabled()) {
       try {
-        if (agent.heartbeat) await this.maybeHeartbeat(agent, now)
+        if (agent.heartbeat && !agent.paused) await this.maybeHeartbeat(agent, now)
         if (agent.reset) await this.maybeAutoCompact(agent, now)
       } catch (e) {
         console.error(`[bots] maintenance failed for ${agent.name}:`, errorMessageOf(e))
@@ -1545,12 +1875,32 @@ export class BotService {
       return
     }
     this.lastHeartbeatAt.set(agent.id, now)
-    try {
-      const result = await this.deps.chat.send({
+    // Proactive work is read-only unless the user chose 'act' (v53, dots):
+    // the whole turn runs under an autonomous invocation policy, so mutating
+    // tools are refused by the executor and the prompt says so.
+    const readOnly = config.posture !== 'act'
+    const send = () =>
+      this.deps.chat.send({
         conversationId: chat.id,
-        content: buildHeartbeatPrompt(config.prompt),
+        content: buildHeartbeatPrompt(config.prompt, {
+          readOnly,
+          goal: agent.goal,
+          projects: summarizeProjects(this.deps.db.botProjects.listForAgent(agent.id)),
+        }),
       })
-      if (!result.assistantMessage) return // queued result can't happen here
+    this.setTurnOrigin(chat.id, 'proactive')
+    try {
+      const result = readOnly
+        ? await withInvocationPolicy(
+            { origin: 'autonomous', autoAcceptEdits: false, sandboxLevel: 'read-only' },
+            send
+          )
+        : await send()
+      if (result.assistantMessage) this.turnOriginMessages.set(chat.id, result.assistantMessage.id)
+      if (!result.assistantMessage) {
+        this.turnOrigins.delete(chat.id)
+        return // queued result can't happen here
+      }
       this.pendingHeartbeats.set(chat.id, {
         agentId: agent.id,
         userMessageId: result.userMessage?.id ?? null,
@@ -1563,6 +1913,7 @@ export class BotService {
         }, HEARTBEAT_TIMEOUT_MS),
       })
     } catch (e) {
+      this.turnOrigins.delete(chat.id)
       // Missed beat (provider down, chat busy race): logged, retried next
       // cadence — heartbeats never surface errors to the user.
       console.error(`[bots] heartbeat failed for ${agent.name}:`, errorMessageOf(e))

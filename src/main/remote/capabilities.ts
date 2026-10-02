@@ -56,6 +56,12 @@ export const FULL_REMOTE_CHANNELS: ReadonlySet<ChannelName> = new Set([
   CHANNELS.botsMarkSeen, CHANNELS.botsUsage, CHANNELS.botBindingGet,
   CHANNELS.botBindingSetToken, CHANNELS.botBindingSetEnabled, CHANNELS.botBindingClearToken,
   CHANNELS.botBindingUpdateGroup,
+  CHANNELS.botsPause, CHANNELS.botsResume, CHANNELS.botsReset,
+  CHANNELS.botSuggestionsList, CHANNELS.botSuggestionAccept, CHANNELS.botSuggestionDismiss,
+  CHANNELS.browserFrame, CHANNELS.browserReturnControl,
+  CHANNELS.botProjectsList, CHANNELS.botProjectUpdate, CHANNELS.botProjectDelete,
+  CHANNELS.messageFeedbackSet, CHANNELS.messageFeedbackList,
+  CHANNELS.channelsList, CHANNELS.channelsUpdate, CHANNELS.channelsDelete, CHANNELS.channelsRepair,
   CHANNELS.kbList, CHANNELS.kbProviders, CHANNELS.kbCreate, CHANNELS.kbDelete,
   CHANNELS.kbSources, CHANNELS.kbRemoveSource,
   CHANNELS.arenaStart, CHANNELS.arenaStatus, CHANNELS.arenaApply, CHANNELS.arenaStop, CHANNELS.arenaDiscard,
@@ -71,7 +77,7 @@ export const FULL_REMOTE_CHANNELS: ReadonlySet<ChannelName> = new Set([
 
 export const FULL_REMOTE_PUSH_CHANNELS: ReadonlySet<string> = new Set([
   CHANNELS.terminalData, CHANNELS.terminalExit, CHANNELS.voiceDownloadProgress,
-  CHANNELS.botsChanged, CHANNELS.kbProgress, CHANNELS.briefChanged, CHANNELS.documentsChanged,
+  CHANNELS.botsChanged, CHANNELS.botSuggestionsChanged, CHANNELS.browserControl, CHANNELS.kbProgress, CHANNELS.briefChanged, CHANNELS.documentsChanged,
 ])
 
 /** These desktop-only values never cross a management response or push. */
@@ -84,5 +90,9 @@ export function remoteSafeData(channel: string, value: unknown): unknown {
   if (channel === CHANNELS.remoteStatus) return { ...source, pairing: null }
   if (channel === CHANNELS.imStatus || channel === CHANNELS.imSetTelegram || channel === CHANNELS.imSetWebhook) return { ...source, telegramPairingCode: null, webhookUrl: null, telegramBridgePairingCode: null }
   if ([CHANNELS.botBindingGet, CHANNELS.botBindingSetToken, CHANNELS.botBindingSetEnabled, CHANNELS.botBindingUpdateGroup].includes(channel as never)) return { ...source, pairingCode: null }
+  if (channel === CHANNELS.channelsList && Array.isArray(value)) {
+    return value.map((entry) => (entry && typeof entry === 'object' ? { ...entry, pairingCode: null } : entry))
+  }
+  if ([CHANNELS.channelsUpdate, CHANNELS.channelsRepair].includes(channel as never)) return { ...source, pairingCode: null }
   return value
 }

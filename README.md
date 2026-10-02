@@ -138,6 +138,7 @@ npm run dev
 | `npm run verify:fast` | Typecheck and run unit tests for a quick local gate |
 | `npm run verify` | Full tests, production build, bundle budget and Electron smoke test |
 | `npm run package:win` / `package:mac` / `package:linux` | Build + package installers into `release/` |
+| `npm run package:win:signed` | Build + sign the Windows app, uninstaller and installer into `release/signed/` |
 
 ## Building installers
 
@@ -147,7 +148,18 @@ Packaging is configured in [`electron-builder.yml`](electron-builder.yml); artif
 - **macOS:** DMG + ZIP
 - **Linux:** AppImage + deb
 
-> Cross-OS packaging is not supported — build each OS's installer on that OS (or use a CI matrix). **Code signing is intentionally unconfigured**; add your own certificate/notarization config before public distribution.
+> Cross-OS packaging is not supported — build each OS's installer on that OS (or use a CI matrix). macOS signing/notarization requires a separate configuration.
+
+For Windows releases, reuse Grasberg Office's Azure Artifact Signing setup:
+
+```powershell
+$env:GRASBERG_OFFICE_SIGNING_DIR = 'D:\Documents\ChatGPT\LibreOffice\signing'
+# Run this when the existing Azure login needs renewing:
+& "$env:GRASBERG_OFFICE_SIGNING_DIR\Connect-Signing.ps1"
+npm run package:win:signed
+```
+
+[`electron-builder.signed.yml`](electron-builder.signed.yml) enables mandatory SHA-256 signing as Neonex AB. The hook uses Office's `Invoke-GrasbergSigning.ps1`, which checks the Azure tenant/subscription, signs with its certificate profile, applies an RFC 3161 timestamp and verifies each signature. Azure holds the private key; no PFX or certificate password is needed. Signing failures stop packaging. The installer, blockmap and update manifest are generated together in `release/signed/`.
 
 ## Provider setup
 

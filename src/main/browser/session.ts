@@ -15,6 +15,9 @@
  */
 
 import { BrowserWindow, session as electronSession } from 'electron'
+import type { TeachStep } from '@shared/types'
+import { buildSnapshotJs, IS_SENSITIVE_FIELD_JS, sensitiveFieldMessage } from './sensitive'
+import { MAX_TEACH_STEPS, TEACH_RECORDER_JS, parseTeachEvent } from '../services/teach'
 
 const VIEWPORT = { width: 1280, height: 800 }
 const PARTITION = 'grasberg-browser' // non-persistent, isolated from the app
@@ -22,6 +25,9 @@ const NAV_TIMEOUT_MS = 20_000
 const MAX_TEXT_CHARS = 6000
 const MAX_ELEMENTS = 40
 const SCREENSHOT_MAX_WIDTH = 1024
+/** Live-view frames (v53) are small JPEGs — a watch window, not a recording. */
+const FRAME_WIDTH = 720
+const FRAME_JPEG_QUALITY = 60
 
 export type ComputerAction =
   | 'screenshot'
@@ -44,19 +50,7 @@ interface PageSnapshot {
   elements: Array<{ tag: string; label: string; x: number; y: number }>
 }
 
-const SNAPSHOT_JS = `(() => {
-  const pick = (el) => {
-    const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return null;
-    if (r.bottom < 0 || r.top > innerHeight) return null;
-    const label = (el.getAttribute('aria-label') || el.value || el.placeholder || el.innerText || el.alt || '').trim().slice(0, 80);
-    return { tag: el.tagName.toLowerCase(), label, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-  };
-  const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role=button],[role=link]'));
-  const elements = [];
-  for (const n of nodes) { const p = pick(n); if (p && (p.label || p.tag === 'input')) elements.push(p); if (elements.length >= ${MAX_ELEMENTS}) break; }
-  return { title: document.title, url: location.href, text: (document.body ? document.body.innerText : '').slice(0, ${MAX_TEXT_CHARS}), elements };
-})()`
+const SNAPSHOT_JS = buildSnapshotJs(MAX_ELEMENTS, MAX_TEXT_CHARS)
 
 const MODIFIER_KEYS: Record<string, string> = {
   ctrl: 'control',
@@ -99,9 +93,29 @@ function isAllowedUrl(raw: string): boolean {
   }
 }
 
+/** What the live view shows of one browser session (v53). */
+export interface BrowserFrameState {
+  open: boolean
+  url: string
+  title: string
+  /** The user has taken over: the window is visible and the agent waits. */
+  userControl: boolean
+  /** JPEG data URL of the viewport, or null when nothing is open. */
+  dataUrl: string | null
+}
+
 export class BrowserSession {
   private win: BrowserWindow | null = null
   private pendingScreenshot: string | null = null
+  /** v53 take-over: while true the agent's actions wait for control to return. */
+  private userControl = false
+  private controlWaiters: Array<() => void> = []
+  /** Called whenever control changes hands (main pushes it to the renderer). */
+  onControlChange: ((userControl: boolean) => void) | null = null
+  /** Window title while the user drives (names the bot when known). */
+  label = 'Grasberg browser'
+  /** v53 teach-a-task: the demonstration being recorded, with its listeners. */
+  private recording: { steps: TeachStep[]; detach: () => void } | null = null
 
   /** `partition` names the isolated Chromium session this instance drives. */
   constructor(readonly partition: string = PARTITION) {}
@@ -132,8 +146,196 @@ export class BrowserSession {
       },
     })
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // Closing the window while the user drives hands control back instead of
+    // destroying the session (cookies, the page the agent was on).
+    win.on('close', (event) => {
+      if (this.userControl) {
+        event.preventDefault()
+        this.returnControl()
+      }
+    })
     this.win = win
     return win
+  }
+
+  // -- take over / live view (v53) ----------------------------------------------
+
+  isUserInControl(): boolean {
+    return this.userControl
+  }
+
+  /** The page the session is on, or null when nothing has been opened. */
+  currentUrl(): string | null {
+    if (!this.win || this.win.isDestroyed()) return null
+    return this.win.webContents.getURL() || null
+  }
+
+  /**
+   * The user takes the wheel (dots "Take over"): the agent's window becomes a
+   * normal visible window and every browser/computer action waits until the
+   * user returns control (button or closing the window).
+   */
+  takeOver(): void {
+    const win = this.ensureWindow()
+    if (!win.webContents.getURL()) void win.webContents.loadURL('about:blank')
+    this.userControl = true
+    win.setTitle(`${this.label} — you are in control (close to hand back)`)
+    win.show()
+    win.focus()
+    this.onControlChange?.(true)
+  }
+
+  returnControl(): void {
+    if (!this.userControl) return
+    this.userControl = false
+    if (this.win && !this.win.isDestroyed()) this.win.hide()
+    const waiters = this.controlWaiters
+    this.controlWaiters = []
+    for (const resolve of waiters) resolve()
+    this.onControlChange?.(false)
+  }
+
+  /**
+   * Teach-a-task (v53): records the user's demonstration — page loads from
+   * the webContents, clicks / field changes / submits from an injected
+   * recorder that reports over console.debug. Secrets are never recorded.
+   */
+  startRecording(): void {
+    this.stopRecording()
+    const win = this.ensureWindow()
+    const wc = win.webContents
+    const steps: TeachStep[] = []
+    const push = (step: TeachStep): void => {
+      if (steps.length < MAX_TEACH_STEPS) steps.push(step)
+    }
+    const inject = (): void => {
+      void wc.executeJavaScript(TEACH_RECORDER_JS, true).catch(() => undefined)
+    }
+    const onNavigate = (_event: unknown, url: string): void => {
+      if (!/^https?:/i.test(url)) return
+      push({ kind: 'navigate', url, selector: '', label: '', tag: '', value: null, secret: false, at: Date.now() })
+    }
+    const onConsole = (details: { message?: string }): void => {
+      const step = parseTeachEvent(details.message ?? '', wc.getURL(), Date.now())
+      if (step) push(step)
+    }
+    wc.on('did-navigate', onNavigate)
+    wc.on('did-finish-load', inject)
+    wc.on('console-message', onConsole)
+    inject()
+    this.recording = {
+      steps,
+      detach: () => {
+        wc.removeListener('did-navigate', onNavigate)
+        wc.removeListener('did-finish-load', inject)
+        wc.removeListener('console-message', onConsole)
+      },
+    }
+  }
+
+  stopRecording(): TeachStep[] {
+    const current = this.recording
+    if (!current) return []
+    this.recording = null
+    if (this.win && !this.win.isDestroyed()) current.detach()
+    return current.steps
+  }
+
+  /** Resolves true once the agent has control (immediately if it already has). */
+  waitForControl(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (!this.userControl) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
+      const done = (value: boolean): void => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        this.controlWaiters = this.controlWaiters.filter((fn) => fn !== onReturn)
+        resolve(value)
+      }
+      const onReturn = (): void => done(true)
+      const onAbort = (): void => done(false)
+      const timer = setTimeout(() => done(false), timeoutMs)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.controlWaiters.push(onReturn)
+    })
+  }
+
+  /** One live-view frame: a small JPEG of the viewport plus where it is. */
+  async frame(): Promise<BrowserFrameState> {
+    if (!this.win || this.win.isDestroyed()) {
+      return { open: false, url: '', title: '', userControl: this.userControl, dataUrl: null }
+    }
+    const wc = this.win.webContents
+    let dataUrl: string | null = null
+    try {
+      const image = await wc.capturePage()
+      if (!image.isEmpty()) {
+        const sized = image.getSize().width > FRAME_WIDTH ? image.resize({ width: FRAME_WIDTH }) : image
+        dataUrl = `data:image/jpeg;base64,${sized.toJPEG(FRAME_JPEG_QUALITY).toString('base64')}`
+      }
+    } catch {
+      dataUrl = null
+    }
+    return {
+      open: true,
+      url: wc.getURL(),
+      title: wc.getTitle(),
+      userControl: this.userControl,
+      dataUrl,
+    }
+  }
+
+  /**
+   * Fills a saved login on the current page (credential vault, v53). The
+   * values go straight into the page's inputs — they are never returned, and
+   * the result only says what happened. Submits the form when it can.
+   */
+  async fillLogin(username: string, password: string, expectedOrigin: string): Promise<string> {
+    if (!this.win || this.win.isDestroyed()) return 'Error: no page is open. Navigate to the login page first.'
+    // The origin is re-checked INSIDE the page, at the moment of typing, so a
+    // navigation between the vault lookup and the fill can't redirect a saved
+    // password to another site.
+    const js = `(() => {
+      if (location.origin !== ${JSON.stringify(expectedOrigin)}) return 'wrong-origin';
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const pass = Array.from(document.querySelectorAll('input[type=password]')).find(visible);
+      if (!pass) return 'no-password-field';
+      const form = pass.form || document;
+      const candidates = Array.from(form.querySelectorAll('input')).filter((el) => visible(el) &&
+        /^(text|email|tel|)$/i.test(el.getAttribute('type') || '') && el !== pass);
+      const user = candidates.find((el) => /user|email|login|account/i.test((el.name||'') + (el.id||'') + (el.getAttribute('autocomplete')||''))) || candidates[0];
+      const set = (el, value) => {
+        const proto = Object.getPrototypeOf(el);
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      if (user) set(user, ${JSON.stringify(username)});
+      set(pass, ${JSON.stringify(password)});
+      const submit = pass.form && (pass.form.querySelector('button[type=submit],input[type=submit]') || pass.form.querySelector('button'));
+      if (submit) { submit.click(); return user ? 'filled-submitted' : 'password-only-submitted'; }
+      if (pass.form && pass.form.requestSubmit) { pass.form.requestSubmit(); return 'filled-submitted'; }
+      return user ? 'filled' : 'password-only';
+    })()`
+    let outcome: string
+    try {
+      outcome = (await this.win.webContents.executeJavaScript(js, true)) as string
+    } catch {
+      return 'Error: could not fill the login form on this page.'
+    }
+    if (outcome === 'wrong-origin') {
+      return 'Error: the page changed to another site before the login could be filled. Nothing was typed.'
+    }
+    if (outcome === 'no-password-field') {
+      return 'No password field is visible on this page — open the login form first.'
+    }
+    await new Promise((r) => setTimeout(r, 1200))
+    if (!this.win || this.win.isDestroyed()) return 'Saved login filled; the window has since closed.'
+    let where = await this.snapshotText(this.win)
+    // Belt and braces: whatever the page echoes, the secret never leaves main.
+    if (password.length >= 3) where = where.split(password).join('••••')
+    const verb = outcome.includes('submitted') ? 'filled and submitted' : 'filled'
+    return `Saved login ${verb} (the password was entered by the app; you never see it).\n\n${where}`
   }
 
   private async waitForLoad(win: BrowserWindow): Promise<void> {
@@ -223,17 +425,21 @@ export class BrowserSession {
 
   async typeText(selector: string, text: string): Promise<string> {
     if (!this.win || this.win.isDestroyed()) return 'Error: no page is open.'
+    // Passwords / one-time codes / card details stay with the user (v53).
     const js = `(() => { const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return false; el.focus();
+        if (!el) return false;
+        if ((${IS_SENSITIVE_FIELD_JS})(el)) return 'sensitive';
+        el.focus();
         el.value = ${JSON.stringify(text)};
         el.dispatchEvent(new Event('input', {bubbles:true}));
         el.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`
-    let ok = false
+    let ok: boolean | string = false
     try {
-      ok = (await this.win.webContents.executeJavaScript(js, true)) as boolean
+      ok = (await this.win.webContents.executeJavaScript(js, true)) as boolean | string
     } catch {
       return `Error: could not type into "${selector}".`
     }
+    if (ok === 'sensitive') return sensitiveFieldMessage('type')
     if (!ok) return `No input matched selector "${selector}".`
     return this.snapshotText(this.win)
   }
@@ -300,11 +506,16 @@ export class BrowserSession {
             deltaY: text === 'up' ? 300 : -300,
           } as unknown as Electron.MouseWheelInputEvent)
           break
-        case 'type':
+        case 'type': {
+          const sensitive = (await wc
+            .executeJavaScript(`(${IS_SENSITIVE_FIELD_JS})(document.activeElement)`, true)
+            .catch(() => false)) as boolean
+          if (sensitive) return sensitiveFieldMessage('computer')
           for (const ch of text ?? '') {
             wc.sendInputEvent({ type: 'char', keyCode: ch } as Electron.KeyboardInputEvent)
           }
           break
+        }
         case 'key': {
           const { keyCode, modifiers } = parseKeyCombo(text ?? '')
           if (keyCode.length === 0) break
@@ -330,7 +541,9 @@ export class BrowserSession {
   }
 
   close(): void {
-    if (this.win && !this.win.isDestroyed()) this.win.close()
+    // A forced close (LRU eviction, quit) never leaves an agent waiting.
+    this.returnControl()
+    if (this.win && !this.win.isDestroyed()) this.win.destroy()
     this.win = null
     this.pendingScreenshot = null
   }

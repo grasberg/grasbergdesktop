@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { McpServerConfig, McpTransport } from '@shared/types'
+import type { McpAccess, McpServerConfig, McpTransport } from '@shared/types'
 import type { SqliteDriver } from '../driver'
 import { parseStringArray, parseStringMap, updateById } from './util'
 
@@ -19,6 +19,7 @@ export interface McpServerCreateInput {
   url: string | null
   headers: Record<string, string>
   enabled: boolean
+  access?: McpAccess
 }
 
 export interface McpServerUpdateInput {
@@ -29,6 +30,7 @@ export interface McpServerUpdateInput {
   url?: string | null
   headers?: Record<string, string>
   enabled?: boolean
+  access?: McpAccess
 }
 
 export interface McpServersRepository {
@@ -52,6 +54,7 @@ interface McpServerRow {
   url: string | null
   headers_json: string
   enabled: number
+  access: string | null
   created_at: number
   updated_at: number
 }
@@ -68,6 +71,7 @@ function toConfig(row: McpServerRow): McpServerConfig {
     url: row.url,
     headers: parseStringMap(row.headers_json),
     enabled: row.enabled !== 0,
+    access: row.access === 'read' ? 'read' : 'write',
     secretNames: [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -95,8 +99,8 @@ export function createMcpServersRepository(driver: SqliteDriver): McpServersRepo
       const key = randomUUID().slice(0, 8)
       driver.run(
         `INSERT INTO mcp_servers
-           (id, key, name, transport, command, args_json, env_json, url, headers_json, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, key, name, transport, command, args_json, env_json, url, headers_json, enabled, access, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           key,
@@ -108,6 +112,7 @@ export function createMcpServersRepository(driver: SqliteDriver): McpServersRepo
           input.url,
           JSON.stringify(input.headers),
           input.enabled ? 1 : 0,
+          input.access === 'read' ? 'read' : 'write',
           now,
           now,
         ]
@@ -128,6 +133,7 @@ export function createMcpServersRepository(driver: SqliteDriver): McpServersRepo
           url: patch.url,
           headers_json: patch.headers === undefined ? undefined : JSON.stringify(patch.headers),
           enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+          access: patch.access,
         },
         { touchUpdatedAt: true }
       )

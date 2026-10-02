@@ -15,6 +15,7 @@ import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
 import { toNormalized, unwrap } from '@/api/uld'
+import { ComputerView } from '@/components/agents/PersonalAgentPanel'
 import './settings.css'
 
 function SkillForm({ editing, onDone }: { editing: Skill | null; onDone: () => void }): ReactElement {
@@ -103,6 +104,7 @@ export default function SkillsTab(): ReactElement {
 
   const { formOpen, editing, openAdd, openEdit, closeForm } = useEditorState<Skill>()
   const [importing, setImporting] = useState(false)
+  const [teaching, setTeaching] = useState(false)
 
   useEffect(() => {
     void load()
@@ -140,6 +142,9 @@ export default function SkillsTab(): ReactElement {
           </p>
         </div>
         <div className="prompt-form-actions">
+          <button type="button" className="btn" onClick={() => setTeaching((t) => !t)}>
+            {teaching ? 'Close teaching' : 'Teach by demonstration'}
+          </button>
           <button type="button" className="btn" disabled={importing} onClick={() => void runImport()}>
             {importing ? 'Importing…' : 'Import folder…'}
           </button>
@@ -150,6 +155,17 @@ export default function SkillsTab(): ReactElement {
           ) : null}
         </div>
       </header>
+
+      {teaching ? (
+        <div className="card pa-panel teach-card">
+          <p className="field-hint">
+            Show a task once in the agent browser — Grasberg records it and writes a skill any
+            agent can repeat. (A bot's own browser and logins are on its profile.) You can also
+            turn a finished conversation into a skill from the command palette.
+          </p>
+          <ComputerView agentId={null} label="The shared agent browser" />
+        </div>
+      ) : null}
 
       {formOpen ? (
         <SkillForm key={editing?.id ?? 'new'} editing={editing} onDone={closeForm} />

@@ -46,6 +46,8 @@ import type {
   DelegateFinishedInfo,
   DelegateHandoffInfo,
 } from '@shared/types'
+import { BOT_CHAT_TOOL_IDS, BOT_PROTOCOL_TOOL_IDS } from '@shared/tool-classes'
+import { summarizeProjects } from '../db/repositories/bot-projects'
 import {
   CHANNELS,
   type ChatEditAndRerunRequest,
@@ -100,6 +102,7 @@ import {
   currentInvocationPolicy,
   mergeInvocationPolicies,
   withInvocationPolicy,
+  withoutInvocationPolicy,
   type InvocationPolicy,
 } from '../invocation-context'
 import { KEYLESS_API_KEY, isLoopbackBaseUrl, isValidStorageKey } from '@shared/schemas'
@@ -1278,7 +1281,7 @@ export class ChatService {
       ...overrides?.params,
     }
     const invocationPolicy = currentInvocationPolicy()
-    if (invocationPolicy?.origin === 'remote') {
+    if (invocationPolicy) {
       params.autoAcceptEdits = invocationPolicy.autoAcceptEdits
       params.sandboxLevel = invocationPolicy.sandboxLevel
     }
@@ -1528,7 +1531,10 @@ export class ChatService {
     if (existing) clearTimeout(existing)
     this.queueDrainTimers.set(
       conversationId,
-      setTimeout(() => {
+      // The drained turn carries the QUEUED sends' policies (queuedPolicies),
+      // never the finished turn's — a user message queued behind a read-only
+      // heartbeat must not run read-only itself.
+      withoutInvocationPolicy(() => setTimeout(() => {
         this.queueDrainTimers.delete(conversationId)
         if ((this.queuedSends.get(conversationId) ?? 0) === 0) return
         // A newer turn already claimed the slot: it covers the history.
@@ -1539,7 +1545,7 @@ export class ChatService {
             e instanceof Error ? e.message : 'Unknown error'
           )
         })
-      }, SEND_QUEUE_DEBOUNCE_MS)
+      }, SEND_QUEUE_DEBOUNCE_MS))
     )
   }
 
@@ -1702,12 +1708,22 @@ export class ChatService {
       ? this.db.agents.getById(conversation.agentId)
       : null
     if (conversation?.agentId) {
+      // Channel tools only when the bot has that channel (v53).
+      const kinds = new Set(
+        this.db.driver
+          .all<{ kind: string }>('SELECT kind FROM bot_channels WHERE agent_id = ? AND enabled = 1', [
+            conversation.agentId,
+          ])
+          .map((row) => row.kind)
+      )
       enabled = enabled.filter(
         (def) =>
-          def.id === 'message_agent' || !botAgent?.toolIds || botAgent.toolIds.includes(def.id)
+          (BOT_PROTOCOL_TOOL_IDS.has(def.id) || !botAgent?.toolIds || botAgent.toolIds.includes(def.id)) &&
+          !((def.id === 'email_read' || def.id === 'email_send') && !kinds.has('email')) &&
+          !(def.id === 'channel_send' && !kinds.has('slack') && !kinds.has('discord'))
       )
     } else {
-      enabled = enabled.filter((def) => def.id !== 'message_agent')
+      enabled = enabled.filter((def) => !BOT_CHAT_TOOL_IDS.has(def.id))
     }
     if (enabled.length === 0) return { promptOpts: {} }
 
@@ -1758,7 +1774,8 @@ export class ChatService {
       ...(conversation.mode === 'work' && conversation.params.planMode === true
         ? { planMode: true }
         : {}),
-      ...(conversation.mode === 'work' && conversation.params.sandboxLevel === 'read-only'
+      ...((conversation.mode === 'work' && conversation.params.sandboxLevel === 'read-only') ||
+      currentInvocationPolicy()?.sandboxLevel === 'read-only'
         ? { sandboxReadOnly: true }
         : {}),
       ...(enabledSkills.length > 0
@@ -1799,7 +1816,13 @@ export class ChatService {
       ? [
           botAgent.systemPrompt.trim(),
           buildBotChatSection(
-            { name: botAgent.name, title: botAgent.title, description: botAgent.description },
+            {
+              name: botAgent.name,
+              title: botAgent.title,
+              description: botAgent.description,
+              goal: botAgent.goal,
+              projects: summarizeProjects(this.db.botProjects.listForAgent(botAgent.id)),
+            },
             this.db.agents
               .listEnabled()
               .filter((mate) => mate.id !== botAgent.id)
@@ -2281,9 +2304,9 @@ export class ChatService {
     // be mapped back to an id before the membership test below.
     const enabledDefs = opts?.useTools && tools ? tools.registry.listEnabledDefinitions() : []
     const allowedDefs = enabledDefs
-      // message_agent lives ONLY in canonical bot chats (v46) — a headless
-      // one-shot has no chat for a teammate's reply to land in.
-      .filter((d) => d.id !== 'message_agent')
+      // message_agent and the other bot-chat tools live ONLY in canonical bot
+      // chats (v46/v53) — a headless one-shot has no chat for them to act in.
+      .filter((d) => !BOT_CHAT_TOOL_IDS.has(d.id))
       .filter((d) => !agent?.toolIds || agent.toolIds.includes(d.id))
     const allowedToolIds = new Set(allowedDefs.map((d) => d.id))
     const toolDefs: AdapterToolDef[] = allowedDefs.map(toAdapterToolDef)
@@ -2397,6 +2420,7 @@ export class ChatService {
               askUser: (question, options) => this.askRemoteChoice(question, options, opts?.signal),
               ...(agent ? { agentName: agent.name } : {}),
               ...(opts?.sandboxLevel ? { sandboxLevel: opts.sandboxLevel } : {}),
+              requestText: prompt,
               ...(opts?.signal ? { signal: opts.signal } : {}),
             })
             messages.push({ role: 'tool', content: out, toolCallId: call.id })
@@ -3159,7 +3183,7 @@ export class ChatService {
         // chat-only (v46) — a delegate run has no chat for replies to land in.
         if (profile.toolIds) {
           allowedToolIds = new Set(
-            profile.toolIds.filter((id) => id !== 'delegate' && id !== 'message_agent')
+            profile.toolIds.filter((id) => id !== 'delegate' && !BOT_CHAT_TOOL_IDS.has(id))
           )
         }
         if (profile.maxRounds && profile.maxRounds >= 1) {
@@ -4082,16 +4106,19 @@ export class ChatService {
               : undefined
             const planMode = conversation.mode === 'work' && conversation.params.planMode === true
             const invocationPolicy = currentInvocationPolicy()
-            const autoAcceptEdits =
-              invocationPolicy?.origin === 'remote'
-                ? false
-                : !planMode && conversation.params.autoAcceptEdits === true
+            const autoAcceptEdits = invocationPolicy
+              ? false
+              : !planMode && conversation.params.autoAcceptEdits === true
+            // A policy's read-only level applies in every mode (a bot's
+            // proactive turn lives in a chat-mode conversation); wider policy
+            // levels only matter where Work-mode tools exist.
             const sandboxLevel =
-              conversation.mode === 'work'
-                ? invocationPolicy?.origin === 'remote'
-                  ? invocationPolicy.sandboxLevel
-                  : conversation.params.sandboxLevel
-                : undefined
+              invocationPolicy &&
+              (conversation.mode === 'work' || invocationPolicy.sandboxLevel === 'read-only')
+                ? invocationPolicy.sandboxLevel
+                : conversation.mode === 'work'
+                  ? conversation.params.sandboxLevel
+                  : undefined
             // Live tool output (shell commands) streams into the same envelope
             // channel so the renderer can show it while the tool runs.
             const onToolOutput = (toolCallId: string, chunk: string): void =>

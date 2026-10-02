@@ -1,5 +1,5 @@
 # electron-builder configuration for Grasberg.
-# Code signing is intentionally unconfigured — see README "Building installers".
+# Signed Windows releases use electron-builder.signed.yml — see README "Building installers".
 appId: com.grasberg.app
 productName: Grasberg
 

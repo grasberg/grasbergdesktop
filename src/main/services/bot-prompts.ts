@@ -13,6 +13,10 @@ export interface BotIdentity {
   name: string
   title: string
   description: string
+  /** Personal agent (v53): the bot's standing goal, own chat only. */
+  goal?: string
+  /** Personal agent (v53): its open projects, as summarizeProjects text. */
+  projects?: string | null
 }
 
 /** Hermes caps: a room settles after at most 3 serial rounds per user send. */
@@ -178,6 +182,27 @@ export function buildBotChatSection(self: BotIdentity, teammates: readonly BotId
   } else {
     lines.push('No other bots exist yet, so the message_agent tool has no valid targets.')
   }
+  const goal = (self.goal ?? '').trim()
+  if (goal) {
+    lines.push(
+      `Your standing goal — the responsibility the user gave you: ${goal}\n` +
+        'Keep working toward it between conversations and report progress here.'
+    )
+  }
+  const projects = (self.projects ?? '').trim()
+  lines.push(
+    projects
+      ? `Your open projects (keep them current with update_project):\n${projects}`
+      : 'Track multi-step work as projects with update_project (title, status, summary, next step) ' +
+          'so the user can see where things stand.'
+  )
+  lines.push(
+    'You are the user’s personal agent. When you notice something worth doing that nobody ' +
+      'asked for, propose it with suggest_action instead of doing it. A message starting with ' +
+      '"[Approved suggestion]" is the user approving one of your proposals — carry it out. Some ' +
+      'actions (passwords, payments, account changes) always stay with the user: hand them over ' +
+      'rather than attempting them.'
+  )
   return lines.join('\n\n')
 }
 
@@ -236,14 +261,29 @@ export function isHeartbeatQuiet(reply: string): boolean {
  * The user-message side of a heartbeat turn in the bot's canonical chat. The
  * persona/system prompt rides along as in any turn; this carries the contract.
  */
-export function buildHeartbeatPrompt(extra?: string | null): string {
+export function buildHeartbeatPrompt(
+  extra?: string | null,
+  opts: { readOnly?: boolean; goal?: string | null; projects?: string | null } = {}
+): string {
   const custom = (extra ?? '').trim()
+  const goal = (opts.goal ?? '').trim()
+  const projects = (opts.projects ?? '').trim()
+  const posture = opts.readOnly
+    ? '\n\nThis is PROACTIVE work, so you are in READ-ONLY mode: you may look things up, read ' +
+      'connected apps and research, but every tool that changes something or contacts anyone is ' +
+      'refused. When you find something worth doing, do NOT attempt it — call suggest_action ' +
+      'with a short title, the exact instruction you would carry out, and why. The user decides; ' +
+      'an accepted suggestion comes back to you as an approved request.'
+    : ''
   return (
     '[Heartbeat] Periodic check-in — no one asked a question. Review this chat, your role and ' +
     'your memory: is there anything that genuinely needs the user’s attention or a next step ' +
     `you should surface right now? If not — and usually there is not — reply with exactly ` +
     `${HEARTBEAT_NO_REPLY} and nothing else. Recurring work belongs in scheduled routines, not ` +
     'here; do not invent tasks to look busy.' +
+    (goal ? `\n\nYour standing goal: ${goal}` : '') +
+    (projects ? `\n\nYour active projects:\n${projects}` : '') +
+    posture +
     (custom ? `\n\nStanding heartbeat instructions from the user:\n${custom}` : '')
   )
 }

@@ -228,6 +228,7 @@ export function createUldApi(transport: UldTransport): UldApi {
     rulesList: () => transport.invoke(CHANNELS.toolsRulesList),
     ruleCreate: (input) => transport.invoke(CHANNELS.toolsRuleCreate, input),
     ruleDelete: (ruleId) => transport.invoke(CHANNELS.toolsRuleDelete, ruleId),
+    ruleDraft: (text) => transport.invoke(CHANNELS.toolsRuleDraft, text),
     onRulesChanged: subscribe<void>(CHANNELS.toolRulesChanged),
     onApprovalRequest: subscribe<ToolApprovalRequest>(CHANNELS.toolApprovalRequest),
     onApprovalSettled: subscribe<string>(CHANNELS.toolApprovalSettled),
@@ -302,6 +303,8 @@ export function createUldApi(transport: UldTransport): UldApi {
     setEnabled: (id, enabled) => transport.invoke(CHANNELS.mcpSetEnabled, id, enabled),
     reconnect: (id) => transport.invoke(CHANNELS.mcpReconnect, id),
     status: () => transport.invoke(CHANNELS.mcpStatus),
+    authorize: (id) => transport.invoke(CHANNELS.mcpAuthorize, id),
+    signOut: (id) => transport.invoke(CHANNELS.mcpSignOut, id),
     onServersChanged: subscribe<McpServerRuntime[]>(CHANNELS.mcpServersChanged),
   },
   im: {
@@ -383,6 +386,47 @@ export function createUldApi(transport: UldTransport): UldApi {
     bindingUpdateGroup: (agentId, groupId, patch) =>
       transport.invoke(CHANNELS.botBindingUpdateGroup, agentId, groupId, patch),
     onChanged: subscribe(CHANNELS.botsChanged),
+    pause: (agentId) => transport.invoke(CHANNELS.botsPause, agentId),
+    resume: (agentId) => transport.invoke(CHANNELS.botsResume, agentId),
+    reset: (agentId) => transport.invoke(CHANNELS.botsReset, agentId),
+    suggestions: (agentId) => transport.invoke(CHANNELS.botSuggestionsList, agentId ?? null),
+    acceptSuggestion: (id) => transport.invoke(CHANNELS.botSuggestionAccept, id),
+    dismissSuggestion: (id) => transport.invoke(CHANNELS.botSuggestionDismiss, id),
+    onSuggestionsChanged: subscribe(CHANNELS.botSuggestionsChanged),
+    projects: (agentId) => transport.invoke(CHANNELS.botProjectsList, agentId),
+    updateProject: (id, patch) => transport.invoke(CHANNELS.botProjectUpdate, id, patch),
+    deleteProject: (id) => transport.invoke(CHANNELS.botProjectDelete, id),
+  },
+  feedback: {
+    set: (messageId, rating, comment) =>
+      transport.invoke(CHANNELS.messageFeedbackSet, messageId, rating, comment),
+    list: (conversationId) => transport.invoke(CHANNELS.messageFeedbackList, conversationId),
+  },
+  computer: {
+    frame: (agentId) => transport.invoke(CHANNELS.browserFrame, agentId),
+    takeOver: (agentId) => transport.invoke(CHANNELS.browserTakeOver, agentId),
+    returnControl: (agentId) => transport.invoke(CHANNELS.browserReturnControl, agentId),
+    onControl: subscribe(CHANNELS.browserControl),
+  },
+  channels: {
+    list: (agentId) => transport.invoke(CHANNELS.channelsList, agentId),
+    create: (input) => transport.invoke(CHANNELS.channelsCreate, input),
+    update: (id, patch) => transport.invoke(CHANNELS.channelsUpdate, id, patch),
+    remove: (id) => transport.invoke(CHANNELS.channelsDelete, id),
+    repair: (id) => transport.invoke(CHANNELS.channelsRepair, id),
+  },
+  teach: {
+    start: (agentId, startUrl) => transport.invoke(CHANNELS.teachStart, agentId, startUrl ?? null),
+    stop: (input) => transport.invoke(CHANNELS.teachStop, input),
+    status: () => transport.invoke(CHANNELS.teachStatus),
+    fromConversation: (conversationId, name, description) =>
+      transport.invoke(CHANNELS.skillsFromConversation, conversationId, name, description),
+    onChanged: subscribe(CHANNELS.teachChanged),
+  },
+  logins: {
+    list: () => transport.invoke(CHANNELS.loginsList),
+    save: (input) => transport.invoke(CHANNELS.loginsSave, input),
+    remove: (id) => transport.invoke(CHANNELS.loginsDelete, id),
   },
   knowledge: {
     providers: () => transport.invoke(CHANNELS.kbProviders),

@@ -8,12 +8,18 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { McpServerConfig } from '@shared/types'
+
+export { UnauthorizedError }
 
 export interface McpDiscovered {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  /** MCP tool annotation readOnlyHint === true (the server says it only reads). */
+  readOnly?: boolean
 }
 
 export interface McpConnection {
@@ -25,7 +31,9 @@ export interface McpConnection {
 /** Creates and connects a real MCP client for the given server config. */
 export type McpConnector = (
   config: McpServerConfig,
-  secrets: Record<string, string>
+  secrets: Record<string, string>,
+  /** v53: OAuth for remote connectors (http only). */
+  opts?: { authProvider?: OAuthClientProvider }
 ) => Promise<McpConnection>
 
 const CLIENT_INFO = { name: 'grasberg', version: '0.1.0' }
@@ -44,23 +52,79 @@ function flattenContent(result: unknown): { content: string; isError: boolean } 
   return { content: parts.join('\n'), isError: r.isError === true }
 }
 
-export const defaultMcpConnector: McpConnector = async (config, secrets) => {
-  const client = new Client(CLIENT_INFO)
+/**
+ * Connects over Streamable HTTP, falling back to the legacy HTTP+SSE
+ * transport (many hosted connectors still expose /sse). An OAuth challenge
+ * is never treated as a transport mismatch: UnauthorizedError propagates.
+ */
+async function connectHttp(
+  config: McpServerConfig,
+  secrets: Record<string, string>,
+  authProvider: OAuthClientProvider | undefined
+): Promise<{ client: Client; transport: StreamableHTTPClientTransport | SSEClientTransport }> {
+  const url = new URL(config.url ?? '')
+  const requestInit = { headers: { ...config.headers, ...secrets } }
+  const auth = authProvider ? { authProvider } : {}
+  const first = new Client(CLIENT_INFO)
+  const streamable = new StreamableHTTPClientTransport(url, { requestInit, ...auth })
+  try {
+    await first.connect(streamable, { timeout: CONNECT_TIMEOUT_MS })
+    return { client: first, transport: streamable }
+  } catch (e) {
+    if (e instanceof UnauthorizedError) throw Object.assign(e, { transport: streamable })
+    await first.close().catch(() => undefined)
+    const fallback = new Client(CLIENT_INFO)
+    const sse = new SSEClientTransport(url, { requestInit, ...auth })
+    try {
+      await fallback.connect(sse, { timeout: CONNECT_TIMEOUT_MS })
+      return { client: fallback, transport: sse }
+    } catch (sseError) {
+      if (sseError instanceof UnauthorizedError) throw Object.assign(sseError, { transport: sse })
+      // Report the Streamable HTTP failure: it is the modern transport.
+      throw e
+    }
+  }
+}
 
-  const transport =
-    config.transport === 'stdio'
-      ? new StdioClientTransport({
-          command: config.command ?? '',
-          args: config.args,
-          // Secrets go in env, never argv.
-          env: { ...config.env, ...secrets } as Record<string, string>,
-          stderr: 'ignore',
-        })
-      : new StreamableHTTPClientTransport(new URL(config.url ?? ''), {
-          requestInit: { headers: { ...config.headers, ...secrets } },
-        })
+/**
+ * Interactive OAuth sign-in (v53): connects with an interactive provider.
+ * Returns null when the server let us in without a sign-in; otherwise the
+ * provider has opened the browser, and `finish(code)` exchanges the code the
+ * loopback redirect delivered.
+ */
+export async function beginMcpOAuth(
+  config: McpServerConfig,
+  secrets: Record<string, string>,
+  authProvider: OAuthClientProvider
+): Promise<{ finish(code: string): Promise<void> } | null> {
+  try {
+    const { client } = await connectHttp(config, secrets, authProvider)
+    await client.close().catch(() => undefined)
+    return null
+  } catch (e) {
+    const transport = (e as { transport?: { finishAuth(code: string): Promise<void> } }).transport
+    if (e instanceof UnauthorizedError && transport) {
+      return { finish: (code) => transport.finishAuth(code) }
+    }
+    throw e
+  }
+}
 
-  await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+export const defaultMcpConnector: McpConnector = async (config, secrets, opts) => {
+  let client: Client
+  if (config.transport === 'stdio') {
+    client = new Client(CLIENT_INFO)
+    const transport = new StdioClientTransport({
+      command: config.command ?? '',
+      args: config.args,
+      // Secrets go in env, never argv.
+      env: { ...config.env, ...secrets } as Record<string, string>,
+      stderr: 'ignore',
+    })
+    await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+  } else {
+    client = (await connectHttp(config, secrets, opts?.authProvider)).client
+  }
 
   return {
     async listTools() {
@@ -76,6 +140,9 @@ export const defaultMcpConnector: McpConnector = async (config, secrets) => {
               type: 'object',
               properties: {},
             },
+            readOnly:
+              (tool as { annotations?: { readOnlyHint?: unknown } }).annotations?.readOnlyHint ===
+              true,
           })
         }
         cursor = page.nextCursor

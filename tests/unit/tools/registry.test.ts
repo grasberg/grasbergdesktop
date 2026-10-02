@@ -51,9 +51,16 @@ describe('ToolRegistry.listDefinitions', () => {
       'propose_shell_command',
       'edit_file',
       'write_file',
+      'create_skill',
       'knowledge_search',
       'delegate',
       'message_agent',
+      'suggest_action',
+      'email_read',
+      'email_send',
+      'channel_send',
+      'update_project',
+      'hand_off',
       'task_output',
       'task_stop',
       'update_task_list',
@@ -120,6 +127,7 @@ describe('ToolRegistry permissions', () => {
     db!.settings.update({
       shellExecutionEnabled: true,
       browserToolsEnabled: true,
+      desktopControlEnabled: true,
       defaultImageProviderId: 'img-provider',
     })
     db!.skills.create({ name: 'demo', content: 'Demo instructions.' })
@@ -154,6 +162,7 @@ describe('ToolRegistry custom tools', () => {
     db!.settings.update({
       shellExecutionEnabled: true,
       browserToolsEnabled: true,
+      desktopControlEnabled: true,
       defaultImageProviderId: 'img-provider',
     })
     db!.skills.create({ name: 'demo', content: 'Demo instructions.' })

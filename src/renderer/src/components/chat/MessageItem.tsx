@@ -20,6 +20,7 @@ import { useProvidersStore } from '@/stores/providers'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { sttReady, useVoiceStore } from '@/stores/voice'
+import { useFeedbackStore } from '@/stores/feedback'
 import GeneratedImage from './GeneratedImage'
 import Markdown from './Markdown'
 import ModelPickList from './ModelPickList'
@@ -595,6 +596,75 @@ function ReadAloudAction({ message }: { message: Message }): ReactElement | null
   )
 }
 
+/**
+ * Thumbs up/down (v53): the agent learns from it — a comment or a thumbs-down
+ * becomes a memory for whichever agent wrote the reply.
+ */
+function FeedbackActions({ message }: { message: Message }): ReactElement | null {
+  const feedback = useFeedbackStore((s) => s.byMessage[message.id])
+  const [commenting, setCommenting] = useState<1 | -1 | null>(null)
+  const [comment, setComment] = useState('')
+  useEffect(() => {
+    void useFeedbackStore.getState().load(message.conversationId)
+  }, [message.conversationId])
+  if (message.status !== 'complete') return null
+  const rate = (rating: 1 | -1): void => {
+    if (feedback?.rating === rating) {
+      void useFeedbackStore.getState().rate(message.id, 0)
+      return
+    }
+    setComment('')
+    setCommenting(rating)
+    void useFeedbackStore.getState().rate(message.id, rating)
+  }
+  const sendComment = (): void => {
+    if (commenting !== null && comment.trim()) {
+      void useFeedbackStore.getState().rate(message.id, commenting, comment.trim())
+    }
+    setCommenting(null)
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className={`btn-icon msg-action${feedback?.rating === 1 ? ' msg-action-active' : ''}`}
+        aria-label="Good reply"
+        title="Good reply — the agent remembers what worked"
+        onClick={() => rate(1)}
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        className={`btn-icon msg-action${feedback?.rating === -1 ? ' msg-action-active' : ''}`}
+        aria-label="Bad reply"
+        title="Bad reply — tell the agent what to do differently"
+        onClick={() => rate(-1)}
+      >
+        👎
+      </button>
+      {commenting !== null ? (
+        <span className="msg-feedback-comment">
+          <input
+            autoFocus
+            value={comment}
+            maxLength={1000}
+            placeholder={commenting === 1 ? 'What was good? (optional)' : 'What should it do differently?'}
+            onChange={(e) => setComment(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') sendComment()
+              if (e.key === 'Escape') setCommenting(null)
+            }}
+          />
+          <button type="button" className="btn-icon msg-action" aria-label="Save feedback" onClick={sendComment}>
+            ✓
+          </button>
+        </span>
+      ) : null}
+    </>
+  )
+}
+
 /** Human reason for a Reliability Autopilot hop (the header note). */
 function failoverReasonText(code: FailoverReason): string {
   switch (code) {
@@ -792,6 +862,7 @@ function AssistantMessage({ message, isLast }: MessageItemProps): ReactElement {
               )}
               <ForkAction message={message} />
               <UndoTurnAction message={message} />
+              <FeedbackActions message={message} />
             </>
           )}
         </div>

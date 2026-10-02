@@ -23,6 +23,8 @@ import type { AppDatabase } from '../db/database'
 import type { BotBindingRecord } from '../db/repositories/bot-bindings'
 import type { Keystore } from '../keys/keystore'
 import { TelegramBridge, type TelegramInbound } from './telegram'
+import { answers } from './channels/types'
+import { wrapUntrusted } from '../services/untrusted'
 
 const TOKEN_NAME = 'token'
 const PAIRING_TTL_MS = 15 * 60_000
@@ -43,8 +45,10 @@ export interface BotChannelServiceDeps {
    */
   sendToBot: (
     conversationId: string,
-    content: string
-  ) => Promise<{ queued?: boolean; assistantMessage?: Message | null }>
+    content: string,
+    /** untrusted = a group member who is not the owner: runs as an outside event. */
+    opts?: { untrusted?: boolean }
+  ) => Promise<{ queued?: boolean; assistantMessage?: Message | null; userMessage?: Message | null }>
   broadcast: (channel: string, payload: unknown) => void
   fetchImpl?: typeof fetch
 }
@@ -56,8 +60,10 @@ interface RunningBridge {
 
 interface ReplyRoute {
   chatId: number
-  /** Exact placeholder id, or null = "the next completed turn answers this". */
+  /** Exact placeholder id, or null = a queued send (see afterSeq). */
   assistantMessageId: string | null
+  /** Queued send: only a turn after this user message's seq answers it. */
+  afterSeq: number | null
   at: number
 }
 
@@ -329,24 +335,35 @@ export class BotChannelService {
     const gated =
       entry.activation === 'always' || inbound.mentionsBot || inbound.isReplyToBot
     if (!gated) return null
-    const framed = `[Telegram group "${entry.title}" — ${inbound.senderName}]: ${inbound.text}`
-    return this.route(agentId, inbound.chatId, framed)
+    // A member who is not the owner is an outside party: their words are
+    // data, and the turn runs as an outside event (v53).
+    const framed = isOwner
+      ? `[Telegram group "${entry.title}" — ${inbound.senderName} (owner)]: ${inbound.text}`
+      : `[Telegram group "${entry.title}" — ${inbound.senderName}, not your owner]:\n` +
+        wrapUntrusted(inbound.text.slice(0, 20_000), `Telegram message from ${inbound.senderName}`)
+    return this.route(agentId, inbound.chatId, framed, !isOwner)
   }
 
   /** Starts a canonical-chat turn and remembers where the reply goes. */
   private async route(
     agentId: string,
     chatId: number,
-    content: string
+    content: string,
+    untrusted = false
   ): Promise<string | null> {
+    // Paused (v53): answer honestly instead of queueing work nobody runs.
+    if (this.deps.db.agents.getById(agentId)?.paused) {
+      return 'I am paused right now — my owner can resume me in Grasberg.'
+    }
     const chat = this.deps.ensureBotChat(agentId)
     void this.bridges.get(agentId)?.bridge.sendTyping(chatId)
     try {
-      const result = await this.deps.sendToBot(chat.id, content)
+      const result = await this.deps.sendToBot(chat.id, content, { untrusted })
       const routes = this.routes.get(chat.id) ?? []
       routes.push({
         chatId,
         assistantMessageId: result.assistantMessage?.id ?? null,
+        afterSeq: result.assistantMessage ? null : (result.userMessage?.seq ?? null),
         at: Date.now(),
       })
       this.routes.set(chat.id, routes)
@@ -359,8 +376,8 @@ export class BotChannelService {
 
   /**
    * Completion hook: flushes pending Telegram routes for this conversation.
-   * Exact placeholder matches AND null routes (queued sends coalesced into
-   * this turn) all receive the final text, one send per distinct chat.
+   * Exact placeholder matches AND queued sends answered by a turn that
+   * started after them all receive the final text, one send per distinct chat.
    */
   handleCompletion(conversation: Conversation, message: Message): void {
     if (message.role !== 'assistant' || !conversation.agentId) return
@@ -371,7 +388,7 @@ export class BotChannelService {
     const targets = new Set<number>()
     for (const routeEntry of routes) {
       if (now - routeEntry.at > ROUTE_TTL_MS) continue
-      if (routeEntry.assistantMessageId === message.id || routeEntry.assistantMessageId === null) {
+      if (answers(routeEntry, message)) {
         targets.add(routeEntry.chatId)
       } else {
         keep.push(routeEntry)

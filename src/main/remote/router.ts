@@ -239,7 +239,7 @@ export function createRemoteRouter(
     const access = deviceId ? opts?.accessForDevice?.(deviceId) ?? 'limited' : 'limited'
     const unavailable = { ok: false as const, error: { code: 'not_supported' as const, message: 'This operation is available only on your desktop.', retryable: false } }
     if (channel === CHANNELS.backupExport && (args[0] as { includePrivateSpaces?: unknown } | undefined)?.includePrivateSpaces === true) return unavailable
-    if (channel === CHANNELS.settingsUpdate && args[0] && typeof args[0] === 'object' && ['remoteAccessEnabled', 'remoteRelayUrl', 'remoteClientUrl', 'remoteDesktopId', 'appLockHash', 'voiceWhisperBinaryPath', 'workflowWebhookToken', 'telegramBridgePairingCode'].some(key => key in (args[0] as object))) return unavailable
+    if (channel === CHANNELS.settingsUpdate && args[0] && typeof args[0] === 'object' && ['remoteAccessEnabled', 'remoteRelayUrl', 'remoteClientUrl', 'remoteDesktopId', 'appLockHash', 'voiceWhisperBinaryPath', 'workflowWebhookToken', 'telegramBridgePairingCode', 'desktopControlEnabled', 'autoReview', 'anomalyMonitorEnabled'].some(key => key in (args[0] as object))) return unavailable
     if (channel === CHANNELS.terminalInput || channel === CHANNELS.terminalDispose) {
       const sessionId = channel === CHANNELS.terminalInput ? (args[0] as { sessionId?: string } | undefined)?.sessionId : args[0]
       const conversationId = typeof sessionId === 'string' ? opts?.conversationForTerminal?.(sessionId) : undefined

@@ -21,6 +21,7 @@ import BotRoutinesPanel from '@/components/bots/BotRoutinesPanel'
 import { AVATAR_COLORS, BotAvatarBadge } from '@/components/bots/BotAvatarBadge'
 import BotAvatarPicker from './BotAvatarPicker'
 import DeliveriesCard from '@/components/bots/DeliveriesCard'
+import PersonalAgentPanel from './PersonalAgentPanel'
 import { useBotsStore } from '@/stores/bots'
 import { useProvidersStore } from '@/stores/providers'
 import { useToolsStore } from '@/stores/tools'
@@ -57,6 +58,10 @@ interface FormState {
   /** '' = heartbeat off; otherwise the cadence in minutes. */
   heartbeatEvery: string
   heartbeatDeliver: 'chat' | 'notify'
+  /** v53: proactive work only looks ('read-only', the default) or may act. */
+  heartbeatPosture: 'read-only' | 'act'
+  /** v53: the standing responsibility. */
+  goal: string
   /** '' = no daily compact; otherwise the local hour 0–23. */
   resetDailyHour: string
   /** '' = no idle compact; otherwise minutes. */
@@ -88,6 +93,8 @@ function emptyForm(): FormState {
     enabled: true,
     heartbeatEvery: '',
     heartbeatDeliver: 'notify',
+    heartbeatPosture: 'read-only',
+    goal: '',
     resetDailyHour: '',
     resetIdleMinutes: '',
     restrictMessaging: false,
@@ -117,6 +124,8 @@ function formFrom(agent: AgentProfile): FormState {
     enabled: agent.enabled,
     heartbeatEvery: agent.heartbeat ? String(agent.heartbeat.everyMinutes) : '',
     heartbeatDeliver: agent.heartbeat?.deliver ?? 'notify',
+    heartbeatPosture: agent.heartbeat?.posture ?? 'read-only',
+    goal: agent.goal,
     resetDailyHour:
       agent.reset?.dailyHour !== null && agent.reset?.dailyHour !== undefined
         ? String(agent.reset.dailyHour)
@@ -154,8 +163,13 @@ function toInput(form: FormState): AgentProfileInput {
         ? { emoji: form.emoji.trim() || null, color: form.color || null, imageDataUrl: form.imageDataUrl }
         : null,
     heartbeat: form.heartbeatEvery
-      ? { everyMinutes: Number.parseInt(form.heartbeatEvery, 10), deliver: form.heartbeatDeliver }
+      ? {
+          everyMinutes: Number.parseInt(form.heartbeatEvery, 10),
+          deliver: form.heartbeatDeliver,
+          posture: form.heartbeatPosture,
+        }
       : null,
+    goal: form.goal.trim(),
     reset: dailyHour !== null || idleMinutes !== null ? { dailyHour, idleMinutes } : null,
     messageAllow: form.restrictMessaging ? form.messageAllow : null,
     webhookEnabled: form.webhookEnabled,
@@ -390,6 +404,16 @@ export default function AgentProfileForm({
             maxLength={1024}
           />
         </label>
+        <label>
+          Goal — the responsibility it works toward between conversations
+          <textarea
+            value={form.goal}
+            onChange={(e) => set({ goal: e.target.value })}
+            rows={2}
+            maxLength={4000}
+            placeholder="Keep my inbox at zero and flag anything urgent · Watch flight prices to Lisbon for May"
+          />
+        </label>
         <span className="bot-form-hint">
           The assistant reaches it with <code>delegate(agent="{form.name.trim() || 'name'}")</code>;
           teammates address it as @{form.name.trim().toLowerCase().replace(/\s+/g, '-') || 'name'}.
@@ -409,6 +433,8 @@ export default function AgentProfileForm({
         </label>
         <ModelField providerId={form.providerId || null} modelId={form.modelId || null} onChange={(providerId, modelId) => set({ providerId: providerId ?? '', modelId: modelId ?? '' })} />
       </fieldset>
+
+      {editing ? <PersonalAgentPanel agent={editing} /> : null}
 
       <details className="bot-advanced"><summary>Advanced settings · tools, routines, messaging &amp; events</summary>
       <fieldset className="bot-form-section">
@@ -485,6 +511,17 @@ export default function AgentProfileForm({
             >
               <option value="notify">Keep in chat + notify me</option>
               <option value="chat">Keep in chat only</option>
+            </select>
+          </label>
+          <label>
+            During heartbeats it may
+            <select
+              value={form.heartbeatPosture}
+              onChange={(e) => set({ heartbeatPosture: e.target.value as 'read-only' | 'act' })}
+              disabled={!form.heartbeatEvery}
+            >
+              <option value="read-only">Only look — propose actions for me to approve</option>
+              <option value="act">Act within my rules</option>
             </select>
           </label>
           <label>

@@ -44,7 +44,18 @@ import type {
   WorkflowWatchConfig,
   WorkflowWatchStatus,
   WorkspaceItemKind,
+  BrowserFrame,
 } from '@shared/types'
+import type { LoginVault } from '../services/login-vault'
+import type { ChannelHub } from '../im/channels/hub'
+import { listFeedback, recordFeedback } from '../services/feedback'
+import { buildRuleDraftPrompt, parseRuleDraft } from '../services/rule-drafting'
+import {
+  buildConversationSkillPrompt,
+  cleanSkillMarkdown,
+  conversationTranscript,
+  type TeachService,
+} from '../services/teach'
 import { makeDryRunDeps, runWorkflow } from '../workflows/engine'
 import type { WorkflowRunner } from '../workflows/runner'
 import type { WorkspaceRootService } from '../code/workspace-root'
@@ -177,6 +188,20 @@ export interface RegisterIpcDeps {
   botService?: BotService
   /** Bot gateway (v47): per-bot Telegram bindings. */
   botChannels?: BotChannelService
+  /** Personal agent (v53): live view + take over of an agent's browser (structural, Electron-free). */
+  browserControl?: {
+    frame(agentId: string | null): Promise<BrowserFrame>
+    takeOver(agentId: string | null): void
+    returnControl(agentId: string | null): void
+  } | null
+  /** Personal agent (v53): the credential vault. */
+  loginVault?: LoginVault | null
+  /** Personal agent (v53): teach-a-task recordings. */
+  teachService?: TeachService | null
+  /** Personal agent (v53): Slack / Discord / email presences for bots. */
+  channelHub?: ChannelHub | null
+  /** Personal agent (v53): economy-model generation for skills from conversations. */
+  generateEconomy?: (prompt: string) => Promise<string>
   /** Morning brief: stored digests + dismissal (state lives in settings, main-owned). */
   briefService: Pick<BriefService, 'list' | 'dismiss'>
   /** Knowledge-base chunking/embedding/retrieval. */
@@ -2146,6 +2171,18 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
 
   register(CHANNELS.mcpStatus, () => mcpManager.getRuntime())
 
+  // v53: a rule described in words → proposed rules the user confirms.
+  register(CHANNELS.toolsRuleDraft, async (text) => {
+    const request = parseInput(z.string().trim().min(3).max(2000), text)
+    if (!deps.generateEconomy) throw invalid('Rule drafting is unavailable in this build.')
+    const tools = deps.toolSystem.registry.listDefinitions()
+    return parseRuleDraft(await deps.generateEconomy(buildRuleDraftPrompt(request, tools)), tools)
+  })
+
+  // v53: OAuth sign-in / sign-out for remote connectors.
+  register(CHANNELS.mcpAuthorize, (id) => mcpManager.authorize(requireString(id, 'Server id')))
+  register(CHANNELS.mcpSignOut, (id) => mcpManager.signOut(requireString(id, 'Server id')))
+
   // -- IM bridges -------------------------------------------------------------
 
   const { imBridgeManager } = deps
@@ -2560,6 +2597,7 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
         everyMinutes: z.number().int().min(15).max(24 * 60),
         deliver: z.enum(['chat', 'notify']),
         prompt: z.string().max(2000).nullable().optional(),
+        posture: z.enum(['read-only', 'act']).optional(),
       })
       .nullable()
       .optional(),
@@ -2574,6 +2612,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     // Events → bot (v50): webhook opt-in + a folder watch (workflow shape).
     webhookEnabled: z.boolean().optional(),
     watch: workflowWatchSchema.nullish(),
+    // Personal agent (v53): the bot's standing goal.
+    goal: z.string().max(4000).optional(),
   })
 
   register(CHANNELS.agentsList, () => db.agents.list())
@@ -2633,6 +2673,8 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
     // Bot Mode cleanup: canonical chat + group memberships go with the
     // profile (Hermes "Delete Profile" semantics).
     if (agent) deps.botService?.cleanupDeletedAgent(agent)
+    if (agent) deps.loginVault?.removeForAgent(agent.id)
+    if (agent) deps.channelHub?.removeForAgent(agent.id)
     if (agent?.watch) deps.workflowWatcher?.sync()
     return undefined
   })
@@ -2713,6 +2755,247 @@ export function registerIpc(deps: RegisterIpcDeps): IpcHandlerMap {
   })
   register(CHANNELS.botGroupMarkSeen, (groupId) => {
     requireBots().markGroupSeen(requireString(groupId, 'Group id'))
+    return undefined
+  })
+  // Personal agent (v53): Slack / Discord / email channels.
+  const requireHub = (): ChannelHub => {
+    if (!deps.channelHub) throw invalid('Bot channels are unavailable in this build.')
+    return deps.channelHub
+  }
+  const channelIdList = z.array(z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/, 'Use channel ids, not names.')).max(50)
+  const chatChannelConfig = z.object({
+    allowedChannels: channelIdList.optional(),
+    mentionOnly: z.boolean().optional(),
+  })
+  const emailConfig = z.object({
+    address: z.string().trim().email(),
+    displayName: z.string().max(100).optional(),
+    imapHost: z.string().trim().min(1).max(253),
+    imapPort: z.number().int().min(1).max(65535),
+    smtpHost: z.string().trim().min(1).max(253),
+    smtpPort: z.number().int().min(1).max(65535),
+    smtpSecurity: z.enum(['tls', 'starttls']),
+    username: z.string().trim().min(1).max(320),
+    allowedSenders: z.array(z.string().trim().toLowerCase().email()).max(50),
+    pollMinutes: z.number().int().min(1).max(60),
+  })
+  const channelSecrets = z.record(z.string().max(4000)).optional()
+  const validateChannel = (
+    kind: 'slack' | 'discord' | 'email',
+    config: unknown,
+    secrets: Record<string, string> | undefined,
+    partial: boolean
+  ): Record<string, unknown> | undefined => {
+    if (secrets?.botToken && kind === 'slack' && !/^xoxb-/.test(secrets.botToken.trim())) {
+      throw invalid('The Slack bot token starts with xoxb-.')
+    }
+    if (secrets?.appToken && !/^xapp-/.test(secrets.appToken.trim())) {
+      throw invalid('The Slack app-level token starts with xapp- (Socket Mode).')
+    }
+    if (config === undefined) return undefined
+    if (kind === 'email') {
+      return (partial ? emailConfig.partial() : emailConfig).parse(config) as Record<string, unknown>
+    }
+    return chatChannelConfig.parse(config) as Record<string, unknown>
+  }
+  register(CHANNELS.channelsList, (agentId) => requireHub().list(requireString(agentId, 'Agent id')))
+  register(CHANNELS.channelsCreate, (input) => {
+    const parsed = parseInput(
+      z.object({
+        agentId: z.string().min(1).max(100),
+        kind: z.enum(['slack', 'discord', 'email']),
+        enabled: z.boolean().optional(),
+        config: z.record(z.unknown()),
+        secrets: channelSecrets,
+      }),
+      input
+    )
+    if (!deps.keystore.encryptionAvailable()) {
+      throw invalid('Secure storage is not available on this system, so channel credentials cannot be saved.')
+    }
+    found(db.agents.getById(parsed.agentId), 'Agent')
+    let config: Record<string, unknown>
+    try {
+      config = validateChannel(parsed.kind, parsed.config, parsed.secrets, false) ?? {}
+    } catch (e) {
+      if (e instanceof z.ZodError) throw invalid(e.issues.map((issue) => issue.message).join('; '))
+      throw e
+    }
+    return requireHub().create({ ...parsed, config })
+  })
+  register(CHANNELS.channelsUpdate, (id, patch) => {
+    const channelId = requireString(id, 'Channel id')
+    const current = found(requireHub().get(channelId), 'Channel')
+    const parsed = parseInput(
+      z.object({ enabled: z.boolean().optional(), config: z.record(z.unknown()).optional(), secrets: channelSecrets }),
+      patch
+    )
+    let config: Record<string, unknown> | undefined
+    try {
+      config = validateChannel(current.kind, parsed.config, parsed.secrets, true)
+    } catch (e) {
+      if (e instanceof z.ZodError) throw invalid(e.issues.map((issue) => issue.message).join('; '))
+      throw e
+    }
+    return requireHub().update(channelId, { ...parsed, ...(config ? { config } : {}) })
+  })
+  register(CHANNELS.channelsDelete, (id) => {
+    requireHub().remove(requireString(id, 'Channel id'))
+    return undefined
+  })
+  register(CHANNELS.channelsRepair, (id) => requireHub().repair(requireString(id, 'Channel id')))
+
+  // Personal agent (v53): teach-a-task + a conversation saved as a skill.
+  const requireTeach = (): TeachService => {
+    if (!deps.teachService) throw invalid('Teach-a-task is unavailable in this build.')
+    return deps.teachService
+  }
+  register(CHANNELS.teachStart, (agentId, startUrl) => {
+    if (!db.settings.get().browserToolsEnabled) {
+      throw invalid('Turn on browser tools (Settings → Tools) to teach a task in the agent browser.')
+    }
+    return requireTeach().start(
+      agentId === null || agentId === undefined ? null : requireString(agentId, 'Agent id'),
+      parseInput(z.string().max(2000).nullable().optional(), startUrl) ?? null
+    )
+  })
+  register(CHANNELS.teachStop, (input) =>
+    requireTeach().stop(
+      parseInput(
+        z.object({
+          name: z.string().trim().max(100).optional(),
+          description: z.string().max(1024).optional(),
+          cancel: z.boolean().optional(),
+        }),
+        input
+      )
+    )
+  )
+  register(CHANNELS.teachStatus, () => deps.teachService?.status() ?? null)
+  register(CHANNELS.skillsFromConversation, async (conversationId, name, description) => {
+    const id = requireString(conversationId, 'Conversation id')
+    const skillName = parseInput(z.string().trim().min(1).max(100), name)
+    const about = parseInput(z.string().max(1024).optional(), description) ?? ''
+    found(db.conversations.getById(id), 'Conversation')
+    if (!deps.generateEconomy) throw invalid('Skill generation is unavailable in this build.')
+    const transcript = conversationTranscript(db.messages.listByConversation(id))
+    if (!transcript.trim()) throw invalid('This conversation has nothing to learn from yet.')
+    const content = cleanSkillMarkdown(
+      await deps.generateEconomy(
+        buildConversationSkillPrompt({ name: skillName, description: about, transcript })
+      )
+    )
+    if (content.length < 40) throw invalid('The model did not produce a usable skill — try again.')
+    return db.skills.upsertByName({
+      name: skillName,
+      description: about || 'Learned from a conversation.',
+      content,
+    })
+  })
+
+  // Personal agent (v53): a bot's projects + feedback on replies.
+  register(CHANNELS.botProjectsList, (agentId) =>
+    db.botProjects.listForAgent(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botProjectUpdate, (id, patch) => {
+    const parsed = parseInput(
+      z.object({
+        title: z.string().trim().min(1).max(160).optional(),
+        status: z.enum(['active', 'waiting', 'blocked', 'done']).optional(),
+        summary: z.string().max(2000).optional(),
+        nextStep: z.string().max(1000).optional(),
+      }),
+      patch
+    )
+    const updated = found(db.botProjects.update(requireString(id, 'Project id'), parsed), 'Project')
+    deps.botService?.notifyChanged(updated.agentId)
+    return updated
+  })
+  register(CHANNELS.botProjectDelete, (id) => {
+    const project = db.botProjects.getById(requireString(id, 'Project id'))
+    if (project) {
+      db.botProjects.remove(project.id)
+      deps.botService?.notifyChanged(project.agentId)
+    }
+    return undefined
+  })
+  register(CHANNELS.messageFeedbackSet, (messageId, rating, comment) =>
+    recordFeedback(db, {
+      messageId: requireString(messageId, 'Message id'),
+      rating: parseInput(z.union([z.literal(1), z.literal(-1), z.literal(0)]), rating),
+      comment: parseInput(z.string().max(1000).optional(), comment),
+    })
+  )
+  register(CHANNELS.messageFeedbackList, (conversationId) =>
+    listFeedback(db, requireString(conversationId, 'Conversation id'))
+  )
+
+  // Personal agent (v53): the agent's computer — live view and take over.
+  const requireBrowserControl = (): NonNullable<RegisterIpcDeps['browserControl']> => {
+    if (!deps.browserControl) throw invalid('The agent browser is unavailable in this build.')
+    return deps.browserControl
+  }
+  const browserScopeArg = (agentId: unknown): string | null =>
+    agentId === null || agentId === undefined ? null : requireString(agentId, 'Agent id')
+  register(CHANNELS.browserFrame, (agentId) =>
+    requireBrowserControl().frame(browserScopeArg(agentId))
+  )
+  register(CHANNELS.browserTakeOver, (agentId) => {
+    requireBrowserControl().takeOver(browserScopeArg(agentId))
+    return undefined
+  })
+  register(CHANNELS.browserReturnControl, (agentId) => {
+    requireBrowserControl().returnControl(browserScopeArg(agentId))
+    return undefined
+  })
+  // Credential vault (v53): the password goes in once and never comes back.
+  const requireVault = (): LoginVault => {
+    if (!deps.loginVault) throw invalid('The login vault is unavailable in this build.')
+    return deps.loginVault
+  }
+  register(CHANNELS.loginsList, () => requireVault().list())
+  register(CHANNELS.loginsSave, (input) => {
+    if (!deps.keystore.encryptionAvailable()) {
+      throw invalid('Secure storage is not available on this system, so logins cannot be saved.')
+    }
+    const parsed = parseInput(
+      z.object({
+        origin: z.string().trim().min(1).max(500),
+        username: z.string().trim().min(1).max(500),
+        password: z.string().min(1).max(4000),
+        label: z.string().max(200).optional(),
+        agentId: z.string().min(1).max(100).nullable().optional(),
+      }),
+      input
+    )
+    if (parsed.agentId) found(db.agents.getById(parsed.agentId), 'Agent')
+    return requireVault().save(parsed)
+  })
+  register(CHANNELS.loginsDelete, (id) => {
+    requireVault().remove(requireString(id, 'Login id'))
+    return undefined
+  })
+
+  // Personal agent (v53): pause / resume / reset + suggestions.
+  register(CHANNELS.botsPause, (agentId) =>
+    requireBots().pauseAgent(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botsResume, (agentId) =>
+    requireBots().resumeAgent(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botsReset, (agentId) =>
+    requireBots().resetAgent(requireString(agentId, 'Agent id'))
+  )
+  register(CHANNELS.botSuggestionsList, (agentId) =>
+    requireBots().listSuggestions(
+      agentId === null || agentId === undefined ? null : requireString(agentId, 'Agent id')
+    )
+  )
+  register(CHANNELS.botSuggestionAccept, (id) =>
+    requireBots().acceptSuggestion(requireString(id, 'Suggestion id'))
+  )
+  register(CHANNELS.botSuggestionDismiss, (id) => {
+    requireBots().dismissSuggestion(requireString(id, 'Suggestion id'))
     return undefined
   })
 

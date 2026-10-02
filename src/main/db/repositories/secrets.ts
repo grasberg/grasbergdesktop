@@ -12,7 +12,17 @@
 
 import type { SqliteDriver } from '../driver'
 
-export type ToolSecretScope = 'custom_tool' | 'mcp_server' | 'im_bridge' | 'remote'
+export type ToolSecretScope =
+  | 'custom_tool'
+  | 'mcp_server'
+  | 'im_bridge'
+  | 'remote'
+  /** v53: credential-vault passwords (owner = browser_logins.id). */
+  | 'browser_login'
+  /** v53: Slack / Discord / email channel credentials (owner = bot_channels.id). */
+  | 'bot_channel'
+  /** v53: OAuth tokens + client registration for remote MCP connectors. */
+  | 'mcp_oauth'
 
 /** A secret's name + preview (never its value). */
 export interface ToolSecretRef {

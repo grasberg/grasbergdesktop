@@ -29,6 +29,8 @@ export class VoiceRecorder {
 
   /** Called once when the 10-minute cap auto-stops the recording. */
   onAutoStop: (() => void) | null = null
+  /** v53 voice calls: every captured chunk, for voice-activity detection. */
+  onLevel: ((chunk: Float32Array) => void) | null = null
 
   async start(): Promise<void> {
     let stream: MediaStream
@@ -53,6 +55,7 @@ export class VoiceRecorder {
     node.port.onmessage = (event: MessageEvent<Float32Array>) => {
       this.chunks.push(event.data)
       this.samples += event.data.length
+      this.onLevel?.(event.data)
     }
     source.connect(node)
     // Web Audio only renders subgraphs reachable from the destination; without

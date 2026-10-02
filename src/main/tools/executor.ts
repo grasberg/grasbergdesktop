@@ -65,6 +65,9 @@ import { isMcpToolId } from './mcp/naming'
 import { runShell } from './shell'
 import { commandMatchesAllowlist } from './shell-allowlist'
 import { matchToolRules } from './tool-rules'
+import { isOutwardTool } from '@shared/tool-classes'
+import { SENSITIVE_FIELD_SENTINEL, originOf } from '../browser/sensitive'
+import { currentInvocationPolicy } from '../invocation-context'
 import { runGitQuery } from './git'
 import { formatLocalRunTime, resolveFirstRun } from '../scheduled-tasks/resolve'
 import type { ToolRegistry } from './registry'
@@ -100,7 +103,18 @@ export interface ToolBrowser {
   clickSelector(selector: string, byText: boolean): Promise<string>
   typeText(selector: string, text: string): Promise<string>
   computer(action: string, coordinate?: [number, number], text?: string): Promise<string>
+  /** v53: the page the session is on (for the vault's origin lookup). */
+  currentUrl?(): string | null
+  /** v53: fills a saved login without returning it. */
+  fillLogin?(username: string, password: string, expectedOrigin: string): Promise<string>
+  /** v53 take-over: whether the user is driving right now. */
+  isUserInControl?(): boolean
+  /** v53 take-over: resolves true once the agent has control back. */
+  waitForControl?(timeoutMs: number, signal?: AbortSignal): Promise<boolean>
 }
+
+/** How long an agent action waits while the user drives the browser. */
+const BROWSER_CONTROL_WAIT_MS = 10 * 60_000
 
 export interface ToolExecutorDeps {
   registry: ToolRegistry
@@ -149,11 +163,23 @@ export interface ToolExecutorDeps {
    */
   browserFor?: (ctx: ToolExecuteContext) => ToolBrowser | null
   /**
+   * Credential vault (v53) for the browser's 'login' action. resolve() is
+   * main-side only; its result is typed into the page and never returned.
+   */
+  loginVault?: {
+    resolve(
+      url: string,
+      agentId: string | null,
+      username?: string | null
+    ): { username: string; password: string } | null
+    usernamesFor(url: string, agentId: string | null): string[]
+  } | null
+  /**
    * Why the current turn in a conversation is running (v50): 'event' when an
    * outside event (webhook, watched file) woke a bot — its text may be trying
    * to steer the bot, so outbound actions ask first.
    */
-  turnOrigin?: (conversationId: string) => 'event' | null
+  turnOrigin?: (conversationId: string) => 'event' | 'proactive' | 'agent' | null
   /** Knowledge-base retrieval for the 'knowledge_search' tool. */
   knowledgeSearch?: (
     knowledgeBaseId: string,
@@ -268,6 +294,8 @@ export interface ToolExecutorDeps {
   skills?: {
     getEnabledByName(name: string): { name: string; content: string } | null
     listEnabledNames(): string[]
+    /** v53 create_skill: upsert by name (re-teaching replaces). */
+    save?(input: { name: string; description: string; content: string }): { name: string }
   } | null
   /**
    * Bot Mode (v46): fire-and-forget bot-to-bot delivery for the
@@ -278,6 +306,58 @@ export interface ToolExecutorDeps {
   botMessenger?: {
     send(senderConversationId: string, target: string, message: string): Promise<string>
   } | null
+  /**
+   * Personal agent (v53): actions only a canonical bot chat can take —
+   * suggest_action records a proposal for the user to accept or dismiss.
+   */
+  botActions?: {
+    suggest(
+      conversationId: string,
+      input: { title: string; action: string; reason?: string }
+    ): string | Promise<string>
+    updateProject?(
+      conversationId: string,
+      input: { title: string; status?: string; summary?: string; nextStep?: string }
+    ): string | Promise<string>
+  } | null
+  /**
+   * v53 auto-review: consulted for an OUTWARD call that would otherwise run
+   * without a human click. Returns null when review does not apply (setting
+   * off, or a user-started turn under 'autonomous'). 'ask' routes the call to
+   * the approval dialog with the reviewer's reason; 'block' refuses it.
+   */
+  autoReview?: (
+    ctx: ToolExecuteContext,
+    call: {
+      toolId: string
+      toolName: string
+      argumentsJson: string
+      origin: 'event' | 'proactive' | 'agent' | null
+    }
+  ) => Promise<{ verdict: 'allow' | 'ask' | 'block'; reason: string } | null>
+  /** v53: the user's real desktop (opt-in; wired to DesktopControl). */
+  desktop?: { run(action: string, coordinate?: [number, number], text?: string): Promise<string> } | null
+  /**
+   * v53 bot channels: the bot's own mailbox and Slack/Discord presences, for
+   * email_read / email_send / channel_send (wired to ChannelHub).
+   */
+  channels?: {
+    emailList(agentId: string, limit: number, query: string | null): Promise<string>
+    emailRead(agentId: string, uid: number): Promise<string>
+    emailSend(
+      agentId: string,
+      input: { to: string[]; subject: string; text: string; replyToUid: number | null }
+    ): Promise<string>
+    post(agentId: string, kind: 'slack' | 'discord', target: string, text: string): Promise<string>
+  } | null
+  /**
+   * v53: records a step handed to the user (a 'handoff' rule, the hand_off
+   * tool, a password/payment field) as a "your turn" item + notification.
+   */
+  handoff?: (
+    ctx: ToolExecuteContext,
+    item: { title: string; instructions: string; toolName?: string }
+  ) => void
   /** Absolute path of the project folder granted to this conversation, or null. */
   getProjectRoot: (conversation: Conversation) => string | null
   /**
@@ -332,6 +412,12 @@ export interface ToolExecuteContext {
   agentName?: string
   /** Receives live output chunks from long-running tools (shell commands). */
   onToolOutput?: (toolCallId: string, chunk: string) => void
+  /**
+   * v53: the request this run serves, when the caller knows it without a
+   * conversation to read (headless runs pass their prompt). Auto-review
+   * compares outward calls against it.
+   */
+  requestText?: string
   /**
    * Receives each image the generate_image tool stored, so the caller can
    * attach it to the assistant message and stream it to the renderer.
@@ -957,6 +1043,12 @@ function findMissingRequired(
   return required.filter((key): key is string => typeof key === 'string' && !(key in args))
 }
 
+/** A short, redacted preview of raw tool arguments for user-facing text. */
+function capPreview(raw: string, max = 600): string {
+  const text = redactSecrets(raw)
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 function getString(args: Record<string, unknown>, key: string): string | null {
   const value = args[key]
   return typeof value === 'string' ? value : null
@@ -1306,6 +1398,16 @@ export class ToolExecutor {
         "before calling '" + definition.name + "'."
       )
     }
+    // Read-only also means silent (v53): proactive work may not contact
+    // anyone, so outward tools that do not count as "mutating" are refused too.
+    if (ctx.sandboxLevel === 'read-only' && isOutwardTool(definition)) {
+      audit.decision = 'blocked'
+      audit.detail = 'read-only: outward action'
+      return (
+        "This turn is read-only, so '" + definition.name + "' (which contacts someone or " +
+        'something outside this app) was refused. Propose it with suggest_action instead.'
+      )
+    }
     if (definition.id === 'run_shell_command' && ctx.sandboxLevel !== 'full') {
       audit.decision = 'blocked'
       audit.detail = 'shell requires full sandbox'
@@ -1324,21 +1426,71 @@ export class ToolExecutor {
     // Standing rules are consulted BEFORE the stored permission, because a
     // matching 'require_approval' rule outranks even 'always_allow' — that is
     // the whole point of being able to say "always ask me about this one".
-    const ruleEffect = this.matchRules(definition, args, ctx)
+    const matchedEffect = this.matchRules(definition, args, ctx)
+    const turnOrigin = this.turnOriginFor(ctx)
+    if (matchedEffect === 'block') {
+      audit.decision = 'blocked'
+      audit.detail = 'blocked by a rule'
+      return (
+        `The user has a rule that blocks '${definition.name}' here; it was not run. Do not try ` +
+        'to reach the same result another way — tell the user what you wanted to do.'
+      )
+    }
+    if (matchedEffect === 'handoff') {
+      audit.decision = 'handoff'
+      audit.detail = 'handed to the user by a rule'
+      return this.handOffToUser(ctx, {
+        title: `Your turn: ${definition.name}`,
+        instructions:
+          `The agent wanted to run '${definition.name}' with these arguments, and your rules ` +
+          `keep this step with you:\n${capPreview(toolCall.arguments)}`,
+        toolName: definition.name,
+      })
+    }
+    // "Act if pre-approved" (dots): only a turn the user started counts as
+    // pre-approval; heartbeats, outside events and bot-to-bot turns ask.
+    const ruleEffect =
+      matchedEffect === 'allow_if_requested'
+        ? turnOrigin === null
+          ? 'allow'
+          : 'require_approval'
+        : matchedEffect
     const preGrant = ruleEffect === 'allow' ? null : this.preGrantReason(definition, args, ctx)
     // Unified approvals (v50): two decisions of their own, whatever the
     // tool's stored permission says — a bot woken by an outside event wanting
     // to message a teammate, and the browser opening a site this scope has
     // not visited yet. Only a standing 'allow' rule waves them through.
     const eventOutbound =
-      definition.id === 'message_agent' && this.deps.turnOrigin?.(ctx.conversation.id) === 'event'
+      definition.id === 'message_agent' && (turnOrigin === 'event' || turnOrigin === 'proactive')
     const newOrigin = this.browserNewOrigin(definition, args, ctx)
     const mustAsk =
       ruleEffect === 'require_approval' ||
       ((eventOutbound || newOrigin !== null) && ruleEffect !== 'allow') ||
       (decision === 'ask' && ruleEffect !== 'allow' && preGrant === null)
-    if (mustAsk) {
-      const note = await this.approvalNoteFor(definition, args, ctx)
+    // Auto-review (v53): an outward call about to run with no human click
+    // gets a second look. It can only add friction: 'ask' sends it to the
+    // dialog with the reviewer's reason, 'block' refuses it.
+    let reviewNote: string | null = null
+    if (!mustAsk && isOutwardTool(definition) && this.deps.autoReview) {
+      const review = await this.deps.autoReview(ctx, {
+        toolId: definition.id,
+        toolName: definition.name,
+        argumentsJson: toolCall.arguments,
+        origin: turnOrigin,
+      })
+      if (ctx.signal?.aborted) return 'The task was stopped.'
+      if (review?.verdict === 'block') {
+        audit.decision = 'reviewed'
+        audit.detail = `auto-review stopped it: ${review.reason}`
+        return (
+          `Auto-review stopped '${definition.name}': ${review.reason} Do not retry it or work ` +
+          'around it — explain to the user what you wanted to do.'
+        )
+      }
+      if (review?.verdict === 'ask') reviewNote = `Auto-review flagged this: ${review.reason}`
+    }
+    if (mustAsk || reviewNote !== null) {
+      const note = reviewNote ?? (await this.approvalNoteFor(definition, args, ctx))
       const answer = await ctx.approval({
         streamId: ctx.streamId ?? '',
         conversationId: ctx.conversation.id,
@@ -1347,16 +1499,24 @@ export class ToolExecutor {
         ...(note ? { note } : {}),
       })
       if (!answer.approved) {
-        audit.decision = 'declined'
-        audit.detail = 'declined at the approval prompt'
+        audit.decision = reviewNote ? 'reviewed' : 'declined'
+        audit.detail = reviewNote
+          ? `${reviewNote} — not approved`
+          : 'declined at the approval prompt'
         return USER_DECLINED_RESULT
       }
       audit.decision = 'approved'
-      audit.detail = APPROVAL_SCOPE_DETAIL[answer.scope]
-      this.recordStandingApproval(definition, answer.scope, ctx)
+      audit.detail = reviewNote
+        ? `${APPROVAL_SCOPE_DETAIL[answer.scope]} after auto-review`
+        : APPROVAL_SCOPE_DETAIL[answer.scope]
+      // A review-triggered approval is about THIS call; it never becomes a standing grant.
+      if (!reviewNote) this.recordStandingApproval(definition, answer.scope, ctx)
     } else if (ruleEffect === 'allow') {
       audit.decision = 'rule'
-      audit.detail = 'covered by an approval rule'
+      audit.detail =
+        matchedEffect === 'allow_if_requested'
+          ? 'allowed by a rule (you asked for it)'
+          : 'covered by an approval rule'
     } else {
       audit.decision = 'auto'
       audit.detail = preGrant ?? 'permission is always allow'
@@ -1403,16 +1563,36 @@ export class ToolExecutor {
     this.browserOrigins.set(scope, seen)
   }
 
+  /**
+   * Why this turn runs: BotService's record for bot chats (event / proactive
+   * / agent), else the invocation policy the turn carries — a channel turn
+   * from someone other than the owner counts as an outside event, a
+   * heartbeat as proactive. null = the user started it.
+   */
+  private turnOriginFor(ctx: ToolExecuteContext): 'event' | 'proactive' | 'agent' | null {
+    const recorded = this.deps.turnOrigin?.(ctx.conversation.id) ?? null
+    if (recorded) return recorded
+    const policy = currentInvocationPolicy()
+    if (policy?.origin === 'channel') return 'event'
+    if (policy?.origin === 'autonomous') return 'proactive'
+    return null
+  }
+
   private async approvalNoteFor(
     definition: ToolDefinition,
     args: Record<string, unknown>,
     ctx: ToolExecuteContext
   ): Promise<string | undefined> {
-    if (definition.id === 'message_agent' && this.deps.turnOrigin?.(ctx.conversation.id) === 'event') {
+    const origin = this.turnOriginFor(ctx)
+    if (definition.id === 'message_agent' && origin === 'event') {
       return (
-        'This bot was woken by an outside event (a webhook or a watched file) and wants to ' +
-        'message a teammate. The event text may be trying to steer it.'
+        'This bot was woken by an outside event (a webhook, a watched file or a message from ' +
+        'someone other than you) and wants to message a teammate. The event text may be trying ' +
+        'to steer it.'
       )
+    }
+    if (definition.id === 'message_agent' && origin === 'proactive') {
+      return 'Nobody asked for this: the bot wants to message a teammate during a heartbeat.'
     }
     if (definition.id === 'browser') {
       const origin = this.browserNewOrigin(definition, args, ctx)
@@ -1490,8 +1670,33 @@ export class ToolExecutor {
       projectId: ctx.conversation.projectId,
       args,
     })
-    if (effect === 'allow' && definition.noStandingApproval === true) return null
+    if (
+      (effect === 'allow' || effect === 'allow_if_requested') &&
+      definition.noStandingApproval === true
+    ) {
+      return null
+    }
     return effect
+  }
+
+  /**
+   * Hands a step to the user (v53): records a "your turn" item (inbox + a
+   * notification, wired in main) and tells the model to stop at this step.
+   */
+  private handOffToUser(
+    ctx: ToolExecuteContext,
+    item: { title: string; instructions: string; toolName?: string }
+  ): string {
+    try {
+      this.deps.handoff?.(ctx, item)
+    } catch {
+      // Recording is best-effort; the refusal itself must still reach the model.
+    }
+    return (
+      'This step stays with the user, so it was handed to them instead of being run: ' +
+      `"${item.title}". Tell the user briefly what you prepared and what they need to do, ` +
+      'then stop at this step — do not attempt it another way.'
+    )
   }
 
   /**
@@ -1618,12 +1823,62 @@ export class ToolExecutor {
         return this.runShellCommand(args, ctx, toolCall)
       case 'use_skill':
         return this.runUseSkill(args)
+      case 'create_skill': {
+        if (!this.deps.skills?.save) return 'Error: skills cannot be saved in this build.'
+        const [name, nameError] = requireStringArg(args, 'name')
+        if (nameError) return nameError
+        const [content, contentError] = requireStringArg(args, 'content')
+        if (contentError) return contentError
+        if (name.trim().length > 100) return 'Error: a skill name is at most 100 characters.'
+        const saved = this.deps.skills.save({
+          name: name.trim(),
+          description: (getString(args, 'description') ?? '').slice(0, 1024),
+          content: content.slice(0, 200_000),
+        })
+        return `Skill '${saved.name}' saved. Any agent can now load it with use_skill.`
+      }
       case 'knowledge_search':
         return this.runKnowledgeSearch(args, ctx)
       case 'delegate':
         return this.runDelegate(args, ctx)
       case 'message_agent':
         return this.runMessageAgent(args, ctx)
+      case 'suggest_action':
+        return this.runSuggestAction(args, ctx)
+      case 'email_read':
+      case 'email_send':
+      case 'channel_send':
+        return this.runChannelTool(definition.id, args, ctx)
+      case 'desktop': {
+        if (!this.deps.desktop) return 'Error: desktop control is unavailable in this build.'
+        const action = (getString(args, 'action') ?? '').trim()
+        if (!action) return "Error: 'action' is required."
+        const raw = args.coordinate
+        const coordinate =
+          Array.isArray(raw) && raw.length === 2 && raw.every((n) => typeof n === 'number')
+            ? ([raw[0], raw[1]] as [number, number])
+            : undefined
+        return this.deps.desktop.run(action, coordinate, getString(args, 'text') ?? undefined)
+      }
+      case 'update_project': {
+        if (!this.deps.botActions?.updateProject) return 'Error: projects are unavailable in this build.'
+        if (!ctx.conversation.agentId) return 'Error: update_project is only available inside a bot chat.'
+        const [title, titleError] = requireStringArg(args, 'title')
+        if (titleError) return titleError
+        return this.deps.botActions.updateProject(ctx.conversation.id, {
+          title,
+          status: getString(args, 'status') ?? undefined,
+          summary: getString(args, 'summary') ?? undefined,
+          nextStep: getString(args, 'next_step') ?? undefined,
+        })
+      }
+      case 'hand_off': {
+        const [title, titleError] = requireStringArg(args, 'title')
+        if (titleError) return titleError
+        const [instructions, instructionsError] = requireStringArg(args, 'instructions')
+        if (instructionsError) return instructionsError
+        return this.handOffToUser(ctx, { title, instructions })
+      }
       case 'browser':
         return this.runBrowser(args, ctx)
       case 'computer':
@@ -2743,9 +2998,73 @@ export class ToolExecutor {
     return browser
   }
 
+  /**
+   * v53 take-over: while the user drives the agent's browser, an action waits
+   * (up to 10 min, or until Stop) for control to come back.
+   */
+  private async awaitBrowserControl(
+    browser: ToolBrowser,
+    ctx: ToolExecuteContext
+  ): Promise<string | null> {
+    if (!browser.isUserInControl?.() || !browser.waitForControl) return null
+    const back = await browser.waitForControl(BROWSER_CONTROL_WAIT_MS, ctx.signal)
+    if (ctx.signal?.aborted) return 'The task was stopped.'
+    return back
+      ? null
+      : 'The user is still controlling the browser. Stop here and tell them you will continue ' +
+          'once they hand control back.'
+  }
+
+  /** A sensitive-field refusal from the browser becomes a "your turn" item (v53). */
+  private sensitiveToHandoff(result: string, ctx: ToolExecuteContext): string {
+    if (!result.startsWith(SENSITIVE_FIELD_SENTINEL)) return result
+    const browser = this.deps.browserFor?.(ctx) ?? this.deps.browser ?? null
+    const where = browser?.currentUrl?.() ?? ''
+    const note = this.handOffToUser(ctx, {
+      title: 'Enter a password or payment detail',
+      instructions:
+        `The agent reached a password, one-time code or payment field${where ? ` on ${where}` : ''}. ` +
+        "Open the agent's browser (Take over), fill it in yourself, then hand control back.",
+    })
+    return `${result.slice(SENSITIVE_FIELD_SENTINEL.length).trim()}\n${note}`
+  }
+
+  private async runBrowserLogin(
+    browser: ToolBrowser,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    // The vault entry is chosen ONLY by the page that is actually open — the
+    // model's 'url' argument can never steer a saved password to another site.
+    const url = browser.currentUrl?.() ?? ''
+    const openOrigin = originOf(url)
+    if (!openOrigin) return "Error: 'login' needs the site's login page open in the browser (navigate there first)."
+    const named = (getString(args, 'url') ?? '').trim()
+    if (named && originOf(named) !== openOrigin) {
+      return (
+        `Error: the open page is on ${openOrigin}, not ${originOf(named) ?? named}. A saved login is only ` +
+        'ever filled into the site it belongs to — navigate to that site first.'
+      )
+    }
+    const agentId = ctx.agentId ?? ctx.conversation.agentId ?? null
+    const login = this.deps.loginVault?.resolve(url, agentId, getString(args, 'text'))
+    if (!login || !browser.fillLogin) {
+      return this.handOffToUser(ctx, {
+        title: 'Log in for your agent',
+        instructions:
+          `The agent needs to be logged in at ${url} and no saved login exists for it. Either ` +
+          "take over the agent's browser and log in yourself, or save a login for this site in " +
+          'Settings → Logins.',
+      })
+    }
+    return browser.fillLogin(login.username, login.password, openOrigin)
+  }
+
   private async runBrowser(args: Record<string, unknown>, ctx: ToolExecuteContext): Promise<string> {
     const browser = this.requireBrowser(ctx)
     if (typeof browser === 'string') return browser
+    const waited = await this.awaitBrowserControl(browser, ctx)
+    if (waited) return waited
     const action = (getString(args, 'action') ?? '').trim()
     switch (action) {
       case 'navigate':
@@ -2765,7 +3084,18 @@ export class ToolExecutor {
         const selector = (getString(args, 'selector') ?? '').trim()
         const text = getString(args, 'text') ?? ''
         if (!selector) return "Error: 'type' needs a 'selector'."
-        return browser.typeText(selector, text)
+        return this.sensitiveToHandoff(await browser.typeText(selector, text), ctx)
+      }
+      case 'login':
+        return this.runBrowserLogin(browser, args, ctx)
+      case 'logins': {
+        const url = (getString(args, 'url') ?? '').trim() || browser.currentUrl?.() || ''
+        const names = url
+          ? (this.deps.loginVault?.usernamesFor(url, ctx.agentId ?? ctx.conversation.agentId ?? null) ?? [])
+          : []
+        return names.length > 0
+          ? `Saved logins for this site: ${names.join(', ')}. Use action 'login' (optionally with text = the username).`
+          : 'No saved logins for this site.'
       }
       default:
         return `Error: unknown browser action '${action}'.`
@@ -2783,7 +3113,9 @@ export class ToolExecutor {
       coordinate = [raw[0] as number, raw[1] as number]
     }
     const text = getString(args, 'text') ?? undefined
-    return browser.computer(action, coordinate, text)
+    const waited = await this.awaitBrowserControl(browser, ctx)
+    if (waited) return waited
+    return this.sensitiveToHandoff(await browser.computer(action, coordinate, text), ctx)
   }
 
   // -- skills --------------------------------------------------------------------
@@ -2870,6 +3202,64 @@ export class ToolExecutor {
     const [message, messageError] = requireStringArg(args, 'message')
     if (messageError) return messageError
     return this.deps.botMessenger.send(ctx.conversation.id, target, message)
+  }
+
+  /** email_read / email_send / channel_send (v53): the bot's own channels. */
+  private async runChannelTool(
+    toolId: string,
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    const agentId = ctx.conversation.agentId ?? ctx.agentId ?? null
+    if (!agentId) return `Error: ${toolId} is only available inside a bot chat.`
+    if (!this.deps.channels) return 'Error: bot channels are unavailable in this build.'
+    if (toolId === 'email_read') {
+      const action = getString(args, 'action') ?? 'list'
+      if (action === 'read') {
+        const uid = typeof args.uid === 'number' ? Math.trunc(args.uid) : NaN
+        if (!Number.isFinite(uid) || uid <= 0) return "Error: 'read' needs the message 'uid'."
+        return wrapUntrusted(await this.deps.channels.emailRead(agentId, uid), `email uid ${uid}`)
+      }
+      const limit = typeof args.limit === 'number' ? Math.trunc(args.limit) : 15
+      return this.deps.channels.emailList(agentId, limit, getString(args, 'query'))
+    }
+    if (toolId === 'email_send') {
+      const [text, textError] = requireStringArg(args, 'text')
+      if (textError) return textError
+      const to = Array.isArray(args.to) ? args.to.filter((v): v is string => typeof v === 'string') : []
+      const replyToUid = typeof args.reply_to_uid === 'number' ? Math.trunc(args.reply_to_uid) : null
+      if (to.length === 0 && replyToUid === null) return "Error: give 'to' or 'reply_to_uid'."
+      return this.deps.channels.emailSend(agentId, {
+        to,
+        subject: getString(args, 'subject') ?? '',
+        text,
+        replyToUid,
+      })
+    }
+    const kind = getString(args, 'channel')
+    if (kind !== 'slack' && kind !== 'discord') return "Error: 'channel' must be slack or discord."
+    const [target, targetError] = requireStringArg(args, 'target')
+    if (targetError) return targetError
+    const [text, textError] = requireStringArg(args, 'text')
+    if (textError) return textError
+    return this.deps.channels.post(agentId, kind, target.trim(), text)
+  }
+
+  /** suggest_action (v53): records a proposal; never performs anything. */
+  private async runSuggestAction(
+    args: Record<string, unknown>,
+    ctx: ToolExecuteContext
+  ): Promise<string> {
+    if (!this.deps.botActions) return 'Error: suggestions are unavailable in this build.'
+    if (!ctx.conversation.agentId) {
+      return 'Error: suggest_action is only available inside a bot chat.'
+    }
+    const [title, titleError] = requireStringArg(args, 'title')
+    if (titleError) return titleError
+    const [action, actionError] = requireStringArg(args, 'action')
+    if (actionError) return actionError
+    const reason = getString(args, 'reason') ?? ''
+    return this.deps.botActions.suggest(ctx.conversation.id, { title, action, reason })
   }
 
   // -- shell execution (opt-in, approval-gated) --------------------------------

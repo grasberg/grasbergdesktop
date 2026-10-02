@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { AgentProfile, BotAttention, BotGroup, BotGroupMode, Message } from '@shared/types'
 import { unwrap } from '@/api/uld'
 import AgentProfileForm from '@/components/agents/AgentProfileForm'
+import AgentOnboarding from './AgentOnboarding'
 import Markdown from '@/components/chat/Markdown'
 import { ConfirmButton } from '@/components/common/controls'
 import { relativeTime } from '@/lib/format'
@@ -341,6 +342,7 @@ function RoomMessage({
 type Panel =
   | { kind: 'none' }
   | { kind: 'new-bot' }
+  | { kind: 'onboard' }
   | { kind: 'edit-bot'; agent: AgentProfile }
   | { kind: 'new-group' }
   | { kind: 'edit-group'; group: BotGroup }
@@ -422,8 +424,11 @@ export default function BotsView(): ReactElement {
             <button type="button" onClick={() => changePanel({ kind: 'new-group' })}>
               New group
             </button>
-            <button type="button" className="primary" onClick={() => changePanel({ kind: 'new-bot' })}>
+            <button type="button" onClick={() => changePanel({ kind: 'new-bot' })}>
               New bot
+            </button>
+            <button type="button" className="primary" onClick={() => changePanel({ kind: 'onboard' })}>
+              Personal agent
             </button>
           </div>
         </header>
@@ -475,6 +480,16 @@ export default function BotsView(): ReactElement {
                         <span className="bots-row-title">{entry.row.agent.title}</span>
                       ) : null}
                       <AttentionChip attention={entry.row.attention} />
+                      {entry.row.agent.paused ? (
+                        <span className="bots-paused-chip" title={entry.row.agent.pausedReason ?? 'Paused'}>
+                          paused
+                        </span>
+                      ) : null}
+                      {entry.row.openSuggestions > 0 ? (
+                        <span className="bots-suggestion-chip" title="Suggestions and steps waiting for you">
+                          💡 {entry.row.openSuggestions}
+                        </span>
+                      ) : null}
                     </span>
                     <span className="bots-row-snippet">
                       {entry.row.snippet ?? 'No messages yet — say hi.'}
@@ -557,7 +572,9 @@ export default function BotsView(): ReactElement {
       </aside>
       <main className="bots-detail">
         <button className="btn bots-back" onClick={() => navigateGuarded(() => { setPanel({ kind: 'none' }); selectGroup(null) }, 'page')}>← All bots</button>
-        {panel.kind === 'new-bot' || panel.kind === 'edit-bot' ? (
+        {panel.kind === 'onboard' ? (
+          <AgentOnboarding onDone={() => setPanel({ kind: 'none' })} onCancel={() => setPanel({ kind: 'none' })} />
+        ) : panel.kind === 'new-bot' || panel.kind === 'edit-bot' ? (
           <AgentProfileForm
             key={panel.kind === 'edit-bot' ? panel.agent.id : 'new'}
             variant="bots"
@@ -594,7 +611,10 @@ export default function BotsView(): ReactElement {
               Routines: open Automation, create a scheduled task and pick the
               bot under "Run as" — results land in the bot's chat.
             </p>
-            <button type="button" className="primary" onClick={() => setPanel({ kind: 'new-bot' })}>
+            <button type="button" className="primary" onClick={() => setPanel({ kind: 'onboard' })}>
+              Set up a personal agent
+            </button>
+            <button type="button" onClick={() => setPanel({ kind: 'new-bot' })}>
               New bot
             </button>
           </div>

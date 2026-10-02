@@ -1049,6 +1049,30 @@ describe('BotService wake (v50)', () => {
     expect(db.conversations.list().length).toBe(0) // no stray sender conversation
   })
 
+  it('forgets an event origin once its turn stopped without completing', async () => {
+    const editor = db.agents.create({ name: 'Editor', systemPrompt: 'p' })
+    const chat = makeFakeChat()
+    const { service } = makeService(chat)
+    await service.wake(editor.id, { source: 'webhook', label: 'x', payload: 'y' })
+    await vi.waitFor(() => expect(chat.sends).toHaveLength(1))
+    const chatId = db.agents.getById(editor.id)!.chatConversationId!
+    const inFlightId = await getInFlightAssistantId(service, chatId)
+    db.messages.insert({
+      id: inFlightId,
+      conversationId: chatId,
+      role: 'assistant',
+      content: '',
+      status: 'streaming',
+      seq: db.messages.nextSeq(chatId),
+      createdAt: Date.now(),
+    })
+    expect(service.turnOrigin(chatId)).toBe('event')
+    // The user pressed Stop: no completion hook — but the next turn must not
+    // inherit the event origin (extra dialogs, wrong auto-review framing).
+    db.driver.run("UPDATE messages SET status = 'stopped' WHERE id = ?", [inFlightId])
+    expect(service.turnOrigin(chatId)).toBeNull()
+  })
+
   it('refuses unknown and disabled bots', async () => {
     const off = db.agents.create({ name: 'Off', systemPrompt: 'p', enabled: false })
     const { service } = makeService(makeFakeChat())

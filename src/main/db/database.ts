@@ -37,6 +37,11 @@ import { createAgentsRepository, type AgentsRepository } from './repositories/ag
 import { createA2aOutboxRepository, type A2aOutboxRepository } from './repositories/a2a-outbox'
 import { createBotBindingsRepository, type BotBindingsRepository } from './repositories/bot-bindings'
 import { createBotGroupsRepository, type BotGroupsRepository } from './repositories/bot-groups'
+import {
+  createBotSuggestionsRepository,
+  type BotSuggestionsRepository,
+} from './repositories/bot-suggestions'
+import { createBotProjectsRepository, type BotProjectsRepository } from './repositories/bot-projects'
 import { createToolRulesRepository, type ToolRulesRepository } from './repositories/tool-rules'
 import { createActivityRepository, type ActivityRepository } from './repositories/activity'
 import {
@@ -91,6 +96,10 @@ export interface AppDatabase {
   botBindings: BotBindingsRepository
   /** Durable bot-to-bot deliveries (v48). */
   a2aOutbox: A2aOutboxRepository
+  /** Actions bots proposed during proactive work (v53). */
+  botSuggestions: BotSuggestionsRepository
+  /** Ongoing projects a bot tracks toward its goal (v53). */
+  botProjects: BotProjectsRepository
   /** Standing approval rules ("always allow" / "always ask"). */
   toolRules: ToolRulesRepository
   /** Every tool call, with why it was allowed (the Activity view). */
@@ -257,6 +266,8 @@ export function openDatabase(filePath: string): AppDatabase {
     botGroups: createBotGroupsRepository(driver),
     botBindings: createBotBindingsRepository(driver),
     a2aOutbox: createA2aOutboxRepository(driver),
+    botSuggestions: createBotSuggestionsRepository(driver),
+    botProjects: createBotProjectsRepository(driver),
     toolRules: createToolRulesRepository(driver),
     activity: createActivityRepository(driver),
     scheduledTaskRuns: createScheduledTaskRunsRepository(driver),

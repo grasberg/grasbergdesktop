@@ -6,6 +6,7 @@
  */
 
 import type { Conversation, Message } from '@shared/types'
+import { withoutInvocationPolicy } from '../invocation-context'
 
 export type CompletionHook = (
   conversation: Conversation,
@@ -34,7 +35,9 @@ export async function runCompletionHooks(
 ): Promise<void> {
   for (const hook of hooks) {
     try {
-      await hook(conversation, assistantMessage)
+      // Hooks start follow-up work (bot deliveries, routed replies) that must
+      // not inherit the finished turn's invocation policy.
+      await withoutInvocationPolicy(() => hook(conversation, assistantMessage))
     } catch (e) {
       console.error(
         '[completion-hook] hook failed:',

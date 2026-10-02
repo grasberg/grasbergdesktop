@@ -33,6 +33,8 @@ export interface AgentsRepository {
   markChatSeen(id: string, seenAt: number): void
   /** Enabled bots with an ENABLED folder watch (v50) — what the watcher runs. */
   listWatchedLite(): Array<{ id: string; watch: WorkflowWatchConfig }>
+  /** Pause (reason null = by the user) or resume (v53). No updated_at touch. */
+  setPaused(id: string, paused: boolean, reason?: string | null): void
   remove(id: string): void
 }
 
@@ -56,6 +58,9 @@ interface AgentRow {
   message_allow_json: string | null
   webhook_enabled: number
   watch_json: string | null
+  goal: string | null
+  paused: number | null
+  paused_reason: string | null
   created_at: number
   updated_at: number
 }
@@ -108,6 +113,9 @@ function toAgent(row: AgentRow): AgentProfile {
       row.message_allow_json === null ? null : parseStringArray(row.message_allow_json, []),
     webhookEnabled: row.webhook_enabled === 1,
     watch: parseObject<WorkflowWatchConfig>(row.watch_json),
+    goal: row.goal ?? '',
+    paused: row.paused === 1,
+    pausedReason: row.paused === 1 ? (row.paused_reason ?? null) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -161,6 +169,9 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         messageAllow: input.messageAllow ?? null,
         webhookEnabled: input.webhookEnabled === true,
         watch: input.watch ?? null,
+        goal: input.goal ?? '',
+        paused: false,
+        pausedReason: null,
         createdAt: now,
         updatedAt: now,
       }
@@ -169,8 +180,8 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
            (id, name, description, system_prompt, provider_id, model_id,
             tool_ids_json, max_rounds, enabled, title, avatar_json, hidden,
             chat_conversation_id, heartbeat_json, reset_json, message_allow_json,
-            webhook_enabled, watch_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            webhook_enabled, watch_json, goal, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           agent.id,
           agent.name,
@@ -190,6 +201,7 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
           agent.messageAllow ? JSON.stringify(agent.messageAllow) : null,
           agent.webhookEnabled ? 1 : 0,
           agent.watch ? JSON.stringify(agent.watch) : null,
+          agent.goal,
           now,
           now,
         ]
@@ -246,6 +258,7 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
             patch.webhookEnabled === undefined ? undefined : patch.webhookEnabled ? 1 : 0,
           watch_json:
             patch.watch === undefined ? undefined : patch.watch === null ? null : JSON.stringify(patch.watch),
+          goal: patch.goal,
         },
         { touchUpdatedAt: true }
       )
@@ -273,6 +286,14 @@ export function createAgentsRepository(driver: SqliteDriver): AgentsRepository {
         }
       }
       return result
+    },
+
+    setPaused(id, paused, reason = null) {
+      driver.run('UPDATE agents SET paused = ?, paused_reason = ? WHERE id = ?', [
+        paused ? 1 : 0,
+        paused ? reason : null,
+        id,
+      ])
     },
 
     remove(id) {

@@ -20,14 +20,29 @@ import type { Keystore } from '../../keys/keystore'
 import { redactKnownSecrets } from '../../providers/redact'
 import { capToolResult } from '../definitions'
 import { namespaceMcpToolIds } from './naming'
-import { defaultMcpConnector, type McpConnection, type McpConnector } from './transports'
+import {
+  beginMcpOAuth,
+  defaultMcpConnector,
+  UnauthorizedError,
+  type McpConnection,
+  type McpConnector,
+} from './transports'
+import { awaitOAuthCallback, McpOAuthProvider, McpOAuthStore } from './oauth'
 
 interface ServerState {
   status: McpConnectionStatus
   error: string | null
   connection: McpConnection | null
   /** Discovered tools with their namespaced ids. */
-  tools: Array<{ toolId: string; name: string; description: string; schema: Record<string, unknown> }>
+  tools: Array<{
+    toolId: string
+    name: string
+    description: string
+    schema: Record<string, unknown>
+    readOnly: boolean
+  }>
+  /** Connector access at connect time (v53): 'read' lists only read-only tools. */
+  access: 'read' | 'write'
   /** Decrypted secret values for redacting results. */
   secretValues: string[]
 }
@@ -40,6 +55,10 @@ export interface McpManagerDeps {
   changedChannel: string
   /** Injectable connector; defaults to the real SDK-backed one. */
   connector?: McpConnector
+  /** v53: opens the system browser for an OAuth sign-in (shell.openExternal). */
+  openExternal?: (url: string) => void | Promise<void>
+  /** v53 test seam: the interactive sign-in starter. */
+  beginOAuth?: typeof beginMcpOAuth
 }
 
 export class McpManager {
@@ -49,9 +68,11 @@ export class McpManager {
   /** serverId -> lifecycle generation; bumped by every connect/disconnect. */
   private readonly generations = new Map<string, number>()
   private readonly connector: McpConnector
+  private readonly oauthStore: McpOAuthStore
 
   constructor(private readonly deps: McpManagerDeps) {
     this.connector = deps.connector ?? defaultMcpConnector
+    this.oauthStore = new McpOAuthStore(deps.db, deps.keystore)
   }
 
   // -- secrets ---------------------------------------------------------------
@@ -123,17 +144,24 @@ export class McpManager {
     await this.disconnect(config.id)
     const generation = this.bumpGeneration(config.id)
     const secrets = this.decryptSecrets(config.id)
+    // OAuth (v53): a background connect never opens a browser — a server that
+    // asks for a sign-in is marked 'needs_auth' and waits for the user.
+    const authProvider =
+      config.transport === 'http'
+        ? new McpOAuthProvider(config.id, this.oauthStore, () => undefined)
+        : undefined
     const state: ServerState = {
       status: 'connecting',
       error: null,
       connection: null,
       tools: [],
       secretValues: Object.values(secrets),
+      access: config.access === 'read' ? 'read' : 'write',
     }
     this.states.set(config.id, state)
 
     try {
-      const connection = await this.connector(config, secrets)
+      const connection = await this.connector(config, secrets, authProvider ? { authProvider } : undefined)
       // A concurrent disconnect/remove/reconnect may have superseded this
       // attempt while the transport was coming up. Nothing tracks the
       // connection we just opened any more, so close it here — otherwise the
@@ -160,7 +188,13 @@ export class McpManager {
       state.tools = discovered.map((tool, index) => {
         const toolId = toolIds[index]
         this.reverse.set(toolId, { serverId: config.id, name: tool.name })
-        return { toolId, name: tool.name, description: tool.description, schema: tool.inputSchema }
+        return {
+          toolId,
+          name: tool.name,
+          description: tool.description,
+          schema: tool.inputSchema,
+          readOnly: tool.readOnly === true,
+        }
       })
       state.status = 'connected'
       state.error = null
@@ -169,6 +203,11 @@ export class McpManager {
       await this.closeQuietly(state.connection)
       state.connection = null
       if (this.superseded(config.id, generation)) return
+      if (e instanceof UnauthorizedError) {
+        state.status = 'needs_auth'
+        state.error = 'Sign in to connect this service.'
+        return
+      }
       state.status = 'error'
       // Redact: the message may echo the request URL or an auth header value,
       // and this string is broadcast to the renderer via getRuntime().
@@ -184,6 +223,9 @@ export class McpManager {
     for (const state of this.states.values()) {
       if (state.status !== 'connected') continue
       for (const tool of state.tools) {
+        // Read access (v53): a write-capable tool is not offered at all — a
+        // tool the model never sees cannot be talked into running.
+        if (state.access === 'read' && !tool.readOnly) continue
         defs.push({
           id: tool.toolId,
           name: tool.toolId,
@@ -196,8 +238,12 @@ export class McpManager {
           builtin: false,
           enabled: isEnabled(tool.toolId),
           source: 'mcp',
-          // MCP side effects can't be inspected - conservatively mutating.
-          mutating: true,
+          // MCP side effects can't be inspected — conservatively mutating
+          // (and outward). A server's own readOnlyHint is only an annotation
+          // (the MCP spec: never a security decision for an untrusted
+          // server), so it counts ONLY where the user chose read access for
+          // that server and thereby decided to trust its hints.
+          mutating: !(state.access === 'read' && tool.readOnly),
         })
       }
     }
@@ -234,6 +280,7 @@ export class McpManager {
         toolId: t.toolId,
         name: t.name,
         description: t.description,
+        readOnly: t.readOnly,
       }))
       return {
         id: config.id,
@@ -241,6 +288,7 @@ export class McpManager {
         error: state?.error ?? null,
         toolCount: tools.length,
         tools,
+        signedIn: this.oauthStore.hasTokens(config.id),
       }
     })
   }
@@ -278,6 +326,7 @@ export class McpManager {
       url: input.url ?? null,
       headers: input.headers ?? {},
       enabled: input.enabled ?? true,
+      access: input.access ?? 'write',
     })
     this.storeSecrets(config.id, input.setSecrets)
     if (config.enabled) await this.connect(this.configWithSecretNames(config))
@@ -294,6 +343,7 @@ export class McpManager {
       url: patch.url,
       headers: patch.headers,
       enabled: patch.enabled,
+      access: patch.access,
     })
     if (!updated) throw new Error('MCP server not found.')
     for (const name of patch.deleteSecrets ?? []) {
@@ -311,6 +361,7 @@ export class McpManager {
     this.states.delete(id)
     this.generations.delete(id)
     this.deps.db.secrets.deleteAllFor('mcp_server', id)
+    this.oauthStore.clear(id)
     this.deps.db.mcpServers.remove(id)
     this.notifyChanged()
     return this.list()
@@ -323,6 +374,44 @@ export class McpManager {
     else await this.disconnect(id)
     this.notifyChanged()
     return this.list()
+  }
+
+  /**
+   * Interactive OAuth sign-in (v53): listens for the loopback redirect,
+   * opens the service's consent page in the system browser, exchanges the
+   * code and reconnects. Resolves with the fresh runtime state.
+   */
+  async authorize(id: string): Promise<McpServerRuntime[]> {
+    const stored = this.deps.db.mcpServers.getById(id)
+    if (!stored) throw new Error('MCP server not found.')
+    if (stored.transport !== 'http') throw new Error('Only remote (HTTP) connectors sign in with OAuth.')
+    if (!this.deps.openExternal) throw new Error('Sign-in is unavailable in this build.')
+    const config = this.configWithSecretNames(stored)
+    const cancel = new AbortController()
+    let opened = false
+    const provider = new McpOAuthProvider(id, this.oauthStore, (url) => {
+      opened = true
+      void this.deps.openExternal?.(url.toString())
+    })
+    const callback = awaitOAuthCallback(provider.expectedState(), { signal: cancel.signal })
+    await callback.ready
+    try {
+      const begin = await (this.deps.beginOAuth ?? beginMcpOAuth)(config, this.decryptSecrets(id), provider)
+      if (begin && opened) {
+        const code = await callback.code
+        await begin.finish(code)
+      }
+    } finally {
+      cancel.abort()
+      callback.code.catch(() => undefined)
+    }
+    return this.reconnect(id)
+  }
+
+  /** Forgets the stored OAuth grant and reconnects (which then asks to sign in). */
+  async signOut(id: string): Promise<McpServerRuntime[]> {
+    this.oauthStore.clear(id)
+    return this.reconnect(id)
   }
 
   async reconnect(id: string): Promise<McpServerRuntime[]> {

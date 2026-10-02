@@ -110,6 +110,24 @@ function scopeApplies(rule: ToolRule, ctx: ToolRuleMatchContext): boolean {
   return false
 }
 
+/**
+ * Strength of each effect (v53): the strongest matching rule decides. Every
+ * "stop" effect outranks every "go" effect, so adding a stricter rule can
+ * only ever take capability away.
+ */
+const EFFECT_STRENGTH: Record<ToolRuleEffect, number> = {
+  allow: 1,
+  allow_if_requested: 2,
+  require_approval: 3,
+  handoff: 4,
+  block: 5,
+}
+
+/** Stop effects: ask, hand off or refuse. Go effects only remove a dialog. */
+export function isStopEffect(effect: ToolRuleEffect): boolean {
+  return effect === 'require_approval' || effect === 'handoff' || effect === 'block'
+}
+
 function ruleApplies(rule: ToolRule, ctx: ToolRuleMatchContext): boolean {
   if (rule.toolId !== ctx.toolId) return false
   if (!scopeApplies(rule, ctx)) return false
@@ -117,24 +135,25 @@ function ruleApplies(rule: ToolRule, ctx: ToolRuleMatchContext): boolean {
   if (pattern.length === 0) return true
   const covered = patternCovers(ctx.toolId, pattern, ctx.args)
   // Un-evaluable pattern: stop rules match anyway, allow rules do not.
-  if (covered === null) return rule.effect === 'require_approval'
+  if (covered === null) return isStopEffect(rule.effect)
   return covered
 }
 
 /**
- * The effect of the user's standing rules on this call: 'require_approval'
- * (always ask), 'allow' (skip the dialog), or null when no rule applies.
- * A single matching stop rule outranks any number of allow rules.
+ * The effect of the user's standing rules on this call — the STRONGEST
+ * matching one (block > handoff > require_approval > allow_if_requested >
+ * allow), or null when no rule applies. A single matching stop rule outranks
+ * any number of allow rules.
  */
 export function matchToolRules(
   rules: readonly ToolRule[],
   ctx: ToolRuleMatchContext
 ): ToolRuleEffect | null {
-  let allow = false
+  let best: ToolRuleEffect | null = null
   for (const rule of rules) {
     if (!ruleApplies(rule, ctx)) continue
-    if (rule.effect === 'require_approval') return 'require_approval'
-    allow = true
+    const effect = EFFECT_STRENGTH[rule.effect] ? rule.effect : 'require_approval'
+    if (best === null || EFFECT_STRENGTH[effect] > EFFECT_STRENGTH[best]) best = effect
   }
-  return allow ? 'allow' : null
+  return best
 }

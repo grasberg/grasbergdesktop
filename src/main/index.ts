@@ -14,9 +14,11 @@ import {
   Tray,
   app,
   clipboard,
+  desktopCapturer,
   dialog,
   globalShortcut,
   powerMonitor,
+  screen,
   session,
   shell,
   systemPreferences,
@@ -51,6 +53,15 @@ import { WorkflowTriggerServer } from './workflows/trigger-server'
 import { WorkflowWatcherService } from './workflows/watcher'
 import { ScheduledTaskScheduler } from './scheduled-tasks/scheduler'
 import { BrowserSessionPool } from './browser/pool'
+import { LoginVault } from './services/login-vault'
+import { AutoReviewer } from './services/auto-review'
+import { TeachService } from './services/teach'
+import { ChannelHub } from './im/channels/hub'
+import { DesktopControl, DESKTOP_KILL_SHORTCUT } from './desktop/desktop-control'
+import { AnomalyMonitor, DEFAULT_ANOMALY_THRESHOLDS } from './services/anomaly'
+import { CHANNEL_EVENT_POLICY, currentInvocationPolicy, withInvocationPolicy } from './invocation-context'
+import { wsChannelSocket } from './im/channels/ws-channel-socket'
+import { replySubject } from './im/channels/email/mime'
 import { QuickWindow } from './quick/quick-window'
 import { TerminalService } from './terminal/terminal-service'
 import { VoiceService } from './audio/voice-service'
@@ -93,6 +104,8 @@ let db: AppDatabase | null = null
 let chatService: ChatService | null = null
 let botService: BotService | null = null
 let botChannels: BotChannelService | null = null
+let channelHub: ChannelHub | null = null
+let desktopControlRef: DesktopControl | null = null
 let approvalBroker: ApprovalBroker | null = null
 let questionBroker: QuestionBroker | null = null
 let mcpManager: McpManager | null = null
@@ -185,6 +198,8 @@ async function cleanup(): Promise<void> {
   imBridgeManager?.stopAll()
   botService?.stopMaintenance()
   botChannels?.stopAll()
+  channelHub?.stopAll()
+  desktopControlRef?.stopHost()
   workflowScheduler?.stop()
   triggerServer?.stop()
   workflowWatcher?.stop()
@@ -594,6 +609,10 @@ function bootstrap(): void {
     keystore,
     broadcast,
     changedChannel: CHANNELS.mcpServersChanged,
+    // v53: OAuth sign-in opens the service's consent page in the system browser.
+    openExternal: (url) => {
+      if (/^https:\/\//i.test(url)) void shell.openExternal(url)
+    },
   })
   mcpManager = mcp
   // One tool system per app: the registry/executor pair (read-only tools,
@@ -604,6 +623,84 @@ function bootstrap(): void {
   const pool = new BrowserSessionPool()
   browserPool = pool
   const browser = pool.forScope('default')
+  // Personal agent (v53): each session pushes take-over state and names its bot.
+  pool.setConfigure((scope, session) => {
+    const agentId = scope.startsWith('bot:') ? scope.slice(4) : null
+    const name = agentId ? database.agents.getById(agentId)?.name : null
+    session.label = name ? `${name}'s browser` : 'Grasberg browser'
+    session.onControlChange = (userControl) =>
+      broadcast(CHANNELS.browserControl, { agentId, userControl })
+  })
+  // Anomaly monitor (v53): pauses a bot that loops or runs away, and stops its turn.
+  const anomalyMonitor = new AnomalyMonitor(
+    (agentId, conversationId, reason) => {
+      try {
+        botService?.pauseAgent(agentId, `Paused automatically: ${reason}`)
+      } catch {
+        // the bot may be gone
+      }
+      if (conversationId) chatService?.stopConversation(conversationId)
+    },
+    DEFAULT_ANOMALY_THRESHOLDS,
+    () => database.settings.get().anomalyMonitorEnabled
+  )
+  // Desktop control (v53): the user's real screen, opt-in, with a global kill switch.
+  const desktopControl = new DesktopControl({
+    platform: process.platform,
+    primaryDisplay: () => {
+      const display = screen.getPrimaryDisplay()
+      return {
+        x: Math.round(display.bounds.x * display.scaleFactor),
+        y: Math.round(display.bounds.y * display.scaleFactor),
+        width: Math.round(display.size.width * display.scaleFactor),
+        height: Math.round(display.size.height * display.scaleFactor),
+      }
+    },
+    capture: async (size) => {
+      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: size })
+      const primaryId = String(screen.getPrimaryDisplay().id)
+      const source = sources.find((s) => s.display_id === primaryId) ?? sources[0]
+      if (!source) throw new Error('No screen to capture.')
+      return `data:image/png;base64,${source.thumbnail.toPNG().toString('base64')}`
+    },
+    isEnabled: () => database.settings.get().desktopControlEnabled,
+    disable: () => {
+      database.settings.update({ desktopControlEnabled: false })
+    },
+    notify: (title, body) => notifier?.notify({ kind: 'result', title, body }),
+    registerKillShortcut: (onKill) => {
+      if (!globalShortcut.isRegistered(DESKTOP_KILL_SHORTCUT)) {
+        globalShortcut.register(DESKTOP_KILL_SHORTCUT, onKill)
+      }
+    },
+  })
+  desktopControlRef = desktopControl
+  // Credential vault (v53): saved logins typed into pages by main, never shown to a model.
+  const loginVault = new LoginVault(database, keystore)
+  // Teach-a-task (v53): the user demonstrates in the agent's browser; an
+  // economy model turns the recording into a skill.
+  const teach = new TeachService({
+    sessionFor: (agentId) => pool.forScope(pool.scopeFor(agentId)),
+    generate: (prompt) =>
+      chatService
+        ? chatService.generateForWorkflow(prompt, undefined, undefined, {
+            economy: true,
+            usage: { runKind: 'other' },
+          })
+        : Promise.reject(new Error('unavailable')),
+    saveSkill: (input) => database.skills.upsertByName(input),
+    onChanged: (status) => broadcast(CHANNELS.teachChanged, status),
+  })
+  // Auto-review (v53): resolved at call time — chatService is set before any generation.
+  const autoReviewer = new AutoReviewer((prompt, signal) =>
+    chatService
+      ? chatService.generateForWorkflow(prompt, undefined, undefined, {
+          economy: true,
+          signal,
+          usage: { runKind: 'other' },
+        })
+      : Promise.reject(new Error('Reviewer unavailable during startup.'))
+  )
   // User-driven Work-view terminal sessions (pipes-based; killed on quit).
   const terminals = new TerminalService({ broadcast })
   terminalService = terminals
@@ -658,6 +755,31 @@ function bootstrap(): void {
     browserEnabled: () => database.settings.get().browserToolsEnabled,
     browser,
     browserFor: (ctx) => pool.forScope(pool.scopeFor(ctx.agentId ?? ctx.conversation.agentId)),
+    loginVault,
+    desktop: desktopControl,
+    // Anomaly monitor (v53): bot tool decisions only; headless runs have budgets.
+    onActivity: (entry) => {
+      if (!entry.conversationId) return
+      const agentId = database.conversations.getById(entry.conversationId)?.agentId
+      if (!agentId) return
+      // Only work nobody started in the moment is watched (heartbeats, outside
+      // events, bot-to-bot, channel members): a turn the user started is the
+      // user's to stop — the monitor must never cut off their own request.
+      // Runs inside the tool call's async context, so the policy is visible.
+      const autonomous =
+        (botService?.turnOrigin(entry.conversationId) ?? null) !== null ||
+        currentInvocationPolicy()?.origin === 'autonomous' ||
+        currentInvocationPolicy()?.origin === 'channel'
+      if (!autonomous) return
+      anomalyMonitor.observe({
+        agentId,
+        conversationId: entry.conversationId,
+        toolId: entry.toolId,
+        decision: entry.decision,
+        arguments: entry.arguments,
+        at: entry.at,
+      })
+    },
     // Unified approvals (v50): a turn started by an outside event asks before
     // messaging a teammate.
     turnOrigin: (conversationId) => botService?.turnOrigin(conversationId) ?? null,
@@ -672,6 +794,101 @@ function bootstrap(): void {
         botService
           ? botService.messengerSend(senderConversationId, target, message)
           : Promise.resolve('Error: bot messaging unavailable.'),
+    },
+    // Personal agent (v53): suggest_action and the other bot-chat actions.
+    botActions: {
+      suggest: (conversationId, input) =>
+        botService ? botService.suggest(conversationId, input) : 'Error: bots unavailable.',
+      updateProject: (conversationId, input) =>
+        botService ? botService.updateProject(conversationId, input) : 'Error: bots unavailable.',
+    },
+    // Auto-review (v53): an economy model checks outward calls that would run
+    // without a click — in autonomous turns by default.
+    autoReview: async (ctx, call) => {
+      const mode = database.settings.get().autoReview
+      if (mode === 'off') return null
+      const headless = !ctx.conversation.id || ctx.conversation.id === 'workflow'
+      const origin = headless ? 'scheduled' : (call.origin ?? 'user')
+      if (mode === 'autonomous' && origin === 'user') return null
+      const agentId = ctx.agentId ?? ctx.conversation.agentId ?? null
+      const agent = agentId ? database.agents.getById(agentId) : null
+      const request =
+        ctx.requestText ??
+        database.driver.get<{ content: string }>(
+          "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY seq DESC LIMIT 1",
+          [ctx.conversation.id]
+        )?.content ??
+        ''
+      const rules = database.toolRules
+        .list()
+        .slice(0, 30)
+        .map((rule) => `${rule.effect}: ${rule.toolId}${rule.pattern ? ` (${rule.pattern})` : ''}`)
+      return autoReviewer.review(
+        {
+          toolName: call.toolName,
+          argumentsJson: call.argumentsJson,
+          origin,
+          request,
+          agentName: agent?.name ?? null,
+          goal: agent?.goal ?? null,
+          rules,
+        },
+        ctx.signal
+      )
+    },
+    // The bot's own mailbox + Slack/Discord presences (v53; the hub is built below).
+    channels: {
+      emailList: async (agentId, limit, query) => {
+        const email = channelHub?.emailFor(agentId)
+        if (!email) return 'Error: this bot has no running email channel. Add one on its profile.'
+        const items = await email.listRecent(limit, query)
+        return items.length === 0
+          ? 'No messages found.'
+          : items.map((m) => `uid ${m.uid} · ${m.date} · ${m.from} · ${m.subject || '(no subject)'}`).join('\n')
+      },
+      emailRead: async (agentId, uid) => {
+        const email = channelHub?.emailFor(agentId)
+        if (!email) return 'Error: this bot has no running email channel.'
+        const mail = await email.read(uid)
+        if (!mail) return `No message with uid ${uid}.`
+        return [
+          `From: ${mail.from.name ? `${mail.from.name} <${mail.from.address}>` : mail.from.address}`,
+          `To: ${mail.to}`,
+          `Date: ${mail.date}`,
+          `Subject: ${mail.subject}`,
+          mail.attachments.length > 0 ? `Attachments: ${mail.attachments.join(', ')}` : '',
+          '',
+          mail.text.slice(0, 20_000),
+        ]
+          .filter((line, index) => line !== '' || index === 5)
+          .join('\n')
+      },
+      emailSend: async (agentId, input) => {
+        const email = channelHub?.emailFor(agentId)
+        if (!email) return 'Error: this bot has no running email channel.'
+        let to = input.to
+        let subject = input.subject
+        let inReplyTo: string | null = null
+        let references: string[] = []
+        if (input.replyToUid !== null) {
+          const original = await email.read(input.replyToUid)
+          if (!original) return `Error: no message with uid ${input.replyToUid}.`
+          if (to.length === 0) to = [original.from.address]
+          if (!subject) subject = replySubject(original.subject)
+          inReplyTo = original.messageId || null
+          references = [...original.references, ...(original.messageId ? [original.messageId] : [])]
+        }
+        await email.sendMessage({ to, subject: subject || '(no subject)', text: input.text, inReplyTo, references })
+        return `Email sent to ${to.join(', ')}.`
+      },
+      post: (agentId, kind, target, text) =>
+        channelHub ? channelHub.post(agentId, kind, target, text) : Promise.resolve('Error: channels unavailable.'),
+    },
+    // Steps handed to the user (handoff rules, hand_off, password/payment fields).
+    handoff: (ctx, item) => {
+      const conversationId =
+        ctx.conversation.id && ctx.conversation.id !== 'workflow' ? ctx.conversation.id : null
+      botService?.recordHandoff(conversationId, item)
     },
     imageGeneration: {
       generate: (req) =>
@@ -754,7 +971,11 @@ function bootstrap(): void {
     onDelegateStarted: (info) => botService?.delegateStarted(info),
     onDelegateFinished: (info) => botService?.delegateFinished(info),
     imageDir: attachmentsDir,
-    browser: { consumePendingScreenshot: (agentId) => pool.consumePendingScreenshot(agentId) },
+    browser: {
+      // A desktop screenshot (v53) takes precedence: it is the newest action's result.
+      consumePendingScreenshot: (agentId) =>
+        desktopControl.consumePendingScreenshot() ?? pool.consumePendingScreenshot(agentId),
+    },
     getAccessToken: (providerId, signal) => oauth.getAccessToken(providerId, signal),
     // Headless runs (scheduled tasks, workflows) have no dialog to pop. With
     // remote approvals configured they ask the paired chat instead of silently
@@ -844,7 +1065,13 @@ function bootstrap(): void {
     // Inbox items to review plus bots/rooms that need the user or hold unread
     // bot messages (v49) — one honest number.
     unreadCount: () =>
-      countUnreviewed(collectInboxItems(database)) + (botService?.attentionCount() ?? 0),
+      countUnreviewed(collectInboxItems(database)) +
+      (botService?.attentionCount() ?? 0) +
+      // v53: steps handed back from ordinary conversations (bot-owned ones
+      // already count through the bot's needs-you state).
+      (database.driver.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM bot_suggestions WHERE status = 'open' AND agent_id IS NULL"
+      )?.n ?? 0),
   })
   notifier = desktopNotifier
 
@@ -876,6 +1103,18 @@ function bootstrap(): void {
   // Heartbeats + canonical-chat auto-compaction (v47), 60 s cadence.
   if (process.env.SMOKE_TEST !== '1') bots.startMaintenance()
 
+  // Bot channels (Telegram, Slack, Discord, email): an inbound message
+  // becomes a canonical-chat turn (queue-if-busy). One from anyone but the
+  // owner runs under the channel-event policy, which the executor reads as
+  // an outside event — and which a queued send carries into the drained turn.
+  const sendChannelTurn = (
+    conversationId: string,
+    content: string,
+    opts?: { untrusted?: boolean }
+  ) => {
+    const send = () => chatService!.send({ conversationId, content }, { queueIfBusy: true })
+    return opts?.untrusted ? withInvocationPolicy(CHANNEL_EVENT_POLICY, send) : send()
+  }
   // Per-bot Telegram bindings (v47): each bound bot runs its own bridge;
   // inbound messages become canonical-chat turns (queue-if-busy) and replies
   // route back via the completion hook below.
@@ -883,12 +1122,22 @@ function bootstrap(): void {
     db: database,
     keystore,
     ensureBotChat: (agentId) => bots.ensureBotChat(agentId),
-    sendToBot: (conversationId, content) =>
-      chatService!.send({ conversationId, content }, { queueIfBusy: true }),
+    sendToBot: (conversationId, content, opts) => sendChannelTurn(conversationId, content, opts),
     broadcast,
   })
   botChannels = botChannelService
   if (process.env.SMOKE_TEST !== '1') botChannelService.syncAll()
+  // Slack / Discord / email presences (v53): same routing shape as Telegram.
+  const hub = new ChannelHub({
+    db: database,
+    keystore,
+    ensureBotChat: (agentId) => bots.ensureBotChat(agentId),
+    sendToBot: (conversationId, content, opts) => sendChannelTurn(conversationId, content, opts),
+    broadcast,
+    socketFactory: wsChannelSocket,
+  })
+  channelHub = hub
+  if (process.env.SMOKE_TEST !== '1') hub.syncAll()
 
   // Optimizer: autonomous optimize-evaluate-commit loops per project (AVO
   // style). Eval commands run HERE, never through the agent's shell tool.
@@ -1178,6 +1427,9 @@ function bootstrap(): void {
   registerCompletionHook((conversation, message) =>
     botChannels?.handleCompletion(conversation, message)
   )
+  registerCompletionHook((conversation, message) =>
+    channelHub?.handleCompletion(conversation, message)
+  )
 
   registerCompletionHook((conversation) => projectHooks.run('afterAgent', conversation))
 
@@ -1209,7 +1461,9 @@ function bootstrap(): void {
   // Roster attention feeds the badge (v49) — every delivery, escalation and
   // mark-seen recomputes it; a navigation held during lock goes out on unlock.
   subscribeMainEvents((channel, payload) => {
-    if (channel === CHANNELS.botsChanged) desktopNotifier.refreshBadge()
+    if (channel === CHANNELS.botsChanged || channel === CHANNELS.botSuggestionsChanged) {
+      desktopNotifier.refreshBadge()
+    }
     if (
       channel === CHANNELS.appLockChanged &&
       !(payload as { locked?: boolean }).locked &&
@@ -1235,6 +1489,25 @@ function bootstrap(): void {
     questionBroker: questions,
     botService: bots,
     botChannels: botChannelService,
+    channelHub: hub,
+    browserControl: {
+      frame: async (agentId) => {
+        const session = pool.peek(pool.scopeFor(agentId))
+        const state = session
+          ? await session.frame()
+          : { open: false, url: '', title: '', userControl: false, dataUrl: null }
+        return { agentId, ...state }
+      },
+      takeOver: (agentId) => pool.forScope(pool.scopeFor(agentId)).takeOver(),
+      returnControl: (agentId) => pool.peek(pool.scopeFor(agentId))?.returnControl(),
+    },
+    loginVault,
+    teachService: teach,
+    generateEconomy: (prompt) =>
+      chatService!.generateForWorkflow(prompt, undefined, undefined, {
+        economy: true,
+        usage: { runKind: 'other' },
+      }),
     mcpManager: mcp,
     imBridgeManager: imBridge,
     oauthManager: oauth,

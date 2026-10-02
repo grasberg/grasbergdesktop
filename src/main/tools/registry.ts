@@ -64,6 +64,8 @@ export class ToolRegistry {
       hidden.add('browser')
       hidden.add('computer')
     }
+    // v53: the user's real desktop is strictly opt-in.
+    if (!settings.desktopControlEnabled) hidden.add('desktop')
     // use_skill is pointless (and prompt noise) without any enabled skills.
     if (this.db.skills.countEnabled() === 0) hidden.add('use_skill')
     // generate_image is prompt noise when nothing can generate images: no

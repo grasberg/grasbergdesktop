@@ -23,6 +23,7 @@ import { MicDeniedError, VoiceRecorder } from '@/lib/recorder'
 import { toNormalized, unwrap } from '@/api/uld'
 import { getChatDraft, loadChatDraft, saveChatDraft } from '@/lib/chat-drafts'
 import ModelSelector from './ModelSelector'
+import VoiceCallButton from './VoiceCallButton'
 import './chat.css'
 
 const MAX_TEXTAREA_HEIGHT = 240 // ~10 lines
@@ -1302,6 +1303,9 @@ export default function Composer(): ReactElement {
               </span>
             ) : null}
           </button>
+        ) : null}
+        {micAvailable ? (
+          <VoiceCallButton disabled={!conversation || loadedDraftId !== conversation.id || recState !== 'idle'} />
         ) : null}
         {isStreaming ? (
           <button

@@ -683,3 +683,69 @@ drafts; Flutter uses secure storage.
 existing devices. `access_granted_at` records the latest full grant (nullable).
 Only desktop can change the grant. Revocation/access are checked for each request
 and again before returning an in-flight response.
+
+# Personal-agent layer (v53)
+
+Plain ADD COLUMNs and new leaf tables; no FKs (the Bot Mode precedent —
+cleanup is app-side when a profile is deleted or reset). None of these tables
+are in backups (runtime state or secrets-adjacent).
+
+`agents` gains `goal TEXT NOT NULL DEFAULT ''`, `paused INTEGER NOT NULL
+DEFAULT 0` and `paused_reason TEXT` (NULL = paused by the user; text = the
+anomaly monitor's reason). `mcp_servers` gains `access TEXT NOT NULL DEFAULT
+'write'` ('read' lists only the server's read-only tools). `tool_rules.effect`
+has no CHECK, so the new effects (`allow_if_requested`, `handoff`, `block`)
+need no rebuild.
+
+### `bot_suggestions` (v53)
+
+Proposals from proactive work (`kind 'suggestion'`) and steps handed to the
+user (`kind 'handoff'`). `status` open → accepted | dismissed. Accepting a
+suggestion runs `action` as a user turn in the bot's chat; accepting a handoff
+means "done" and tells the bot. Max 20 open suggestions per bot.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `agent_id` | TEXT nullable | the bot; NULL = a handoff from an ordinary conversation |
+| `kind` | TEXT | `suggestion` \| `handoff` |
+| `conversation_id` | TEXT nullable | where it came from |
+| `title`, `action`, `reason` | TEXT | the proposal / instructions |
+| `status` | TEXT | `open` \| `accepted` \| `dismissed` |
+| `created_at`, `decided_at` | INTEGER | unix ms |
+
+### `bot_projects` (v53)
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `agent_id` | TEXT | owner bot |
+| `title` | TEXT | unique per bot (case-insensitive upsert) |
+| `status` | TEXT | `active` \| `waiting` \| `blocked` \| `done` |
+| `summary`, `next_step` | TEXT | current state |
+| `created_at`, `updated_at` | INTEGER | unix ms |
+
+Max 30 per bot; the oldest `done` project makes room.
+
+### `message_feedback` (v53)
+
+One row per rated assistant message (`message_id` PK), with `conversation_id`,
+`agent_id` (the authoring bot, else the conversation's bot, else NULL),
+`rating` (1 / -1), `comment` and `created_at`. A comment or a thumbs-down also
+writes a memory owned by that agent.
+
+### `browser_logins` (v53)
+
+Credential-vault metadata: `id`, `origin` (scheme + host + port), `username`,
+`label`, `agent_id` (NULL = any agent), timestamps. The password is encrypted
+in `tool_secrets` (scope `browser_login`, owner = the login id, name
+`password`) and only ever decrypted in main to type into a page.
+
+### `bot_channels` (v53)
+
+Slack / Discord / email presences: `id`, `agent_id`, `kind`, `enabled`,
+`config_json` (non-secret settings: allowed channel ids + mention gating, or
+the mailbox's hosts/ports/allowed senders), `state_json` (owner id, pairing
+code + expiry, the email high-water UID), timestamps. Tokens and passwords
+live in `tool_secrets` (scope `bot_channel`, owner = the channel id). OAuth
+grants for remote MCP connectors use scope `mcp_oauth` (owner = server id).

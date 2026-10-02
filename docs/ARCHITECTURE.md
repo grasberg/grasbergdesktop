@@ -158,3 +158,49 @@ v24; the surfaces above conversations are Home, Workflows and Bots.
    agent profiles, canonical chats, durable bot-to-bot deliveries with visible
    handoffs, group rooms, heartbeats, per-bot Telegram bindings, attention
    states and deep-linked notifications.
+6. **Personal agent** ✅ (v53, parity with OpenAI dots, xAI Grok Bot and Meta
+   Muse) — see the section below.
+
+## Personal-agent layer (v53)
+
+Capability map against the three products (✅ = in Grasberg):
+
+| Capability | dots | Grok Bot | Muse | Grasberg |
+|---|---|---|---|---|
+| Named always-on agent with persona, avatar, goal | ✅ | ✅ | ✅ | ✅ bots + `goal`, tray/login item |
+| Projects tracked toward the goal | ✅ | | | ✅ `bot_projects`, `update_project` |
+| Proactive work is read-only; proposes actions | ✅ | | ✅ | ✅ autonomous policy + `suggest_action` |
+| Rule behaviours: act / act if requested / ask / hand off / never | ✅ | | | ✅ `ToolRuleEffect` + natural-language drafting |
+| Read vs write per connector | | ✅ | ✅ (Sentinel) | ✅ `mcp_servers.access` (`readOnlyHint` trusted only on read-access servers) |
+| Auto-review of outward actions | ✅ | | | ✅ economy-model reviewer |
+| Passwords / payments always handed to the user | ✅ | ✅ | ✅ | ✅ sensitive fields → handoff, `hand_off` |
+| Credential vault (model never sees passwords) | ✅ | ✅ | ✅ | ✅ `browser_logins` + `login` action |
+| Watch the agent's computer, take over, hand back | ✅ | | ✅ | ✅ live frames + take over |
+| Teach a task by demonstration → skill | | ✅ | | ✅ teach-a-task, `create_skill` |
+| Connect apps (plugins / connectors) | ✅ 4000+ | ✅ | ✅ | ✅ catalog (incl. Zapier) + MCP OAuth |
+| Slack / Teams / WhatsApp / email presence | ✅ Slack, Teams | | ✅ WhatsApp, email | ✅ Slack, Discord, Telegram, own email address |
+| Learns from feedback | ✅ | | ✅ | ✅ thumbs/comments → agent memory |
+| Pause, reset, anomaly stop | ✅ | | | ✅ pause/resume/reset + anomaly monitor |
+| Control the user's own desktop | ✅ (local access) | | ✅ (Mac) | ✅ Windows `desktop` tool, Ctrl+Alt+Esc kill |
+| Voice conversation | ✅ calls | | ✅ glasses | ✅ hands-free voice call (local STT) |
+| Teams of agents with handoffs | roadmap | ✅ | | ✅ Bot Mode rooms + `message_agent` |
+
+Deliberately not replicated: hosted cloud VMs (Grasberg is local-first; the
+app runs in the tray), smart-glasses / pendant hardware, phone calls and SMS
+(no telephony provider), WhatsApp (requires a verified business webhook).
+
+Safety model in one paragraph: everything an agent does without a human click
+is either read-only (proactive turns), covered by an explicit rule, or — when
+it reaches outside the app — reviewed by a second model that can only ask or
+stop. Secrets (logins, channel tokens, OAuth grants) live encrypted in
+`tool_secrets` and are used by main, never shown to a model. The anomaly
+monitor pauses a bot that loops, and the desktop tool has a global kill
+switch. New inbound network surface: none permanent — the OAuth callback
+listener exists only during a sign-in, on loopback.
+
+Who counts as "the user" for permissions: only a verified owner (a paired
+Slack / Discord / Telegram DM, the owner in a group, the desktop, the paired
+phone). Every email — sender addresses can be forged — and every message from
+another channel member runs under the channel-event policy: "act if
+requested" rules ask, outward calls get auto-review, messaging a teammate
+asks, and the member's text reaches the model wrapped as untrusted data.

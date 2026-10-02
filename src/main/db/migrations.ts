@@ -1342,4 +1342,89 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE remote_devices ADD COLUMN access_granted_at INTEGER`,
     ],
   },
+  {
+    version: 53,
+    name: 'personal-agent',
+    // Personal-agent layer (dots / Grok Bot / Muse parity). On agents: a
+    // standing goal, and a pause switch with an optional reason (null = the
+    // user paused it; text = the anomaly monitor did). New leaf tables, no FKs
+    // (the Bot Mode precedent — cleanup is app-side when a profile goes):
+    // - bot_suggestions: actions a bot PROPOSED during proactive (read-only)
+    //   work; the user accepts (the action runs as a requested turn) or
+    //   dismisses. kind 'handoff' rows are the other direction — an action
+    //   that stays with the user (a rule said "hand off", or the agent hit a
+    //   password/payment step); agent_id is NULL when it came from an
+    //   ordinary conversation.
+    // - bot_projects: the ongoing projects a bot tracks toward its goal.
+    // - message_feedback: thumbs up/down + comment on an assistant message;
+    //   the bot learns from it through its own memory.
+    // - browser_logins: the credential vault's metadata (the password itself
+    //   is encrypted in tool_secrets, scope 'browser_login', and never reaches
+    //   the model).
+    // - bot_channels: Slack / Discord / email presences beyond the v47
+    //   Telegram binding (secrets in tool_secrets, owner 'channel:<id>').
+    // mcp_servers.access is the per-connector read/write switch ('read' keeps
+    // only the server's read-only tools). tool_rules.effect has no CHECK, so
+    // the new rule effects need no rebuild.
+    statements: [
+      `ALTER TABLE agents ADD COLUMN goal TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE agents ADD COLUMN paused INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN paused_reason TEXT`,
+      `CREATE TABLE bot_suggestions (
+         id TEXT PRIMARY KEY,
+         agent_id TEXT,
+         kind TEXT NOT NULL DEFAULT 'suggestion',
+         conversation_id TEXT,
+         title TEXT NOT NULL,
+         action TEXT NOT NULL,
+         reason TEXT NOT NULL DEFAULT '',
+         status TEXT NOT NULL DEFAULT 'open',
+         created_at INTEGER NOT NULL,
+         decided_at INTEGER
+       )`,
+      `CREATE INDEX idx_bot_suggestions_agent ON bot_suggestions(agent_id, status, created_at DESC)`,
+      `CREATE TABLE bot_projects (
+         id TEXT PRIMARY KEY,
+         agent_id TEXT NOT NULL,
+         title TEXT NOT NULL,
+         status TEXT NOT NULL DEFAULT 'active',
+         summary TEXT NOT NULL DEFAULT '',
+         next_step TEXT NOT NULL DEFAULT '',
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_bot_projects_agent ON bot_projects(agent_id, updated_at DESC)`,
+      `CREATE TABLE message_feedback (
+         message_id TEXT PRIMARY KEY,
+         conversation_id TEXT NOT NULL,
+         agent_id TEXT,
+         rating INTEGER NOT NULL,
+         comment TEXT NOT NULL DEFAULT '',
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_message_feedback_agent ON message_feedback(agent_id, created_at DESC)`,
+      `CREATE TABLE browser_logins (
+         id TEXT PRIMARY KEY,
+         origin TEXT NOT NULL,
+         username TEXT NOT NULL,
+         label TEXT NOT NULL DEFAULT '',
+         agent_id TEXT,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_browser_logins_origin ON browser_logins(origin)`,
+      `CREATE TABLE bot_channels (
+         id TEXT PRIMARY KEY,
+         agent_id TEXT NOT NULL,
+         kind TEXT NOT NULL,
+         enabled INTEGER NOT NULL DEFAULT 1,
+         config_json TEXT NOT NULL DEFAULT '{}',
+         state_json TEXT NOT NULL DEFAULT '{}',
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX idx_bot_channels_agent ON bot_channels(agent_id)`,
+      `ALTER TABLE mcp_servers ADD COLUMN access TEXT NOT NULL DEFAULT 'write'`,
+    ],
+  },
 ]

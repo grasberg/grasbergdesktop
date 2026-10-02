@@ -118,6 +118,11 @@ export class ScheduledTaskScheduler {
     if (!opts.manual && (!task.enabled || task.nextRunAt === null || task.nextRunAt > launchNow)) {
       return
     }
+    // A paused bot's routines wait (v53): the slot stays due, so the missed
+    // occurrence runs once — flagged catch-up — after the bot is resumed.
+    if (!opts.manual && task.agentId && this.deps.db.agents.getById(task.agentId)?.paused) {
+      return
+    }
     this.running.add(task.id)
     const startedAt = launchNow
     // The slot was already in the past when we got to it: the app was

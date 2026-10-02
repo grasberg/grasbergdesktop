@@ -1208,6 +1208,25 @@ export interface AppSettings {
   appLockHash: AppLockHash | null
   /** Minutes of system idle before auto-lock; null = never auto-lock. */
   appLockIdleMinutes: number | null
+  /**
+   * Personal agent (v53): an economy-model reviewer checks OUTWARD tool calls
+   * (send, post, push, submit) that would otherwise run without a human
+   * click. 'autonomous' (default) = only in turns nobody started in the
+   * moment (heartbeats, events, bot-to-bot, scheduled runs); 'always' = every
+   * such call; 'off' = never. It can only add a question or a stop.
+   */
+  autoReview: 'off' | 'autonomous' | 'always'
+  /**
+   * Personal agent (v53): pause a bot automatically when it misbehaves — many
+   * refused calls in a row, the same call repeated, or a burst of tool calls.
+   */
+  anomalyMonitorEnabled: boolean
+  /**
+   * Personal agent (v53): offer the `desktop` tool — screenshots and mouse /
+   * keyboard input on the user's REAL desktop (Windows). Off by default; every
+   * call still asks unless a rule says otherwise.
+   */
+  desktopControlEnabled: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -1279,6 +1298,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   quickAssistantShortcut: 'CommandOrControl+Shift+Space',
   appLockHash: null,
   appLockIdleMinutes: null,
+  autoReview: 'autonomous',
+  anomalyMonitorEnabled: true,
+  desktopControlEnabled: false,
 }
 
 /**
@@ -1304,6 +1326,11 @@ export const SECURITY_SENSITIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
   'remoteApprovalsEnabled',
   // An imported file must never register the app as a login item.
   'launchAtLogin',
+  // Personal agent (v53): importing these could switch off a safeguard or
+  // hand the model the real desktop.
+  'autoReview',
+  'anomalyMonitorEnabled',
+  'desktopControlEnabled',
   // …and these would open a local port and hand over its key.
   'workflowWebhookEnabled',
   'workflowWebhookPort',
@@ -1799,7 +1826,20 @@ export type ToolApprovalScope = 'once' | 'conversation' | 'always'
  * never adds capability — 'deny', plan mode, the read-only sandbox and
  * noStandingApproval tools all still refuse first.
  */
-export type ToolRuleEffect = 'allow' | 'require_approval'
+/**
+ * What a standing rule does with a matching call (v31; v53 adds the dots
+ * behaviours). Strongest first: 'block' refuses outright; 'handoff' refuses
+ * and hands the step to the user ("you do this one"); 'require_approval'
+ * asks; 'allow_if_requested' runs without asking only in a turn the USER
+ * started (asks in heartbeats, events and bot-to-bot turns); 'allow' runs
+ * without asking.
+ */
+export type ToolRuleEffect =
+  | 'allow'
+  | 'allow_if_requested'
+  | 'require_approval'
+  | 'handoff'
+  | 'block'
 
 /** Where a rule applies. 'conversation'/'project' need a matching scopeId. */
 export type ToolRuleScope = 'global' | 'conversation' | 'project'
@@ -1840,7 +1880,16 @@ export interface ToolRuleInput {
  * - 'blocked': policy refused before anyone was asked (deny, plan mode, the
  *   read-only sandbox, a disabled tool).
  */
-export type ActivityDecision = 'auto' | 'rule' | 'approved' | 'declined' | 'blocked'
+export type ActivityDecision =
+  | 'auto'
+  | 'rule'
+  | 'approved'
+  | 'declined'
+  | 'blocked'
+  /** v53: refused and handed to the user to do themselves. */
+  | 'handoff'
+  /** v53: the auto-reviewer stopped it (or sent it to the user for approval). */
+  | 'reviewed'
 
 /**
  * One tool call, as recorded for review (migration v34). This is the answer to
@@ -1914,7 +1963,8 @@ export interface UserQuestionRequest {
 // ---------------------------------------------------------------------------
 
 export type McpTransport = 'stdio' | 'http'
-export type McpConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+/** 'needs_auth' (v53): the connector wants an OAuth sign-in (Settings → Sign in). */
+export type McpConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error' | 'needs_auth'
 
 /** A configured MCP server (secret values are never included). */
 export interface McpServerConfig {
@@ -1931,10 +1981,117 @@ export interface McpServerConfig {
   url: string | null
   headers: Record<string, string>
   enabled: boolean
+  /**
+   * Connector access (v53, Sentinel-style): 'read' offers ONLY the tools the
+   * server marks read-only (MCP readOnlyHint); 'write' offers all of them.
+   */
+  access: McpAccess
   /** Names of secret env vars / headers (values never returned). */
   secretNames: string[]
   createdAt: number
   updatedAt: number
+}
+
+export type McpAccess = 'read' | 'write'
+
+/**
+ * A saved login in the credential vault (v53). The password is encrypted
+ * main-side and never returned — not to the renderer, not to the model.
+ */
+export interface BrowserLogin {
+  id: string
+  /** https://example.com (scheme + host + port). */
+  origin: string
+  username: string
+  label: string
+  /** Null = any agent may use it; else only this bot. */
+  agentId: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BrowserLoginInput {
+  origin: string
+  username: string
+  /** Travels to main once, encrypted immediately. */
+  password: string
+  label?: string
+  agentId?: string | null
+}
+
+/** A bot presence on Slack, Discord or email (v53; Telegram is the v47 binding). */
+export type BotChannelKind = 'slack' | 'discord' | 'email'
+
+export interface BotChannel {
+  id: string
+  agentId: string
+  kind: BotChannelKind
+  enabled: boolean
+  /**
+   * Non-secret settings. slack/discord: { allowedChannels: string[],
+   * mentionOnly: boolean }. email: { address, displayName, imapHost,
+   * imapPort, smtpHost, smtpPort, smtpSecurity, username, allowedSenders,
+   * pollMinutes }.
+   */
+  config: Record<string, unknown>
+  /** Names of the stored secrets (values never returned). */
+  secretNames: string[]
+  /** Slack/Discord: an owner is paired (email: always true). */
+  paired: boolean
+  /** One-time code to DM the bot from your account to pair, while unpaired. */
+  pairingCode: string | null
+  status: 'stopped' | 'connecting' | 'running' | 'error'
+  statusDetail: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BotChannelInput {
+  agentId: string
+  kind: BotChannelKind
+  enabled?: boolean
+  config: Record<string, unknown>
+  /** slack: botToken + appToken; discord: botToken; email: password. Encrypted at once. */
+  secrets?: Record<string, string>
+}
+
+export interface BotChannelPatch {
+  enabled?: boolean
+  config?: Record<string, unknown>
+  secrets?: Record<string, string>
+}
+
+/** One recorded step of a teach-a-task demonstration (v53). */
+export interface TeachStep {
+  kind: 'navigate' | 'click' | 'input' | 'submit'
+  url: string
+  selector: string
+  label: string
+  tag: string
+  /** Typed value; null for secrets (never recorded) and non-inputs. */
+  value: string | null
+  /** A password / one-time code / card field — the value was NOT recorded. */
+  secret: boolean
+  at: number
+  /** A page load caused by the previous click/submit. */
+  followsAction?: boolean
+}
+
+/** A demonstration being recorded right now (v53). */
+export interface TeachStatus {
+  agentId: string | null
+  startedAt: number
+}
+
+/** One frame of an agent's browser for the live view (v53). */
+export interface BrowserFrame {
+  /** The browser scope: null = the user's shared session, else the bot id. */
+  agentId: string | null
+  open: boolean
+  url: string
+  title: string
+  userControl: boolean
+  dataUrl: string | null
 }
 
 export interface McpServerInput {
@@ -1948,6 +2105,7 @@ export interface McpServerInput {
   /** Secret env/headers to store encrypted (name -> value), never returned. */
   setSecrets?: Record<string, string>
   enabled?: boolean
+  access?: McpAccess
 }
 
 export interface McpServerPatch {
@@ -1960,6 +2118,7 @@ export interface McpServerPatch {
   setSecrets?: Record<string, string>
   deleteSecrets?: string[]
   enabled?: boolean
+  access?: McpAccess
 }
 
 /** A tool discovered from a connected MCP server. */
@@ -1969,6 +2128,8 @@ export interface McpDiscoveredTool {
   /** The tool's original (un-namespaced) name. */
   name: string
   description: string
+  /** The server marked it read-only (readOnlyHint) — v53. */
+  readOnly?: boolean
 }
 
 /** Live connection state for one server (for the Settings UI). */
@@ -1978,6 +2139,8 @@ export interface McpServerRuntime {
   error: string | null
   toolCount: number
   tools: McpDiscoveredTool[]
+  /** v53: an OAuth grant is stored for this connector (sign-out offered). */
+  signedIn?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -2080,8 +2243,90 @@ export interface AgentProfile {
   webhookEnabled: boolean
   /** Events → bot (v50): a watched folder wakes this bot (same shape as a workflow watch). */
   watch: WorkflowWatchConfig | null
+  /**
+   * Personal agent (v53): the standing responsibility the bot works toward
+   * ("keep my inbox at zero", "watch competitor pricing"). Rides along in its
+   * system prompt and steers proactive work. '' = none.
+   */
+  goal: string
+  /**
+   * Paused (v53): no heartbeats, no bot-to-bot or event deliveries (they stay
+   * queued), no routines and no channel turns until resumed. The user can
+   * still talk to it directly.
+   */
+  paused: boolean
+  /** Why it is paused: null = the user paused it; text = the anomaly monitor's reason. */
+  pausedReason: string | null
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * Why the current turn in a bot chat is running (v53). 'user' = the user (or
+ * an approved suggestion) asked; 'event' = a webhook/watched folder woke it;
+ * 'proactive' = a heartbeat; 'agent' = another bot's message_agent delivery.
+ * Rules with the 'allow_if_requested' effect only wave through 'user' turns.
+ */
+export type BotTurnOrigin = 'user' | 'event' | 'proactive' | 'agent'
+
+/** Where one of a bot's projects stands (v53). */
+export type BotProjectStatus = 'active' | 'waiting' | 'blocked' | 'done'
+
+/**
+ * One ongoing piece of work a personal agent tracks toward its goal (v53).
+ * The bot keeps it current via update_project; the user can edit or close it.
+ */
+export interface BotProject {
+  id: string
+  agentId: string
+  title: string
+  status: BotProjectStatus
+  summary: string
+  nextStep: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** Thumbs up/down (+ comment) on an assistant reply (v53). */
+export interface MessageFeedback {
+  messageId: string
+  conversationId: string
+  agentId: string | null
+  rating: 1 | -1
+  comment: string
+  createdAt: number
+}
+
+/** A bot's proposed action awaiting the user's decision (v53). */
+export type BotSuggestionStatus = 'open' | 'accepted' | 'dismissed'
+
+/**
+ * 'suggestion' = the agent proposes, the user approves and the agent acts;
+ * 'handoff' = the step stays with the user (passwords, payments, a "hand off"
+ * rule) — accepting means "I did it".
+ */
+export type BotSuggestionKind = 'suggestion' | 'handoff'
+
+/**
+ * An action a bot proposed instead of taking (v53, dots/Muse-style): during
+ * proactive read-only work it may not act, so it calls suggest_action and the
+ * user decides. Accepting runs `action` as a user-requested turn in the bot's
+ * chat — with the normal approval rules.
+ */
+export interface BotSuggestion {
+  id: string
+  /** Null for a handoff raised in an ordinary (non-bot) conversation. */
+  agentId: string | null
+  kind: BotSuggestionKind
+  conversationId: string | null
+  title: string
+  /** The instruction the bot runs when the user accepts. */
+  action: string
+  /** Why the bot thinks this is worth doing. */
+  reason: string
+  status: BotSuggestionStatus
+  createdAt: number
+  decidedAt: number | null
 }
 
 /** Bot avatar: optional local profile image, with emoji/initials and color as fallback. */
@@ -2099,6 +2344,13 @@ export interface BotHeartbeat {
   deliver: 'chat' | 'notify'
   /** Extra standing instruction appended to the heartbeat prompt. */
   prompt?: string | null
+  /**
+   * What a heartbeat turn may do (v53, dots-style). 'read-only' (the default
+   * when absent) = proactive work only looks: mutating and outward tools are
+   * refused, and anything worth doing becomes a suggest_action proposal the
+   * user approves. 'act' = the full toolset under the normal approval rules.
+   */
+  posture?: 'read-only' | 'act'
 }
 
 /** Bot canonical-chat auto-compact policy (v47). */
@@ -2126,6 +2378,7 @@ export interface AgentProfileInput {
   messageAllow?: string[] | null
   webhookEnabled?: boolean
   watch?: WorkflowWatchConfig | null
+  goal?: string
 }
 
 export type AgentProfilePatch = Partial<AgentProfileInput>
@@ -2221,6 +2474,8 @@ export interface BotRosterItem {
   inFlight: boolean
   /** Attention (v49): needs_you > unread > working > idle. */
   attention: BotAttention
+  /** Proposed actions awaiting the user's decision (v53). */
+  openSuggestions: number
 }
 
 /** One group-room row of the Bots pane roster. */

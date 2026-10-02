@@ -26,6 +26,7 @@
     "verify": "npm test && npm run build && npm run bundle:check && npm run smoke",
     "package": "npm run build && electron-builder",
     "package:win": "npm run build && electron-builder --win",
+    "package:win:signed": "npm run build && electron-builder --win --config electron-builder.signed.yml",
     "package:mac": "npm run build && electron-builder --mac",
     "package:linux": "npm run build && electron-builder --linux"
   },

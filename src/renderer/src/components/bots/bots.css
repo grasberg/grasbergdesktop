@@ -388,3 +388,23 @@
 .bots-row.has-attention .bots-row-name {
   font-weight: 700;
 }
+
+/* v53 personal agent: roster chips */
+.bots-paused-chip,
+.bots-suggestion-chip {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.bots-paused-chip {
+  background: color-mix(in srgb, var(--warning, #c98a00) 18%, var(--bg-panel));
+  color: var(--warning, #c98a00);
+}
+
+.bots-suggestion-chip {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
+  color: var(--accent);
+}

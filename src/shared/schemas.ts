@@ -247,7 +247,7 @@ export const notebookDocPatchSchema = z
 export const toolRuleInputSchema = z
   .object({
     toolId: z.string().trim().min(1).max(200),
-    effect: z.enum(['allow', 'require_approval']),
+    effect: z.enum(['allow', 'allow_if_requested', 'require_approval', 'handoff', 'block']),
     scope: z.enum(['global', 'conversation', 'project']),
     scopeId: z.string().trim().min(1).max(200).nullable().optional(),
     pattern: z.string().trim().max(500).nullable().optional(),
@@ -272,6 +272,7 @@ export const mcpServerInputSchema = z
     headers: mcpMapSchema.optional(),
     setSecrets: mcpMapSchema.optional(),
     enabled: z.boolean().optional(),
+    access: z.enum(['read', 'write']).optional(),
   })
   .strict()
 
@@ -286,6 +287,7 @@ export const mcpServerPatchSchema = z
     setSecrets: mcpMapSchema.optional(),
     deleteSecrets: z.array(z.string().max(200)).max(50).optional(),
     enabled: z.boolean().optional(),
+    access: z.enum(['read', 'write']).optional(),
   })
   .strict()
 
@@ -465,6 +467,9 @@ export const settingsPatchSchema = z
     researchWorkerModelId: z.string().max(200).nullable(),
     economyProviderId: z.string().nullable(),
     economyModelId: z.string().max(200).nullable(),
+    autoReview: z.enum(['off', 'autonomous', 'always']),
+    anomalyMonitorEnabled: z.boolean(),
+    desktopControlEnabled: z.boolean(),
     researchDefaultDepth: researchDepthSchema,
     defaultImageProviderId: z.string().nullable(),
     defaultImageModelId: z.string().max(200).nullable(),

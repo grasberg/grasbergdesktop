@@ -25,6 +25,7 @@ const UsageTab = lazy(() => import('./UsageTab'))
 const ActivityTab = lazy(() => import('./ActivityTab'))
 const VoiceTab = lazy(() => import('./VoiceTab'))
 const QuickAssistantTab = lazy(() => import('./QuickAssistantTab'))
+const LoginsTab = lazy(() => import('./LoginsTab'))
 
 const TABS = [
   { id: 'providers', label: 'Providers' },
@@ -34,7 +35,8 @@ const TABS = [
   { id: 'agent-platform', label: 'Agent platform' },
   { id: 'knowledge', label: 'Knowledge' },
   { id: 'tools', label: 'Tools' },
-  { id: 'mcp', label: 'MCP' },
+  { id: 'mcp', label: 'Apps & MCP' },
+  { id: 'logins', label: 'Logins' },
   { id: 'bridges', label: 'Bridges' },
   { id: 'prompts', label: 'Prompts' },
   { id: 'quick', label: 'Quick assistant' },
@@ -51,7 +53,7 @@ const TABS = [
 const GROUPS = [
   { label: 'Models & chat', tabs: ['providers', 'defaults', 'moa', 'voice', 'quick'], keywords: 'api key oauth chatgpt deepseek openai z.ai model speech microphone' },
   { label: 'Bots & libraries', tabs: ['agents', 'knowledge', 'prompts', 'skills', 'memory'], keywords: 'bot persona document embedding rag prompt instructions' },
-  { label: 'Tools & connections', tabs: ['tools', 'mcp', 'bridges', 'agent-platform'], keywords: 'permissions approvals server remote phone telegram mobile tunnel integrations' },
+  { label: 'Tools & connections', tabs: ['tools', 'mcp', 'logins', 'bridges', 'agent-platform'], keywords: 'permissions approvals server remote phone telegram mobile tunnel integrations connectors passwords' },
   { label: 'App & data', tabs: ['appearance', 'activity', 'usage', 'privacy', 'about'], keywords: 'theme fonts history costs budget backup restore import export lock version updates' },
 ]
 
@@ -60,7 +62,7 @@ const KEYWORDS: Record<string, string> = {
   moa: 'mixture advisors aggregator', voice: 'speech microphone whisper transcription dictation', quick: 'shortcut assistant hotkey',
   agents: 'bots persona avatar emoji', knowledge: 'documents embedding rag pdf import', prompts: 'templates prompt instructions',
   skills: 'instructions plugins import', memory: 'memories facts context', tools: 'permissions approvals shell browser',
-  mcp: 'server integrations tools', bridges: 'remote phone telegram mobile tunnel webhook', 'agent-platform': 'runs schedule triggers',
+  mcp: 'server integrations tools connectors apps gmail notion slack zapier oauth sign in', logins: 'passwords vault credentials sign in sites', bridges: 'remote phone telegram mobile tunnel webhook', 'agent-platform': 'runs schedule triggers',
   appearance: 'theme font language colors', activity: 'history tools audit', usage: 'cost budget tokens', privacy: 'backup restore import export lock private deletion', about: 'version updates license',
 }
 
@@ -167,6 +169,7 @@ export default function SettingsPanel() {
               {tab === 'knowledge' ? <KnowledgeTab /> : null}
               {tab === 'tools' ? <ToolsTab /> : null}
               {tab === 'mcp' ? <McpServersTab /> : null}
+              {tab === 'logins' ? <LoginsTab /> : null}
               {tab === 'bridges' ? <BridgesTab /> : null}
               {tab === 'prompts' ? <PromptsTab /> : null}
               {tab === 'quick' ? isRemoteClient() ? <p className="callout">Quick assistant opens from a keyboard shortcut on the desktop. Configure that shortcut in desktop Settings → Quick assistant.</p> : <QuickAssistantTab /> : null}

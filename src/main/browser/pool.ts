@@ -32,6 +32,7 @@ export class BrowserSessionPool {
     if (this.bots.size >= MAX_BOT_SESSIONS) {
       let oldest: [string, { session: BrowserSession; lastUsed: number }] | null = null
       for (const entry of this.bots) {
+        if (entry[1].session.isUserInControl()) continue // never yank it from under the user
         if (!oldest || entry[1].lastUsed < oldest[1].lastUsed) oldest = entry
       }
       if (oldest) {
@@ -41,8 +42,28 @@ export class BrowserSessionPool {
     }
     const partition = `grasberg-browser-${scope.replace(/[^A-Za-z0-9-]/g, '-')}`
     const session = new BrowserSession(partition)
+    this.configure?.(scope, session)
     this.bots.set(scope, { session, lastUsed: ++this.tick })
     return session
+  }
+
+  /**
+   * Hook for main (v53): wires a new session's control-change push and window
+   * label. Applied to the shared session at once and to each bot session as
+   * it is created. LRU eviction skips a session the user is driving.
+   */
+  configure: ((scope: string, session: BrowserSession) => void) | null = null
+
+  setConfigure(fn: (scope: string, session: BrowserSession) => void): void {
+    this.configure = fn
+    fn('default', this.shared)
+    for (const [scope, entry] of this.bots) fn(scope, entry.session)
+  }
+
+  /** The session of a scope only if it already exists (live view never creates one). */
+  peek(scope: string): BrowserSession | null {
+    if (scope === 'default') return this.shared
+    return this.bots.get(scope)?.session ?? null
   }
 
   /** Live bot scopes, most recently used last (tests + diagnostics). */

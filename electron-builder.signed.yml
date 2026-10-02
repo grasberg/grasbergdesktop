@@ -1,0 +1,13 @@
+# Reuse the Azure Artifact Signing workflow used by Grasberg Office.
+extends: ./electron-builder.yml
+forceCodeSigning: true
+
+directories:
+  output: release/signed
+
+win:
+  signtoolOptions:
+    sign: ./scripts/sign-windows.cjs
+    signingHashAlgorithms:
+      - sha256
+    publisherName: Neonex AB

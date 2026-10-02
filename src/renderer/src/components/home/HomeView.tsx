@@ -15,6 +15,7 @@ import BriefCard from './BriefCard'
 import GettingStartedCard from './GettingStartedCard'
 import ScheduledCard from './ScheduledCard'
 import InboxCard from './InboxCard'
+import NeedsYouCard from './NeedsYouCard'
 import NotesCard from './NotesCard'
 import RecentRunsCard from './RecentRunsCard'
 import RecentWorkCard from './RecentWorkCard'
@@ -80,6 +81,7 @@ export default function HomeView(): React.JSX.Element {
         </span>
       </header>
       <div className="home-grid">
+        <NeedsYouCard />
         <QuickActionsCard />
         <BriefCard />
         <GettingStartedCard recent={recent} />

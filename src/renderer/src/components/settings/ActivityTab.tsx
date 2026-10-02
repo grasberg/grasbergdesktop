@@ -23,6 +23,8 @@ const DECISION_LABEL: Record<ActivityDecision, string> = {
   approved: 'You approved it',
   declined: 'Declined',
   blocked: 'Blocked',
+  handoff: 'Handed to you',
+  reviewed: 'Stopped by review',
 }
 
 const FILTERS: ReadonlyArray<{ value: ActivityDecision | 'all'; label: string }> = [
@@ -32,6 +34,8 @@ const FILTERS: ReadonlyArray<{ value: ActivityDecision | 'all'; label: string }>
   { value: 'rule', label: 'By a rule' },
   { value: 'declined', label: 'Declined' },
   { value: 'blocked', label: 'Blocked' },
+  { value: 'handoff', label: 'Handed to you' },
+  { value: 'reviewed', label: 'Stopped by review' },
 ]
 
 const PAGE_SIZE = 100

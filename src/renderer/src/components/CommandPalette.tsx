@@ -194,6 +194,30 @@ export default function CommandPalette() {
           section: 'Actions',
           label: 'Export conversation as JSON',
           run: () => exportConversation('json'),
+        },
+        {
+          id: 'act-save-skill',
+          section: 'Actions',
+          label: 'Save this conversation as a skill',
+          hint: 'Turns how the task was done into reusable instructions for any agent',
+          run: () => {
+            close()
+            const title = summaries.find((c) => c.id === activeId)?.title ?? 'learned-skill'
+            const name =
+              title
+                .toLowerCase()
+                .replace(/[^a-z0-9åäö]+/gi, '-')
+                .replace(/^-+|-+$/g, '')
+                .slice(0, 60) || 'learned-skill'
+            toast('Writing the skill…')
+            void window.uld.teach
+              .fromConversation(activeId, name, title)
+              .then((res) => {
+                if (!res.ok) toast(res.error.message, 'error')
+                else toast(`Skill "${res.data.name}" saved — edit it under Settings → Skills.`, 'success')
+              })
+              .catch(catchToast)
+          },
         }
       )
     }
